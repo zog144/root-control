@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=80,<83"]
+build-backend = "setuptools.build_meta"
+
+# Component-development metadata only. Public Python publication is the
+# aggregate "zog" distribution assembled by release-build.
+[project]
+name = "root-control"
+version = "0.1.0"
+description = "Privileged local execution and systemd backend for Zog"
+requires-python = ">=3.11"
+dependencies = ["box-control==0.1.0", "image-build==0.2.0.dev5", "dbus-next==0.2.3"]
+license = "BSD-3-Clause OR GPL-3.0-only"
+license-files = ["LICENSE", "LICENSES/*.txt", "THIRD-PARTY-NOTICES.md"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+root-control = "zog.root_control.daemon:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["zog.root_control*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"zog.root_control" = ["native/*.c"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]

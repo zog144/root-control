@@ -1,0 +1,100 @@
+name: Public source verification
+
+on:
+  push:
+    branches: [main, unstable]
+  pull_request:
+    branches: [main, unstable]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Source and public companions (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/companions/zog/src
+    steps:
+      - name: Checkout root-control
+        uses: actions/checkout@v4
+      - name: Checkout reviewed public box-control
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/box-control
+          ref: b513a9bde79135c7569adc7cadb4d45a163c7841
+          path: companions/box-control
+      - name: Checkout public Zog aggregate for image-build
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/zog
+          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
+          path: companions/zog
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify pins and public source boundary
+        run: |
+          test "$(git -C companions/box-control rev-parse HEAD)" = "b513a9bde79135c7569adc7cadb4d45a163c7841"
+          test "$(git -C companions/zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
+          test ! -e COPYRIGHT
+          test ! -e version-share-handoff.json
+          test -f LICENSE
+          test -f LICENSES/BSD-3-Clause.txt
+          test -f LICENSES/GPL-3.0-only.txt
+      - name: Install test dependencies and root-control
+        run: |
+          python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10'
+          python -m pip install --no-deps .
+      - name: Verify namespace and compile
+        run: |
+          python -m compileall -q src tests acceptance
+          python -c 'import zog.root_control as r; assert r.__version__ == "0.1.0"'
+      - name: Run synthetic and mocked privileged-boundary tests
+        run: python -m pytest -q tests
+
+  artifacts:
+    name: Wheel and source-distribution audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Verify package and licensing
+        run: |
+          python - <<'PY'
+          import glob, tarfile, zipfile
+          whls=glob.glob('dist/*.whl'); srcs=glob.glob('dist/*.tar.gz')
+          assert len(whls)==len(srcs)==1
+          with zipfile.ZipFile(whls[0]) as z:
+              names=set(z.namelist())
+              assert 'zog/root_control/__init__.py' in names
+              assert 'zog/root_control/daemon.py' in names
+              assert 'zog/root_control/native/journal-wait.c' in names
+              assert 'zog/__init__.py' not in names
+              assert not any(x.startswith('zog/box_control/') for x in names)
+              assert any(x.endswith('/LICENSE') for x in names)
+              entry=next(x for x in names if x.endswith('.dist-info/entry_points.txt'))
+              assert 'root-control = zog.root_control.daemon:main' in z.read(entry).decode()
+          with tarfile.open(srcs[0], 'r:gz') as z:
+              names=z.getnames()
+              prefix=names[0].split('/', 1)[0]
+              paths={x[len(prefix)+1:] for x in names if x.startswith(prefix+'/')}
+              for p in ('LICENSE','LICENSES/BSD-3-Clause.txt',
+                        'LICENSES/GPL-3.0-only.txt','THIRD-PARTY-NOTICES.md',
+                        'README.md','tests/test_namespace_migration.py',
+                        'src/zog/root_control/native/journal-wait.c'):
+                  assert p in paths,p
+              assert 'COPYRIGHT' not in paths
+              assert 'version-share-handoff.json' not in paths
+          PY

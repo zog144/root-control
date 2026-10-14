@@ -1,0 +1,25 @@
+{
+  "schema": 2,
+  "program": "root-control",
+  "python_package": "zog.root_control",
+  "version": "0.1.0",
+  "scripts": {
+    "root-control": "zog.root_control.daemon:main"
+  },
+  "component_dependencies": [
+    "box-control",
+    "image-build"
+  ],
+  "external_dependencies": [
+    "dbus-next==0.2.3"
+  ],
+  "package_data": [
+    "native/*.c"
+  ],
+  "license_notice_paths": [
+    "LICENSE",
+    "LICENSES/BSD-3-Clause.txt",
+    "LICENSES/GPL-3.0-only.txt",
+    "THIRD-PARTY-NOTICES.md"
+  ]
+}

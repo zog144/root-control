@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include THIRD-PARTY-NOTICES.md
+recursive-include LICENSES *.txt
+recursive-include docs *.md
+recursive-include tests *.py
+recursive-include acceptance *.py
+recursive-include src/zog/root_control/native *.c

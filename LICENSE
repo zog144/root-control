@@ -1,0 +1,11 @@
+Copyright (c) 2026 Alex Black.
+
+Original Zog code, documentation and artwork in this public root-control source repository are
+licensed at your option under BSD-3-Clause OR GPL-3.0-only.
+Alex Black is the copyright holder's pseudonym.
+
+See LICENSES/BSD-3-Clause.txt and LICENSES/GPL-3.0-only.txt for the complete terms.
+Third-party material retains its own terms; see THIRD-PARTY-NOTICES.md.
+The public source grant covers reviewed first-party files in this repository;
+it does not relicense separately obtained private history, operational evidence
+or third-party material.
