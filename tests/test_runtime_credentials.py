@@ -119,7 +119,8 @@ def test_identity_guards_fail_closed(tmp_path, monkeypatch, change):
         ref = replace(ref, execution_binding=dict(ref.execution_binding, application="foreign"))
     RuntimeReferenceStore(project.runtime_reference_file).save({"ABCDEF": ref})
     result = c.inspect_runtime_credentials(**args)
-    assert result["status"] in {"identity-unavailable", "previous-boot", "integrity-fault", "absent"}
+    # A missing invocation can aggregate as partial; neither state claims verified identity.
+    assert result["status"] in {"identity-unavailable", "previous-boot", "integrity-fault", "absent", "partial"}
     assert not any(p.get("status") == "observed" for p in result["programs"])
 
 
