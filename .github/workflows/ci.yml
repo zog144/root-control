@@ -19,7 +19,7 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13"]
     env:
-      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ runner.temp }}/zog-public-dependencies
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
     steps:
       - name: Checkout root-control
         uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
           import os
           from pathlib import Path
           src=Path("companions/zog/src/zog").resolve()
-          dest=Path(os.environ["RUNNER_TEMP"])/"zog-public-dependencies"/"zog"
+          dest=Path(os.environ["GITHUB_WORKSPACE"])/".ci-deps"/"zog"
           dest.mkdir(parents=True,exist_ok=True)
           for path in src.iterdir():
               if path.name in {"__init__.py","__pycache__","root_control","box_control"}:
