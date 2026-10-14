@@ -8,6 +8,10 @@ import pytest
 from zog.root_control.systemd import BusctlSystemdBackend, SystemdBackendError
 from zog.box_control.operations import OperationStore
 from zog.box_control.requests import ApplicationRequestStore
+from zog.box_control.model import ApplicationRuntimeState
+from zog.box_control.runtime.reference import (
+    ApplicationRuntimeReference, ProgramRuntimeReference, RuntimeReferenceStore,
+)
 
 
 def evidence(tmp_path, monkeypatch):
@@ -46,6 +50,17 @@ def evidence(tmp_path, monkeypatch):
             "storage_id": expected["persistent_storage_id"],
         },
     }
+    ref = ApplicationRuntimeReference(
+        runtime_id="ABC123", application="certify-manage",
+        instance_id="certify-manage", generation="image",
+        state=ApplicationRuntimeState.STARTING,
+        request_id="REQ1", execution_binding=dict(expected["execution_binding"]),
+        programs=(ProgramRuntimeReference(
+            program="renew", unit_name=expected["unit_name"],
+            command=tuple(expected["command"]),
+        ),),
+    )
+    record["references"] = RuntimeReferenceStore.encode({"ABC123": ref})
     request = SimpleNamespace(
         operation=SimpleNamespace(value="launch"), application="certify-manage",
         program_name="renew",
@@ -107,3 +122,15 @@ def test_certificate_lifecycle_requires_explicit_selector_even_if_transport_is_f
 def test_legacy_multiservice_without_selector_remains_compatible(tmp_path):
     BusctlSystemdBackend._validate_program_selection(
         tmp_path, dict(application_name="station-access", program_name="web"))
+
+
+
+def test_privileged_rejects_selected_runtime_unit_or_command_drift(tmp_path, monkeypatch):
+    project, definition, record, _request = evidence(tmp_path, monkeypatch)
+    raw = dict(record["references"])
+    altered = RuntimeReferenceStore.decode(raw)["ABC123"]
+    from dataclasses import replace
+    changed = replace(altered, programs=(replace(altered.programs[0], unit_name="foreign.service"),))
+    record["references"] = RuntimeReferenceStore.encode({"ABC123": changed})
+    with pytest.raises(SystemdBackendError, match="selected"):
+        BusctlSystemdBackend._validate_program_selection(project, definition)
