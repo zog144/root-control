@@ -769,6 +769,17 @@ class BusctlSystemdBackend:
             if (definition['unit_name'] not in record['attempted_units']
                     or len(record['attempted_units']) != 1):
                 raise ValueError('selected-program start intent not recorded exactly once')
+            from zog.box_control.runtime.reference import RuntimeReferenceStore
+            references = RuntimeReferenceStore.decode(record['references'])
+            ref = references.get(definition['runtime_id'])
+            if (ref is None or ref.request_id != record['request_id']
+                    or ref.application != application
+                    or ref.execution_binding != definition['execution_binding']
+                    or len(ref.programs) != 1
+                    or ref.programs[0].program != selected
+                    or ref.programs[0].unit_name != definition['unit_name']
+                    or list(ref.programs[0].command) != list(definition['command'])):
+                raise ValueError('selected-program runtime reference disagrees with intent')
             requests = ApplicationRequestStore(
                 project.application_request_dir, project.application_request_result_dir
             )
