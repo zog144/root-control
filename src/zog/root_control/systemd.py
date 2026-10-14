@@ -986,11 +986,26 @@ class BusctlSystemdBackend:
             try:
                 path.mkdir(mode=0o700)
             except FileExistsError:
-                info = path.stat()
-                if not path.is_dir() or (info.st_uid, info.st_gid) != (uid, gid):
-                    raise SystemdBackendError('existing persistent directory ownership disagrees; explicit repair required')
+                info = path.lstat()
+                if (not stat.S_ISDIR(info.st_mode)
+                        or (info.st_uid, info.st_gid) != (uid, gid)):
+                    raise SystemdBackendError(
+                        'existing persistent directory ownership disagrees; explicit repair required'
+                    )
+                if grant is not None and stat.S_IMODE(info.st_mode) != 0o700:
+                    # Never auto-repair the permissions of an existing
+                    # certificate/account/key storage directory on launch.
+                    raise SystemdBackendError(
+                        'managed persistent directory mode drift; explicit owner review required'
+                    )
             else:
                 os.chown(path, uid, gid)
+                if grant is not None:
+                    # Creation respects arbitrary root-control UMask. Newly
+                    # issued grant storage must have exact private DAC mode.
+                    os.chmod(path, 0o700)
+            if grant is not None and stat.S_IMODE(path.lstat().st_mode) != 0o700:
+                raise SystemdBackendError('managed persistent directory is not private 0700')
             synchronize_directory(path)
             synchronize_directory(base)
 
