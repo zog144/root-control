@@ -19,7 +19,7 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13"]
     env:
-      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/companions/zog/src
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ runner.temp }}/zog-public-dependencies
     steps:
       - name: Checkout root-control
         uses: actions/checkout@v4
@@ -47,6 +47,28 @@ jobs:
           test -f LICENSE
           test -f LICENSES/BSD-3-Clause.txt
           test -f LICENSES/GPL-3.0-only.txt
+      - name: Build public aggregate namespace overlay
+        run: |
+          # The older aggregate ships a regular zog/__init__.py. Importing its
+          # src wholesale shadows current namespace component checkouts.
+          # Link its separately reviewed support modules without either
+          # box-control or root-control, keeping the namespace implicit.
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          src=Path("companions/zog/src/zog").resolve()
+          dest=Path(os.environ["RUNNER_TEMP"])/"zog-public-dependencies"/"zog"
+          dest.mkdir(parents=True,exist_ok=True)
+          for path in src.iterdir():
+              if path.name in {"__init__.py","__pycache__","root_control","box_control"}:
+                  continue
+              if path.is_dir() or (path.is_file() and path.suffix==".py"):
+                  (dest/path.name).symlink_to(path)
+          assert not (dest/"__init__.py").exists()
+          assert not (dest/"root_control").exists()
+          assert not (dest/"box_control").exists()
+          assert (dest/"image_build").is_dir()
+          PY
       - name: Install test dependencies and root-control
         run: |
           python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10'
@@ -54,7 +76,7 @@ jobs:
       - name: Verify namespace and compile
         run: |
           python -m compileall -q src tests acceptance
-          python -c 'import zog.root_control as r; assert r.__version__ == "0.1.0"'
+          python -c 'import pathlib, zog.root_control as r; assert r.__version__ == "0.1.0"; assert pathlib.Path(r.__file__).resolve().is_relative_to(pathlib.Path.cwd() / "src")'
       - name: Run synthetic and mocked privileged-boundary tests
         run: python -m pytest -q tests
 

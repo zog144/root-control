@@ -4,8 +4,10 @@ The public workflow tests the separately developed root-control source against
 published, immutable public sources: `zog144/box-control` at
 `b513a9bde79135c7569adc7cadb4d45a163c7841` and aggregate `zog144/zog`
 at `d47d86b363824c718d9c165124cb55bbed12e0f9` for the image-build
-and other unchanged shared dependencies. Root-control and box-control checkout
-paths take precedence over the historical aggregate on PYTHONPATH.
+and other unchanged shared dependencies. A temporary PEP 420 namespace overlay exposes non-controller public aggregate
+modules without its regular `zog/__init__.py` or its historical copies of
+`root_control` and `box_control`; the new public root-control and box-control
+source trees take precedence.
 
 The public dependency checkout is anonymous/read-only: it does not use private
 cross-repository tokens. The workflow builds a wheel and source archive,
