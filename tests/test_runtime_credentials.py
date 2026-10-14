@@ -1,5 +1,6 @@
 """Regression tests for immutable-runtime kernel credential observation."""
 from dataclasses import replace
+from types import SimpleNamespace
 import json
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def _setup(tmp_path, monkeypatch, *, bound=True):
         "skipped_processes": 0, "truncated": False,
     })
     args = dict(project_root=str(project.path), runtime_id="ABCDEF",
-                proc_root=proc, backend=object())
+                proc_root=proc, backend=SimpleNamespace())
     return project, proc, args, ref
 
 
@@ -176,6 +177,7 @@ def test_incomplete_scan_does_not_claim_authoritative_success(tmp_path, monkeypa
 def test_read_only_daemon_api_and_untrusted_pid_arguments(tmp_path, monkeypatch):
     project, _procdir, args, _ref = _setup(tmp_path, monkeypatch)
     before = {str(p): p.read_bytes() for p in project.path.rglob("*") if p.is_file()}
+    actual_inspect = c.inspect_runtime_credentials
     monkeypatch.setattr(c, "inspect_runtime_credentials",
                         lambda **kwargs: {"schema": c.SCHEMA, "runtime_id": kwargs["runtime_id"],
                                           "status": "absent", "programs": []})
@@ -188,8 +190,8 @@ def test_read_only_daemon_api_and_untrusted_pid_arguments(tmp_path, monkeypatch)
         daemon.handle(dict(operation="application_runtime_credentials",
                            project_root=str(project.path), runtime_id="ABCDEF", pid=1))
     with pytest.raises(ValueError):
-        c.inspect_runtime_credentials(project_root=str(project.path),
-                                      runtime_id="ABCDEF", limit=65)
+        actual_inspect(project_root=str(project.path),
+                       runtime_id="ABCDEF", limit=65)
 
 
 
