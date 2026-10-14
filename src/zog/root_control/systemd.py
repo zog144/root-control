@@ -6,6 +6,7 @@ import os
 import pwd
 import grp
 import re
+import stat
 import shutil
 import subprocess
 import time
