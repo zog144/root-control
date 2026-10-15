@@ -411,7 +411,7 @@ def _read_token(fd):
     return token
 
 
-def install_from_fd(project_root, token_fd):
+def install_from_fd(project_root, token_fd, *, expected_authorization_id=None):
     """Privileged offline installer, invoked only by an approved local owner.
 
     Does not create approval files and is deliberately not a daemon RPC.
@@ -425,6 +425,9 @@ def install_from_fd(project_root, token_fd):
     with ProjectLock(project.lock_file, timeout_seconds=10), _locked(project) as paths:
         approval_path, ledger_path, pending_path = paths
         approved, grant = _authorization(project, approval_path)
+        if (expected_authorization_id is not None
+                and _authorization_id(approved) != expected_authorization_id):
+            raise IssuerCredentialError("station token authorization changed before installation")
         _quiet(project)
         if pending_path.exists() or pending_path.is_symlink():
             raise IssuerCredentialError("issuer credential installation needs explicit recovery")
