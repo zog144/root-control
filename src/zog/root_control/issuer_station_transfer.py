@@ -14,6 +14,7 @@ import re
 import secrets
 import socket
 import stat
+import struct
 
 from zog.box_control.project import Project
 
@@ -222,7 +223,7 @@ def _read_station_socket(authorization_id, peer):
         connection.connect(str(_SOCKET))
         if not hasattr(socket, "SO_PEERCRED"):
             raise credentials.IssuerCredentialError("station socket peer authentication unavailable")
-        pid, uid, _gid = __import__("struct").unpack(
+        pid, uid, _gid = struct.unpack(
             "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
         if pid <= 0 or uid != peer["reader_uid"]:
@@ -246,14 +247,14 @@ def transfer_and_install(project_root):
     project = Project(Path(project_root))
     if str(project.path) != str(Path(project_root)):
         raise credentials.IssuerCredentialError("noncanonical credential project")
-    from zog.box_control.locking import ProjectLock
     # Root owner evidence is checked before and after station returns secret.
     # Never hold ProjectLock during remote RPC; installer acquires it later.
     authorization_id, peer = _checked_current(project)
     try:
         token = _read_station_socket(authorization_id, peer)
-        if _checked_current(project)[0] != authorization_id:
-            raise credentials.IssuerCredentialError("station approval rotated during vault read")
+        checked_id, checked_peer = _checked_current(project)
+        if checked_id != authorization_id or checked_peer != peer:
+            raise credentials.IssuerCredentialError("station approval or pinned peer rotated during vault read")
         read_fd, write_fd = os.pipe()
         try:
             os.write(write_fd, token)
