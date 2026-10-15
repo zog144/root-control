@@ -176,3 +176,68 @@ def test_interrupted_audit_barrier_retains_pending_fence(tmp_path, monkeypatch):
         install(project)
     assert list(root.glob("*.pending.json"))
     assert bridge.inspect(project.path)["status"] == "blocked"
+
+
+
+def test_symlink_in_persistent_storage_ancestor_denied(tmp_path, monkeypatch):
+    project, auth, root, parent = sandbox(tmp_path, monkeypatch)
+    storage_parent = parent.parent
+    other = tmp_path / "other-storage"
+    storage_parent.rename(other)
+    storage_parent.symlink_to(other, target_is_directory=True)
+    with pytest.raises(bridge.IssuerCredentialError, match="incomplete"):
+        install(project)
+    assert list(root.glob("*.pending.json"))
+    assert not (other / "certificate-data/dns/cloudflare.ini").exists()
+
+
+def test_privileged_selected_renew_requires_original_receipt_and_strict_private_file(tmp_path, monkeypatch):
+    project, approved, root, parent = sandbox(tmp_path, monkeypatch)
+    install(project)
+    monkeypatch.setattr(bridge, "_policy", lambda: ({"challenge": "dns-01"}, approved["policy_sha256"]))
+    # root-control's separate managed grant validator is exercised elsewhere;
+    # this entry point checks its already validated, original saved binding.
+    grant = {"uid": os.getuid(), "gid": os.getgid(), "grant_id": approved["grant_id"]}
+    monkeypatch.setattr(bridge, "_authorization", lambda project, path: (dict(approved), grant))
+    definition = {"application_name": "certify-manage", "selected_program": "renew",
+                  "persistent_storage_id": approved["storage_id"],
+                  "execution_binding": dict(grant)}
+    bridge.require_installed(project.path, definition)
+    with pytest.raises(bridge.IssuerCredentialError, match="grant or storage"):
+        bridge.require_installed(
+            project.path, dict(definition, persistent_storage_id="f" * 32)
+        )
+    credential = parent / "dns/cloudflare.ini"
+    credential.chmod(0o644)
+    with pytest.raises(bridge.IssuerCredentialError, match="not trustworthy"):
+        bridge.require_installed(project.path, definition)
+
+
+@pytest.mark.parametrize("changed", [
+    {"state": "revoked"},
+    {"expires_at": 1},
+    {"zone_name": "other.org"},
+    {"policy_sha256": "f" * 64},
+])
+def test_authorization_requires_live_root_owner_grant(tmp_path, monkeypatch, changed):
+    project, approved, root, parent = sandbox(tmp_path, monkeypatch)
+    from zog.box_control.application_storage import ApplicationStorage
+    monkeypatch.setattr(bridge, "_read_protected", lambda path: dict(approved))
+    monkeypatch.setattr(bridge, "_policy", lambda: ({
+        "schema": "zog-certify-manage-v1", "certificate_id": "station-web",
+        "hostnames": ["web.example.org"], "challenge": "dns-01",
+        "dns_plugin": "dns-cloudflare", "email": "me@example.org",
+        "acme_directory": "https://acme.example.org/directory",
+    }, "c" * 64))
+    monkeypatch.setattr(ApplicationStorage, "load", lambda _self, app: {
+        "state": "ready", "storage_id": "a" * 32, "cleanup_pending": False,
+        "definition": {"execution_binding": {"approved": True}}
+    })
+    monkeypatch.setattr(bridge, "verify", lambda *args, **kwargs: {
+        "grant_id": "b" * 32, "uid": 200001, "gid": 200001
+    })
+    raw, grant = bridge._authorization(project, root / "approval.json")
+    assert raw["grant_id"] == grant["grant_id"]
+    approved.update(changed)
+    with pytest.raises(bridge.IssuerCredentialError):
+        bridge._authorization(project, root / "approval.json")
