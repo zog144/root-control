@@ -90,7 +90,12 @@ def _atomic_json(directory, name, value):
                  os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
                  0o600)
     try:
-        os.write(fd, raw)
+        remaining = memoryview(raw)
+        while remaining:
+            n = os.write(fd, remaining)
+            if n <= 0:
+                raise OSError("incomplete authorization record write")
+            remaining = remaining[n:]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -181,11 +186,23 @@ def _authorization(project, approval):
             or type(raw["expires_at"]) is not int or raw["expires_at"] <= int(time.time())):
         raise IssuerCredentialError("issuer authorization is missing, expired or invalid")
     policy, digest = _policy()
-    from zog.certify_manage.model import Authorization
-    try:
-        Authorization.from_dict(policy)
-    except ValueError as exc:
-        raise IssuerCredentialError("issuer policy fails certified schema validation") from exc
+    # Root-control cannot depend on the issuer's Python distribution:
+    # that software lives in its immutable application image. Enforce the
+    # security-critical subset of the issuer policy independently here.
+    names = policy.get("hostnames")
+    if (not isinstance(names, list) or not 1 <= len(names) <= 20
+            or any(type(n) is not str or n != n.lower()
+                   or len(n) > 253 or not re.fullmatch(
+                       r"(?:\\*\\.)?[a-z0-9-]+(?:\\.[a-z0-9-]+)+", n)
+                   for n in names)
+            or names != sorted(set(names))
+            or type(policy.get("certificate_id")) is not str
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", policy["certificate_id"])
+            or type(policy.get("acme_directory")) is not str
+            or not policy["acme_directory"].startswith("https://")
+            or type(policy.get("email")) is not str
+            or "@" not in policy["email"]):
+        raise IssuerCredentialError("issuer policy fails independent scope validation")
     if (policy["certificate_id"] != raw["certificate_id"]
             or policy["challenge"] != "dns-01"
             or policy["dns_plugin"] != "dns-cloudflare"
@@ -288,9 +305,9 @@ def _file_ok(dfd, uid, gid):
 
 def _matching(previous, current):
     return all(previous.get(field) == current.get(field) for field in (
-        "assignment_id", "assignment_revision", "credential_id",
-        "credential_revision", "zone_id", "grant_id", "storage_id",
-        "policy_sha256", "receipt_sha256",
+        "project", "certificate_id", "assignment_id", "assignment_revision",
+        "credential_id", "credential_revision", "zone_id", "zone_name",
+        "grant_id", "storage_id", "policy_sha256", "receipt_sha256",
     ))
 
 
@@ -371,8 +388,12 @@ def install_from_fd(project_root, token_fd):
                     os.fchown(fd, grant["uid"], grant["gid"])
                     os.fchmod(fd, 0o600)
                     written = b"dns_cloudflare_api_token = " + token + b"\n"
-                    if os.write(fd, written) != len(written):
-                        raise OSError("incomplete private credential write")
+                    remaining = memoryview(written)
+                    while remaining:
+                        n = os.write(fd, remaining)
+                        if n <= 0:
+                            raise OSError("incomplete private credential write")
+                        remaining = remaining[n:]
                     os.fsync(fd)
                 finally:
                     os.close(fd)
