@@ -31,6 +31,7 @@ SCHEMA = "zog-issuer-cloudflare-credential-v1"
 AUDIT_SCHEMA = "zog-issuer-cloudflare-installation-v1"
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _TOKEN = re.compile(rb"[A-Za-z0-9_-]{20,4096}\Z")
 _FIELDS = frozenset({
     "schema", "state", "project", "certificate_id",
@@ -164,18 +165,27 @@ def _authorization(project, approval):
             or raw["schema"] != SCHEMA or raw["state"] != "approved"
             or raw["project"] != str(project.path)
             or raw["certificate_id"] != "station-web"
+            or any(not isinstance(raw[name], str) or not _UUID.fullmatch(raw[name])
+                   for name in ("assignment_id", "credential_id"))
             or any(not isinstance(raw[name], str) or not _HEX32.fullmatch(raw[name])
-                   for name in ("assignment_id", "credential_id", "grant_id", "storage_id"))
+                   for name in ("grant_id", "storage_id"))
             or any(type(raw[name]) is not int or raw[name] < 1
                    for name in ("assignment_revision", "credential_revision"))
             or any(not isinstance(raw[name], str) or not _HEX64.fullmatch(raw[name])
                    for name in ("policy_sha256", "receipt_sha256"))
-            or any(not isinstance(raw[name], str) or len(raw[name]) > 253
-                   or not raw[name] or "\n" in raw[name]
-                   for name in ("zone_id", "zone_name"))
+            or any(not isinstance(raw[name], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", raw[name])
+                   for name in ("zone_id",))
+            or not isinstance(raw["zone_name"], str)
+            or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", raw["zone_name"])
+            or len(raw["zone_name"]) > 253
             or type(raw["expires_at"]) is not int or raw["expires_at"] <= int(time.time())):
         raise IssuerCredentialError("issuer authorization is missing, expired or invalid")
     policy, digest = _policy()
+    from zog.certify_manage.model import Authorization
+    try:
+        Authorization.from_dict(policy)
+    except ValueError as exc:
+        raise IssuerCredentialError("issuer policy fails certified schema validation") from exc
     if (policy["certificate_id"] != raw["certificate_id"]
             or policy["challenge"] != "dns-01"
             or policy["dns_plugin"] != "dns-cloudflare"
@@ -299,7 +309,7 @@ def _check_revision(previous, approved):
             and not _matching(previous, approved)):
         raise IssuerCredentialError("issuer assignment revision conflict")
     if (approved["credential_revision"] == previous["credential_revision"]
-            and previous["credential_id"] != approved["credential_id"]):
+            and not _matching(previous, approved)):
         raise IssuerCredentialError("issuer credential revision conflict")
 
 
@@ -366,12 +376,13 @@ def install_from_fd(project_root, token_fd):
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-                if not _file_ok(dfd, grant["uid"], grant["gid"]) and old is not None:
-                    # Existing target must not be a symlink, hardlink or loose
-                    # file. Atomic replacement never repairs unknown identity.
-                    target_info = os.stat("cloudflare.ini", dir_fd=dfd, follow_symlinks=False) if _exists(dfd) else None
-                    if target_info is not None:
-                        raise IssuerCredentialError("existing issuer credential target is unsafe")
+                # Even an initial install must refuse overwriting an unrelated
+                # file, symlink or hardlink. Rotation is permitted only from a
+                # validated previous install with an intact owner-only target.
+                if _exists(dfd) and (
+                        old is None or old["status"] != "installed"
+                        or not _file_ok(dfd, grant["uid"], grant["gid"])):
+                    raise IssuerCredentialError("existing issuer credential target is unsafe")
                 os.rename(name, "cloudflare.ini", src_dir_fd=dfd, dst_dir_fd=dfd)
                 os.fsync(dfd)
             finally:
