@@ -13,6 +13,7 @@ import pytest
 from zog.box_control.project import Project
 from zog.root_control import issuer_credentials as bridge
 
+ORIGINAL_AUTHORIZATION = bridge._authorization
 TOKEN = b"CF_" + b"A" * 36
 
 
@@ -236,8 +237,8 @@ def test_authorization_requires_live_root_owner_grant(tmp_path, monkeypatch, cha
     monkeypatch.setattr(bridge, "verify", lambda *args, **kwargs: {
         "grant_id": "b" * 32, "uid": 200001, "gid": 200001
     })
-    raw, grant = bridge._authorization(project, root / "approval.json")
+    raw, grant = ORIGINAL_AUTHORIZATION(project, root / "approval.json")
     assert raw["grant_id"] == grant["grant_id"]
     approved.update(changed)
     with pytest.raises(bridge.IssuerCredentialError):
-        bridge._authorization(project, root / "approval.json")
+        ORIGINAL_AUTHORIZATION(project, root / "approval.json")
