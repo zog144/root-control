@@ -119,6 +119,12 @@ def _paths(project):
             AUTH_ROOT / (key + ".lock"))
 
 
+def _check_lock_info(info):
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_mode & 0o077 or info.st_nlink != 1):
+        raise IssuerCredentialError("issuer provision lock is unsafe")
+
+
 @contextmanager
 def _locked(project):
     _require_root()
@@ -126,10 +132,7 @@ def _locked(project):
     approval, installed, pending, lock = _paths(project)
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-                or info.st_mode & 0o077 or info.st_nlink != 1):
-            raise IssuerCredentialError("issuer provision lock is unsafe")
+        _check_lock_info(os.fstat(fd))
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield approval, installed, pending
     finally:
