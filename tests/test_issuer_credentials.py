@@ -261,3 +261,26 @@ def test_token_fd_transfer_waits_for_complete_eof_before_acceptance():
     finally:
         os.close(read)
         sender.join(timeout=1)
+
+
+
+def test_higher_assignment_revision_can_reapprove_same_cloudflare_credential(tmp_path, monkeypatch):
+    project, approved, root, parent = sandbox(tmp_path, monkeypatch)
+    install(project)
+    original_credential_revision = approved["credential_revision"]
+    approved["assignment_revision"] += 1
+    approved["receipt_sha256"] = "f" * 64
+    response = install(project, TOKEN)
+    assert response["status"] == "installed"
+    assert response["replayed"] is False
+    assert response["credential_revision"] == original_credential_revision
+    audit = next(root.glob("*.installed.json"))
+    assert json.loads(audit.read_text())["assignment_revision"] == approved["assignment_revision"]
+
+
+def test_assignment_expiry_extension_without_new_revision_is_conflict(tmp_path, monkeypatch):
+    project, approved, root, parent = sandbox(tmp_path, monkeypatch)
+    install(project)
+    approved["expires_at"] += 60
+    with pytest.raises(bridge.IssuerCredentialError, match="revision conflict"):
+        install(project)
