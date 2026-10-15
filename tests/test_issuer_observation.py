@@ -40,7 +40,7 @@ def fixture(tmp_path, monkeypatch, *, selected="renew", status="ready"):
     monkeypatch.setattr(hb, "resolve", lambda *args: ({
         "capability": "certify-policy", "policy_digest": "sha256:" + "c" * 64
     },))
-    monkeypatch.setattr("zog.root_control.identities.verify",
+    monkeypatch.setattr("zog.root_control.issuer_observation.verify",
                         lambda *args, **kwargs: dict(owner))
     binding = {"schema": "zog-execution-identity-v1", **owner}
     ref = ApplicationRuntimeReference(
