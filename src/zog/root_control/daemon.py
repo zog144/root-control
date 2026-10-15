@@ -67,7 +67,7 @@ class RootControlDaemon:
             emit("root-control-response-undelivered", operation=operation, resource_id=resource_id)
 
     def _dispatch(self, conn, request, workers, slots):
-        lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status'} else 0
+        lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
@@ -126,6 +126,13 @@ class RootControlDaemon:
                     or not set(arguments) <= {"project_root", "runtime_id", "limit"}):
                 raise ValueError("unsupported runtime credential inspection arguments")
             return {"ok": True, "result": inspect_runtime_credentials(**arguments)}
+        if operation == "issuer_observe":
+            from .issuer_observation import observe_issuer_request
+            if set(request) != {"operation", "project_root", "request_id"}:
+                raise ValueError("invalid privileged issuer inspection arguments")
+            return {"ok": True, "result": observe_issuer_request(
+                project_root=request["project_root"], request_id=request["request_id"],
+            )}
         if operation == "application_runtime_mounts":
             from .mounts import inspect_runtime_mounts
             arguments = {k:v for k,v in request.items() if k != "operation"}
