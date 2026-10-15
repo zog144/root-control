@@ -134,3 +134,30 @@ def test_privileged_rejects_selected_runtime_unit_or_command_drift(tmp_path, mon
     record["references"] = RuntimeReferenceStore.encode({"ABC123": changed})
     with pytest.raises(SystemdBackendError, match="selected"):
         BusctlSystemdBackend._validate_program_selection(project, definition)
+
+
+
+def test_privileged_selected_stage_matches_exact_saved_stage_operation(tmp_path, monkeypatch):
+    from dataclasses import replace
+    project, definition, record, request = evidence(tmp_path, monkeypatch)
+    stage_unit = definition["unit_name"].replace("-renew.service", "-stage.service")
+    stage_command = ["/usr/bin/python3", "-m", "zog.certify_manage", "stage"]
+    definition.update(
+        unit_name=stage_unit, program_name="stage", selected_program="stage",
+        command=stage_command,
+    )
+    record.update(selected_program="stage", attempted_units=[stage_unit])
+    record["application"]["selected_program"] = "stage"
+    record["application"]["programs"][0].update(name="stage", command=stage_command)
+    prior = RuntimeReferenceStore.decode(record["references"])["ABC123"]
+    change = replace(prior, programs=(replace(
+        prior.programs[0], program="stage", unit_name=stage_unit,
+        command=tuple(stage_command),
+    ),))
+    record["references"] = RuntimeReferenceStore.encode({"ABC123": change})
+    request.program_name = "stage"
+    BusctlSystemdBackend._validate_program_selection(project, definition)
+    with pytest.raises(SystemdBackendError, match="selected"):
+        BusctlSystemdBackend._validate_program_selection(
+            project, dict(definition, selected_program="renew")
+        )
