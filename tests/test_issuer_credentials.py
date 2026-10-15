@@ -42,6 +42,8 @@ def sandbox(tmp_path, monkeypatch):
     grant = {"uid": os.getuid(), "gid": os.getgid(), "grant_id": "b" * 32}
     monkeypatch.setattr(bridge, "AUTH_ROOT", root)
     monkeypatch.setattr(bridge, "_require_root", lambda: None)
+    # Only the CI sandbox's mock root ownership differs from production.
+    monkeypatch.setattr(bridge, "_check_root_directory", lambda _p: None)
     monkeypatch.setattr(bridge, "_quiet", lambda _p: None)
     monkeypatch.setattr(bridge, "_authorization", lambda _p, path: (dict(approved), grant))
     # In the CI sandbox the receipt files have the runner UID, not root;
