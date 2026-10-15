@@ -355,6 +355,7 @@ def _matching(previous, current):
         "project", "certificate_id", "assignment_id", "assignment_revision",
         "credential_id", "credential_revision", "zone_id", "zone_name",
         "grant_id", "storage_id", "policy_sha256", "receipt_sha256",
+        "expires_at",
     ))
 
 
@@ -373,7 +374,7 @@ def _check_revision(previous, approved):
             and not _matching(previous, approved)):
         raise IssuerCredentialError("issuer assignment revision conflict")
     if (approved["credential_revision"] == previous["credential_revision"]
-            and not _matching(previous, approved)):
+            and previous["credential_id"] != approved["credential_id"]):
         raise IssuerCredentialError("issuer credential revision conflict")
 
 
