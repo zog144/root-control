@@ -111,7 +111,7 @@ def test_privileged_rejects_missing_or_conflicting_durable_authority(tmp_path, m
         BusctlSystemdBackend._validate_program_selection(project, definition)
 
 
-@pytest.mark.parametrize("command", ["issue", "renew", "inspect"])
+@pytest.mark.parametrize("command", ["issue", "renew", "inspect", "stage"])
 def test_certificate_lifecycle_requires_explicit_selector_even_if_transport_is_forged(tmp_path, command):
     definition = dict(application_name="certify-manage", program_name=command,
                       selected_program=None)
