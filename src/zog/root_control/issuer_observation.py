@@ -233,6 +233,9 @@ def observe_issuer_request(*, project_root, request_id):
     elif (digest is not None and journal_status == "ready"
           and outcome.status.value == "satisfied" and terminal_success):
         result["status"] = "journal-ready"
+    elif current is not None and (
+            current.state == ApplicationRuntimeState.FAILED or current.error):
+        result["status"] = "uncertain"
     elif not terminal_success and current is not None and (
             current.state in (ApplicationRuntimeState.RUNNING, ApplicationRuntimeState.STARTING,
                               ApplicationRuntimeState.TERMINATING)
