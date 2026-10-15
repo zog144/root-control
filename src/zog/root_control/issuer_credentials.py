@@ -469,3 +469,27 @@ def inspect(project_root):
                 "assignment_revision": old["assignment_revision"],
                 "credential_revision": old["credential_revision"],
                 "grant_id": old["grant_id"], "storage_id": old["storage_id"]}
+
+
+def main(argv=None):
+    """Root-only offline interface; never accepts token text or JSON RPC."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Offline private issuer DNS credential installer")
+    sub = parser.add_subparsers(dest="operation", required=True)
+    install = sub.add_parser("install")
+    install.add_argument("project")
+    install.add_argument("--token-fd", type=int, required=True)
+    view = sub.add_parser("inspect")
+    view.add_argument("project")
+    args = parser.parse_args(argv)
+    if args.operation == "install":
+        result = install_from_fd(args.project, args.token_fd)
+    else:
+        result = inspect(args.project)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    main()
+
