@@ -242,3 +242,22 @@ def test_authorization_requires_live_root_owner_grant(tmp_path, monkeypatch, cha
     approved.update(changed)
     with pytest.raises(bridge.IssuerCredentialError):
         ORIGINAL_AUTHORIZATION(project, root / "approval.json")
+
+
+
+def test_token_fd_transfer_waits_for_complete_eof_before_acceptance():
+    from threading import Thread
+    read, write = os.pipe()
+    def writer():
+        try:
+            os.write(write, TOKEN[:25])
+            os.write(write, TOKEN[25:])
+        finally:
+            os.close(write)
+    sender = Thread(target=writer)
+    sender.start()
+    try:
+        assert bridge._read_token(read) == TOKEN
+    finally:
+        os.close(read)
+        sender.join(timeout=1)
