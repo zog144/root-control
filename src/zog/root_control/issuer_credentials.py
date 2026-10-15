@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import secrets
 import select
+import socket
+import struct
 import stat
 import time
 from contextlib import contextmanager
@@ -41,6 +43,15 @@ _FIELDS = frozenset({
     "storage_id", "policy_sha256", "receipt_sha256", "expires_at",
 })
 _APPLICATION = "certify-manage"
+PROJECTION_SCHEMA = "zog-station-issuer-reader-authorization-v1"
+READER_REQUEST_SCHEMA = "zog-station-issuer-cloudflare-read-v1"
+READER_SOCKET = Path("/run/zog/issuer-cloudflare-reader.sock")
+_PROJECTION_FIELDS = frozenset({
+    "schema", "authorization", "origin", "installation_id",
+    "host_id", "account_id", "owner_user_id",
+})
+_READER_PEER_SCHEMA = "zog-issuer-cloudflare-reader-peer-v1"
+
 
 
 class IssuerCredentialError(ValueError):
@@ -118,6 +129,21 @@ def _paths(project):
             AUTH_ROOT / (key + ".installed.json"),
             AUTH_ROOT / (key + ".pending.json"),
             AUTH_ROOT / (key + ".lock"))
+
+
+def _projection_paths(project):
+    key = hashlib.sha256(str(project.path).encode()).hexdigest()
+    return AUTH_ROOT / (key + ".station-reader.json"), AUTH_ROOT / (key + ".reader-peer.json")
+
+
+def _canonical(value):
+    # Identical to station-access's immutable canonical() routine.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("ascii")
+
+
+def _authorization_id(approved):
+    return hashlib.sha256(_canonical(approved)).hexdigest()
 
 
 def _check_lock_info(info):
