@@ -723,7 +723,7 @@ class BusctlSystemdBackend:
         program = str(definition.get('program_name', ''))
         if selected is None:
             if application == 'certify-manage' and program in {
-                    'issue', 'renew', 'inspect'}:
+                    'issue', 'renew', 'inspect', 'stage'}:
                 raise SystemdBackendError(
                     'certificate lifecycle command requires selected-program authority'
                 )
