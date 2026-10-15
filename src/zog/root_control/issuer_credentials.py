@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import stat
 import time
 from contextlib import contextmanager
@@ -356,10 +357,29 @@ def _receipt(approved, *, status):
 
 
 def _read_token(fd):
-    # File descriptors, not command-line arguments or JSON RPC payloads.
+    # Inherited FD, not command-line arguments or JSON RPC. Read to EOF;
+    # a short pipe read must never be mistaken for a complete provider token.
     if type(fd) is not int or fd < 0:
         raise IssuerCredentialError("invalid trusted token descriptor")
-    token = os.read(fd, 4097)
+    deadline = time.monotonic() + 5
+    content = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IssuerCredentialError("trusted token transfer did not complete")
+        try:
+            readable, _, _ = select.select([fd], [], [], remaining)
+            if not readable:
+                raise IssuerCredentialError("trusted token transfer did not complete")
+            chunk = os.read(fd, 4097 - len(content))
+        except OSError:
+            raise IssuerCredentialError("trusted token transfer unavailable") from None
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > 4096:
+            raise IssuerCredentialError("Cloudflare credential bytes are invalid")
+    token = bytes(content)
     if not _TOKEN.fullmatch(token):
         raise IssuerCredentialError("Cloudflare credential bytes are invalid")
     return token
