@@ -63,6 +63,13 @@ def fixture(tmp_path, monkeypatch, *, selected="renew", status="ready"):
         "references": RuntimeReferenceStore.encode({"ABCD23": ref}),
     }
     monkeypatch.setattr(OperationStore, "records", lambda self: [record])
+    from dataclasses import replace
+    completed = replace(
+        ref, state=ApplicationRuntimeState.TERMINATED, cleanup_pending=False,
+        programs=(replace(ref.programs[0], result="success",
+                          invocation_id="invocation-1", active_state="inactive"),),
+    )
+    RuntimeReferenceStore(project.runtime_reference_file).save({"ABCD23": completed})
     requests = ApplicationRequestStore(project.application_request_dir,
                                        project.application_request_result_dir)
     requests.submit(ApplicationRequest(
@@ -130,6 +137,34 @@ def test_observer_fails_closed_for_unproven_issuer_status(tmp_path, monkeypatch,
         project_root=project.path, request_id="REQ1",
     )
     assert result["status"] == expected
+
+
+def test_running_command_does_not_claim_journal_ready(tmp_path, monkeypatch):
+    from dataclasses import replace
+    project, file, record = fixture(tmp_path, monkeypatch)
+    store = RuntimeReferenceStore(project.runtime_reference_file)
+    ref = store.load()["ABCD23"]
+    store.save({"ABCD23": replace(
+        ref, state=ApplicationRuntimeState.RUNNING, cleanup_pending=True
+    )})
+    result = issuer_observation.observe_issuer_request(
+        project_root=project.path, request_id="REQ1")
+    assert result["status"] == "ongoing"
+    assert result["tls_ready"] is False
+
+
+def test_failed_one_shot_does_not_claim_journal_ready(tmp_path, monkeypatch):
+    from dataclasses import replace
+    project, file, record = fixture(tmp_path, monkeypatch)
+    store = RuntimeReferenceStore(project.runtime_reference_file)
+    ref = store.load()["ABCD23"]
+    store.save({"ABCD23": replace(
+        ref, state=ApplicationRuntimeState.FAILED, cleanup_pending=False,
+        programs=(replace(ref.programs[0], result="exit-code"),),
+    )})
+    result = issuer_observation.observe_issuer_request(
+        project_root=project.path, request_id="REQ1")
+    assert result["status"] != "journal-ready"
 
 
 def test_pending_controller_result_stays_ongoing(tmp_path, monkeypatch):
