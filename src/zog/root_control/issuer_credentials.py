@@ -193,7 +193,7 @@ def _authorization(project, approval):
     if (not isinstance(names, list) or not 1 <= len(names) <= 20
             or any(type(n) is not str or n != n.lower()
                    or len(n) > 253 or not re.fullmatch(
-                       r"(?:\\*\\.)?[a-z0-9-]+(?:\\.[a-z0-9-]+)+", n)
+                       r"(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+", n)
                    for n in names)
             or names != sorted(set(names))
             or type(policy.get("certificate_id")) is not str
