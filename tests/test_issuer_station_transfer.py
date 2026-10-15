@@ -196,3 +196,59 @@ def test_unauthorized_socket_response_cannot_install(tmp_path, monkeypatch):
                         lambda *args, **kwargs: pytest.fail("secret must not install"))
     with pytest.raises(credentials.IssuerCredentialError, match="peer identity"):
         bridge.transfer_and_install(project.path)
+
+
+
+def test_station_socket_peer_mismatch_denies_token_even_if_socket_returns_bytes(tmp_path, monkeypatch):
+    project, root, source, projection = harness(tmp_path, monkeypatch)
+    path = tmp_path / "reader.sock"
+    monkeypatch.setattr(bridge, "_SOCKET", path)
+    publish(project, projection, uid=os.getuid() + 1)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    path.chmod(0o600)
+    listener.listen(1)
+    connected = []
+    def station():
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                connected.append(True)
+                conn.settimeout(2)
+                try:
+                    conn.recv(1)
+                except (OSError, ConnectionResetError):
+                    pass
+        finally:
+            listener.close()
+    worker = threading.Thread(target=station)
+    worker.start()
+    monkeypatch.setattr(bridge, "_verify_socket", lambda *_: None)
+    monkeypatch.setattr(credentials, "install_from_fd",
+                        lambda *args, **kwargs: pytest.fail("mismatched reader must never install"))
+    try:
+        with pytest.raises(credentials.IssuerCredentialError, match="peer identity"):
+            bridge.transfer_and_install(project.path)
+    finally:
+        worker.join(timeout=5)
+    assert connected
+    assert not worker.is_alive()
+
+
+def test_projection_reader_rejects_duplicates_and_larger_than_bounded_message(tmp_path, monkeypatch):
+    project, root, source, projection = harness(tmp_path, monkeypatch)
+    for data in (b'{"schema":"one","schema":"two"}',
+                 b"x" * 8193):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, data)
+        finally:
+            os.close(write_fd)
+        try:
+            with pytest.raises(credentials.IssuerCredentialError):
+                bridge.publish_projection(
+                    project.path, read_fd,
+                    reader_uid=os.getuid(), reader_gid=os.getgid(),
+                )
+        finally:
+            os.close(read_fd)
