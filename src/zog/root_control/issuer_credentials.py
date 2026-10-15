@@ -262,24 +262,41 @@ def _quiet(project):
 
 
 def _opened_destination(project, authorization, grant, *, create_dns):
-    source = (project.mounts_dir / "persistent" /
-              authorization["storage_id"] / "certificate-data")
-    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    """Walk project-owned storage with no-follow anchored directory FDs.
+
+    A station caller cannot select any component; neither the project owner
+    nor an unprivileged issuer can redirect this privileged writer through a
+    symlinked parent between the initial project selection and publication.
+    """
     uid, gid = grant["uid"], grant["gid"]
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(project.path, flags)
     try:
+        for name in ("state", "mounts", "persistent",
+                     authorization["storage_id"], "certificate-data"):
+            child = os.open(name, flags, dir_fd=fd)
+            try:
+                info = os.fstat(child)
+                if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+                    raise IssuerCredentialError("persistent storage ancestry is unsafe")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(fd)
+            fd = child
+
         parent = os.fstat(fd)
-        if (not stat.S_ISDIR(parent.st_mode)
-                or (parent.st_uid, parent.st_gid) != (uid, gid)
+        if ((parent.st_uid, parent.st_gid) != (uid, gid)
                 or stat.S_IMODE(parent.st_mode) != 0o700):
             raise IssuerCredentialError("issuer persistent directory identity or mode drift")
         if create_dns:
             try:
                 os.mkdir("dns", 0o700, dir_fd=fd)
                 os.chown("dns", uid, gid, dir_fd=fd, follow_symlinks=False)
-                _fsync(source)
+                os.fsync(fd)
             except FileExistsError:
                 pass
-        child = os.open("dns", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        child = os.open("dns", flags, dir_fd=fd)
         info = os.fstat(child)
         if (not stat.S_ISDIR(info.st_mode)
                 or (info.st_uid, info.st_gid) != (uid, gid)
