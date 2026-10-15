@@ -22,7 +22,7 @@ from .identities import verify
 
 _ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
-_REQ = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
+_REQ = re.compile(r"[A-Za-z0-9-]{1,200}\Z")
 _MAX_JOURNAL = 65536
 
 

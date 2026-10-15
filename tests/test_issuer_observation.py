@@ -201,3 +201,13 @@ def test_no_arbitrary_project_path_or_request_content(tmp_path):
     with pytest.raises(Exception):
         issuer_observation.observe_issuer_request(
             project_root=tmp_path, request_id="../private.json")
+
+
+def test_root_observer_accepts_long_controller_signed_request_shape(tmp_path):
+    """Transport must admit actual Retention.issue() IDs, not truncate at 64."""
+    from zog.root_control.issuer_observation import _REQ
+    request_id = "r1-19a5d-" + "a" * 32 + "-" + "b" * 64
+    assert len(request_id) > 64
+    assert _REQ.fullmatch(request_id)
+    assert not _REQ.fullmatch("../" + request_id)
+    assert not _REQ.fullmatch("x" * 201)
