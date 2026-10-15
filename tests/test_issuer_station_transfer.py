@@ -237,13 +237,11 @@ def test_station_socket_peer_mismatch_denies_token_even_if_socket_returns_bytes(
 
 def test_projection_reader_rejects_duplicates_and_larger_than_bounded_message(tmp_path, monkeypatch):
     project, root, source, projection = harness(tmp_path, monkeypatch)
-    for data in (b'{"schema":"one","schema":"two"}',
-                 b"x" * 8193):
-        read_fd, write_fd = os.pipe()
-        try:
-            os.write(write_fd, data)
-        finally:
-            os.close(write_fd)
+    for number, data in enumerate((b'{"schema":"one","schema":"two"}',
+                                   b"x" * 8193)):
+        candidate = tmp_path / ("projection-" + str(number))
+        candidate.write_bytes(data)
+        read_fd = os.open(candidate, os.O_RDONLY)
         try:
             with pytest.raises(credentials.IssuerCredentialError):
                 bridge.publish_projection(
