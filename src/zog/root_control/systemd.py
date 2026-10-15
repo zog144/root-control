@@ -844,6 +844,18 @@ class BusctlSystemdBackend:
                 raise SystemdBackendError(f"invalid writable bind target: {target!r}")
         cls._validate_execution_binding(project_root, definition)
         cls._validate_program_selection(project_root, definition)
+        # DNS-01 requires a separate host-owner installed, issuer-private
+        # Cloudflare token with a current protected authorization revision.
+        # No daemon caller can select its source, token or destination.
+        if (definition.get("application_name") == "certify-manage"
+                and definition.get("selected_program") in ("issue", "renew")):
+            from .issuer_credentials import require_installed, IssuerCredentialError
+            try:
+                require_installed(project_root, definition)
+            except (IssuerCredentialError, OSError, ValueError) as exc:
+                raise SystemdBackendError(
+                    "issuer-only DNS credential installation is unavailable or revoked"
+                ) from exc
         cls._validate_host_bindings(project_root, definition)
         cls._validate_software_binding(project_root, definition)
         from zog.box_control.mounts import validate, inventory
