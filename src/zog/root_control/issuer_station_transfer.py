@@ -12,9 +12,11 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import socket
 import stat
 import struct
+import time
 
 from zog.box_control.project import Project
 
@@ -43,7 +45,20 @@ def _unique_pairs(pairs):
 def _read_projection_fd(fd):
     if type(fd) is not int or fd < 0:
         raise credentials.IssuerCredentialError("nonsecret projection descriptor required")
-    value = os.read(fd, 8193)
+    deadline = time.monotonic() + 5
+    collected = bytearray()
+    while len(collected) <= 8192:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise credentials.IssuerCredentialError("station projection transfer did not complete")
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            raise credentials.IssuerCredentialError("station projection transfer did not complete")
+        chunk = os.read(fd, 8193 - len(collected))
+        if not chunk:
+            break
+        collected.extend(chunk)
+    value = bytes(collected)
     if not 0 < len(value) <= 8192:
         raise credentials.IssuerCredentialError("station projection size invalid")
     try:
