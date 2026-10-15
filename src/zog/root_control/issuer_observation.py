@@ -145,6 +145,28 @@ def observe_issuer_request(*, project_root, request_id):
                 ) for p in reference.programs):
             raise IssuerEvidenceError("issuer runtime lacks matching host policy evidence")
     outcome = requests.result(request_id)
+    current = RuntimeReferenceStore(project.runtime_reference_file).load().get(
+        record["new_runtime_id"]
+    )
+    if current is not None and (
+            current.request_id != reference.request_id
+            or current.execution_binding != reference.execution_binding
+            or current.application != reference.application
+            or current.generation != reference.generation
+            or len(current.programs) != 1
+            or current.programs[0].program != request.program_name
+            or current.programs[0].unit_name != reference.programs[0].unit_name):
+        raise IssuerEvidenceError("current runtime reference contradicts issuer operation")
+    from zog.box_control.model import ApplicationRuntimeState
+    terminal_success = (
+        current is not None
+        and current.state == ApplicationRuntimeState.TERMINATED
+        and not current.cleanup_pending
+        and not current.error
+        and current.programs[0].result == "success"
+        and current.programs[0].invocation_id is not None
+        and current.programs[0].active_state == "inactive"
+    )
     journal_path = (project.mounts_dir / "persistent" / storage /
                     "certificate-data" / "operations" / (certificate_id + ".json"))
     journal = _private_journal(journal_path, uid=uid, gid=gid)
@@ -209,8 +231,13 @@ def observe_issuer_request(*, project_root, request_id):
           or outcome.status.value == "pending"):
         result["status"] = "ongoing"
     elif (digest is not None and journal_status == "ready"
-          and outcome.status.value == "satisfied"):
+          and outcome.status.value == "satisfied" and terminal_success):
         result["status"] = "journal-ready"
+    elif not terminal_success and current is not None and (
+            current.state in (ApplicationRuntimeState.RUNNING, ApplicationRuntimeState.STARTING,
+                              ApplicationRuntimeState.TERMINATING)
+            or current.cleanup_pending):
+        result["status"] = "ongoing"
     else:
         result["status"] = "stale"
     return result
