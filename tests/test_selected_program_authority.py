@@ -119,6 +119,32 @@ def test_certificate_lifecycle_requires_explicit_selector_even_if_transport_is_f
         BusctlSystemdBackend._validate_program_selection(tmp_path, definition)
 
 
+@pytest.mark.parametrize("program,selected", [
+    ("inspect-server", None),
+    ("inspect-server", "inspect-server"),
+    ("recover", None),
+    ("probe", "probe"),
+])
+def test_unreviewed_certificate_daemon_or_program_is_rejected_even_with_grant(tmp_path, program, selected):
+    definition = dict(application_name="certify-manage", program_name=program,
+                      selected_program=selected,
+                      execution_binding={"schema": "zog-execution-identity-v1",
+                                         "uid": 200001, "gid": 200001},
+                      persistent_storage_id="a" * 32)
+    with pytest.raises(SystemdBackendError, match="unsupported certificate"):
+        BusctlSystemdBackend._validate_program_selection(tmp_path, definition)
+
+
+def test_certificate_preparation_is_not_a_selected_runtime(tmp_path):
+    BusctlSystemdBackend._validate_program_selection(
+        tmp_path, dict(application_name="certify-manage",
+                       program_name="prepare", selected_program=None))
+    with pytest.raises(SystemdBackendError, match="not a selected runtime"):
+        BusctlSystemdBackend._validate_program_selection(
+            tmp_path, dict(application_name="certify-manage",
+                           program_name="prepare", selected_program="prepare"))
+
+
 def test_legacy_multiservice_without_selector_remains_compatible(tmp_path):
     BusctlSystemdBackend._validate_program_selection(
         tmp_path, dict(application_name="station-access", program_name="web"))
