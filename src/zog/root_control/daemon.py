@@ -102,6 +102,20 @@ class RootControlDaemon:
         finally:
             admission.release()
 
+    def _enqueue(self, conn, ingress, workers, slots, admission):
+        if not admission.acquire(blocking=False):
+            with conn:
+                self._respond(conn, {"ok": False, "error": "root-control admission busy"})
+            return False
+        try:
+            ingress.submit(self._admit, conn, workers, slots,
+                           admission, time.monotonic())
+        except BaseException:
+            admission.release()
+            conn.close()
+            raise
+        return True
+
     def serve(self):
         self._prepare_socket_parent()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -119,17 +133,7 @@ class RootControlDaemon:
                 admission = BoundedSemaphore(_INGRESS_WORKERS)
                 while True:
                     conn, _ = server.accept()
-                    if not admission.acquire(blocking=False):
-                        with conn:
-                            self._respond(conn, {"ok": False, "error": "root-control admission busy"})
-                        continue
-                    try:
-                        ingress.submit(self._admit, conn, workers, slots,
-                                      admission, time.monotonic())
-                    except BaseException:
-                        admission.release()
-                        conn.close()
-                        raise
+                    self._enqueue(conn, ingress, workers, slots, admission)
 
     @staticmethod
     def _respond(conn, response, *, operation=None, resource_id=None):
