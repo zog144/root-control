@@ -1,60 +1,149 @@
-"""Trusted-controller-only privileged socket group selection."""
+"""Exact-controller-UID privileged socket authority; native ACL audit separately."""
+import os
 from pathlib import Path
+import socket
+import stat
+import struct
 
 import pytest
 
 from zog.root_control import daemon
 
 
-def test_root_socket_defaults_keep_ownership_unchanged(tmp_path, monkeypatch):
-    changes = []
-    monkeypatch.setattr(daemon.os, "chown", lambda *a: changes.append(("chown", a)))
-    monkeypatch.setattr(daemon.os, "chmod", lambda *a: changes.append(("chmod", a)))
-    service = daemon.RootControlDaemon(tmp_path / "root-control.sock", systemd_backend=object())
-    service._protect_socket()
-    assert changes == [("chmod", (service.socket_path, 0o660))]
-
-
-def test_explicit_dedicated_controller_group_is_the_only_added_socket_permission(tmp_path, monkeypatch):
+def test_root_only_socket_default_is_not_group_accessible(tmp_path, monkeypatch):
     changes = []
     monkeypatch.setattr(daemon.os, "chown", lambda *a: changes.append(("chown", a)))
     monkeypatch.setattr(daemon.os, "chmod", lambda *a: changes.append(("chmod", a)))
     service = daemon.RootControlDaemon(tmp_path / "root-control.sock",
-                                       systemd_backend=object(), socket_group_gid=991)
+                                       systemd_backend=object())
+    service._protect_socket()
+    assert changes == [("chmod", (service.socket_path, 0o600))]
+
+
+def test_exact_controller_uid_and_optional_dedicated_group(tmp_path, monkeypatch):
+    changes = []
+    monkeypatch.setattr(daemon.os, "chown", lambda *a: changes.append(("chown", a)))
+    monkeypatch.setattr(daemon.os, "chmod", lambda *a: changes.append(("chmod", a)))
+    service = daemon.RootControlDaemon(tmp_path / "root-control.sock",
+                                       systemd_backend=object(),
+                                       controller_uid=20001, socket_group_gid=991)
     service._protect_socket()
     assert changes == [
-        ("chown", (service.socket_path, -1, 991)),
+        ("chown", (service.socket_path, 20001, 991)),
         ("chmod", (service.socket_path, 0o660)),
+    ]
+    changes.clear()
+    service = daemon.RootControlDaemon(tmp_path / "root-control.sock",
+                                       systemd_backend=object(), controller_uid=20001)
+    service._protect_socket()
+    assert changes == [
+        ("chown", (service.socket_path, 20001, -1)),
+        ("chmod", (service.socket_path, 0o600)),
     ]
 
 
+@pytest.mark.parametrize("uid", [0, 1, 999, -1, True, "1200", 2**31])
+def test_invalid_or_privileged_controller_uid_is_rejected(tmp_path, uid):
+    with pytest.raises(ValueError, match="controller UID"):
+        daemon.RootControlDaemon(tmp_path / "root.sock",
+                                 systemd_backend=object(), controller_uid=uid)
+
+
 @pytest.mark.parametrize("gid", [0, -1, True, "991", 2**31])
-def test_invalid_or_unprivileged_gid_is_rejected(tmp_path, gid):
+def test_invalid_socket_group_is_rejected(tmp_path, gid):
     with pytest.raises(ValueError, match="positive numeric GID"):
         daemon.RootControlDaemon(tmp_path / "root.sock",
-                                 systemd_backend=object(), socket_group_gid=gid)
+                                 systemd_backend=object(), controller_uid=20001,
+                                 socket_group_gid=gid)
 
 
-def test_main_applies_explicit_socket_gid_only_when_supplied(monkeypatch):
+def test_group_only_authority_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="group requires"):
+        daemon.RootControlDaemon(tmp_path / "root.sock",
+                                 systemd_backend=object(), socket_group_gid=991)
+
+
+def test_socket_peer_credential_uses_numeric_uid_not_group(tmp_path, monkeypatch):
+    service = daemon.RootControlDaemon(tmp_path / "root.sock",
+                                       systemd_backend=object(),
+                                       controller_uid=20001, socket_group_gid=991)
+    a, b = socket.socketpair()
+    class Peer:
+        def __init__(self, uid, gid=991):
+            self.uid, self.gid = uid, gid
+        def getsockopt(self, _level, _name, _length):
+            return struct.pack("3i", 123, self.uid, self.gid)
+    try:
+        service._authorize_peer(Peer(20001))
+        for uid in (0, 20002, 999):
+            with pytest.raises(PermissionError, match="unauthorized"):
+                service._authorize_peer(Peer(uid))
+    finally:
+        a.close()
+        b.close()
+
+
+def test_untrusted_parent_directory_denied_before_binding(tmp_path, monkeypatch):
+    parent = tmp_path / "run"
+    parent.mkdir()
+    path = parent / "control.sock"
+    service = daemon.RootControlDaemon(path, systemd_backend=object(),
+                                       controller_uid=20001)
+    monkeypatch.setattr(daemon.os, "getuid", lambda: 0)
+    # A world-writable or substituted parent can replace a privileged listener.
+    parent.chmod(0o777)
+    with pytest.raises(PermissionError, match="ancestry"):
+        service._prepare_socket_parent()
+    parent.chmod(0o700)
+    (parent / "sub").symlink_to(tmp_path)
+    changed = daemon.RootControlDaemon(parent / "sub/root.sock",
+                                       systemd_backend=object(), controller_uid=20001)
+    with pytest.raises(PermissionError, match="ancestry"):
+        changed._prepare_socket_parent()
+
+
+def test_existing_regular_file_must_not_be_unlinked(tmp_path, monkeypatch):
+    # Check the stale path rule independently; ancestors are intentionally
+    # mocked to avoid requiring root ownership of pytest temp directories.
+    service = daemon.RootControlDaemon(tmp_path / "root.sock",
+                                       systemd_backend=object(), controller_uid=20001)
+    service.socket_path.write_text("data")
+    with pytest.raises(PermissionError, match="ancestry|existing privileged"):
+        service._prepare_socket_parent()
+    assert service.socket_path.read_text() == "data"
+
+
+def test_main_pins_explicit_socket_owner_uid_and_gid(monkeypatch):
     calls = []
     class Service:
-        def __init__(self, socket_path, *, journal_barrier, socket_group_gid):
-            calls.append((socket_path, socket_group_gid))
+        def __init__(self, socket_path, *, journal_barrier,
+                     socket_group_gid, controller_uid):
+            calls.append((socket_path, socket_group_gid, controller_uid))
         def serve(self):
             calls.append("serve")
     monkeypatch.setattr(daemon, "RootControlDaemon", Service)
     monkeypatch.setenv("ROOT_CONTROL_SOCKET", "/run/zog/root-control.sock")
     monkeypatch.setenv("ROOT_CONTROL_SOCKET_GID", "991")
+    monkeypatch.setenv("ROOT_CONTROL_CONTROLLER_UID", "20001")
     daemon.main()
-    assert calls == [("/run/zog/root-control.sock", 991), "serve"]
+    assert calls == [("/run/zog/root-control.sock", 991, 20001), "serve"]
     calls.clear()
     monkeypatch.delenv("ROOT_CONTROL_SOCKET_GID")
+    monkeypatch.delenv("ROOT_CONTROL_CONTROLLER_UID")
     daemon.main()
-    assert calls == [("/run/zog/root-control.sock", None), "serve"]
+    assert calls == [("/run/zog/root-control.sock", None, None), "serve"]
 
 
 @pytest.mark.parametrize("invalid", ["", "-1", " 991", "controller", "1.0", "0x10"])
 def test_main_rejects_non_numeric_configuration(monkeypatch, invalid):
     monkeypatch.setenv("ROOT_CONTROL_SOCKET_GID", invalid)
     with pytest.raises(ValueError, match="numeric GID"):
+        daemon.main()
+
+
+@pytest.mark.parametrize("invalid", ["", "-1", " 991", "controller", "1.0", "0x10"])
+def test_main_rejects_non_numeric_uid_configuration(monkeypatch, invalid):
+    monkeypatch.delenv("ROOT_CONTROL_SOCKET_GID", raising=False)
+    monkeypatch.setenv("ROOT_CONTROL_CONTROLLER_UID", invalid)
+    with pytest.raises(ValueError, match="numeric UID"):
         daemon.main()
