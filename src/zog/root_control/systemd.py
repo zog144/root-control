@@ -721,12 +721,24 @@ class BusctlSystemdBackend:
         selected = definition.get('selected_program')
         application = str(definition.get('application_name', ''))
         program = str(definition.get('program_name', ''))
-        if selected is None:
-            if application == 'certify-manage' and program in {
-                    'issue', 'renew', 'inspect', 'stage'}:
+        # The certificate issuer is a fixed managed lifecycle, not a place
+        # to smuggle an ad-hoc long-running inspection service through an
+        # otherwise valid execution UID or software-view binding.  Preparation
+        # is a separate controller-owned workflow, not a selected action.
+        if application == 'certify-manage':
+            if program not in {'prepare', 'issue', 'renew', 'inspect', 'stage'}:
+                raise SystemdBackendError(
+                    'unsupported certificate lifecycle program'
+                )
+            if selected == 'prepare':
+                raise SystemdBackendError(
+                    'certificate preparation is not a selected runtime'
+                )
+            if selected is None and program != 'prepare':
                 raise SystemdBackendError(
                     'certificate lifecycle command requires selected-program authority'
                 )
+        if selected is None:
             return
         if (not isinstance(selected, str) or selected != program
                 or not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', selected)):
