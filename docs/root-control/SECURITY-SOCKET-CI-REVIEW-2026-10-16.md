@@ -33,3 +33,22 @@ root-control/.github/workflows/privileged-socket-regression.yml defines privileg
 - Disposable-host Work: native multi-client fairness, real kernel socket credentials, mount namespace and exact runtime grant, interruption/reboot safety. No production server restart, mount change, privilege grant, certificate issuance, or greetd login approval is authorized by these source changes.
 
 Disposition: SOURCE COMMITTED; CI TEST RESULTS AND NATIVE ACCEPTANCE PENDING.
+
+## Verified GitHub Actions evidence (2026-10-16)
+
+Successful ordinary documentation-only draft PRs (subsequently **closed, not merged**):
+
+- box-control PR #1: https://github.com/zog144/box-control/pull/1
+- Box candidate check controller-security-regression: https://github.com/zog144/box-control/actions/runs/38970885412 — **success: 468 passed, 0 skipped, 0 deselected, 0 failed**; report step explicitly verified all four symbolic identity cases, including both caller-credential parameterizations. Historical public-aggregate compatibility job also succeeded separately.
+- root-control PR #1: https://github.com/zog144/root-control/pull/1
+- Root candidate check privileged-socket-regression: https://github.com/zog144/root-control/actions/runs/38970889747 — **success: 195 passed, 0 skipped, 0 deselected, 0 failed**. Historical Public source verification also succeeded separately.
+
+Negative-control draft PR #2: https://github.com/zog144/box-control/pull/2 (subsequently **closed, not merged**). The deliberately failing test was appended to an included security-suite module **only on its scratch branch**. https://github.com/zog144/box-control/actions/runs/38971013118 returned **failure: 1 failed, 468 passed**. Its verification/report step also failed as required. The failing fixture never entered unstable. This proves the security CI **runs and rejects one synthetic failing test on an ordinary PR**; it does not prove branch-protection rules are installed or that the native host is safe.
+
+Exact candidate source pins in successful runs:
+
+- box-control workflow candidate checkout: the PR head b26701a38651678bca2f5d2108a629094efcc83f, exact root-control companion ba7d0e4afc18493a34d2fd9a05a661b2ca5ad8cd and historical Zog d47d86b363824c718d9c165124cb55bbed12e0f9.
+- root-control workflow candidate checkout: the PR head 0d2a563cd397ee2c4eb6801f73031ce31710ab33, exact box-control companion 03c847ec6adc55fd5e2268534d47b500d9f52ab9 and historical Zog d47d86b363824c718d9c165124cb55bbed12e0f9.
+- Both PRs targeted unstable. The candidate check names recommended for required branch status are **controller-security-regression** and **privileged-socket-regression** respectively.
+
+Native host-install socket/GID/SELinux, mount and reboot acceptance still pending; no production identity, privilege or kernel mount was altered.
