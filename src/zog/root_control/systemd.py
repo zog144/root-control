@@ -804,8 +804,27 @@ class BusctlSystemdBackend:
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError) as exc:
             raise SystemdBackendError('selected-program authority is unavailable or disagrees') from exc
 
+    @staticmethod
+    def _validate_local_login_manager(definition):
+        """Reserved privilege boundary: no greetd/PAM seat role exists in v1.
+
+        This is a fail-closed gate for known login-manager declarations, not
+        an authorization system for differently named privileged programs.
+        An eventual role must validate an exact grant, PAM/seat/VT/logind,
+        software view, command, identity and controller operation here.
+        """
+        app = str(definition.get("application_name", ""))
+        program = str(definition.get("program_name", ""))
+        reserved = {"greetd", "seatd", "login-manager", "display-manager",
+                    "local-login-manager", "greetd-daemon"}
+        if app in reserved or program in reserved:
+            raise SystemdBackendError(
+                "local seat login-manager authority is not implemented"
+            )
+
     @classmethod
     def _validate_service_definition(cls, project_root, generation, definition):
+        cls._validate_local_login_manager(definition)
         root = cls._validate_unit(project_root, str(definition["unit_name"]))
         cls._validate_unit(project_root, str(definition["slice_name"]))
         generation = str(generation)
