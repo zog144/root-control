@@ -17,7 +17,7 @@ from zog.box_control.errors import PersistenceError
 DEFAULT_SOCKET = Path("/run/zog/root-control.sock")
 _INGRESS_WORKERS = 4
 _INGRESS_DEADLINE_SECONDS = 10.0
-_OPERATION = re.compile(r"[a-z][a-z0-9_]{0,63}\\Z".replace("\\\\","\\"))
+_OPERATION = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 class RootControlDaemon:
