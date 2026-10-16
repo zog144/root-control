@@ -1,0 +1,109 @@
+name: Privileged socket security regression
+
+on:
+  pull_request:
+    branches: [main, unstable]
+  push:
+    branches: [main, unstable]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  privileged-socket-regression:
+    name: privileged-socket-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout current approved box-control source
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/box-control
+          ref: 03c847ec6adc55fd5e2268534d47b500d9f52ab9
+          path: companions/box-control
+          persist-credentials: false
+      - name: Checkout historical image-build fixture
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/zog
+          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
+          path: historical-zog
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify source revisions
+        run: |
+          set -euo pipefail
+          test "$(git -C companions/box-control rev-parse HEAD)" = "03c847ec6adc55fd5e2268534d47b500d9f52ab9"
+          test "$(git -C historical-zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
+          {
+            echo "## Privileged socket security source revisions"
+            echo "- Candidate root-control: $(git rev-parse HEAD)"
+            echo "- Approved controller companion: $(git -C companions/box-control rev-parse HEAD)"
+            echo "- Image-build: historical fixture only, no current approved image-build pin"
+            echo "- Host socket UID/GID, real mount and reboot: NOT native-tested"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Provide historical namespace support without replacing current components
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src = Path("historical-zog/src/zog").resolve()
+          dst = Path(".ci-deps/zog")
+          dst.mkdir(parents=True, exist_ok=True)
+          for p in src.iterdir():
+              if p.name in {"__init__.py", "__pycache__", "box_control", "root_control"}:
+                  continue
+              if p.is_dir() or (p.is_file() and p.suffix == ".py"):
+                  (dst / p.name).symlink_to(p)
+          assert not (dst / "__init__.py").exists()
+          PY
+      - name: Validate current package identity
+        run: |
+          python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10'
+          python -m pip install --no-deps -e . -e ./companions/box-control/box-control
+          python -m compileall -q src tests
+          python - <<'PY'
+          from pathlib import Path
+          import zog.root_control, zog.box_control
+          root = Path.cwd()
+          assert Path(zog.root_control.__file__).resolve().is_relative_to(root / "src")
+          assert Path(zog.box_control.__file__).resolve().is_relative_to(root / "companions/box-control/box-control/src")
+          PY
+      - name: Test privileged socket, mounts and controller grants
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --strict-markers --junitxml=security-results.xml             tests/test_daemon_socket_access.py             tests/test_daemon_admission.py             tests/test_selected_program_authority.py             tests/test_execution_identities.py             tests/test_private_persistent_storage.py             tests/test_root_control_systemd.py             tests/test_mounts.py             tests/test_issuer_observation.py             tests/test_journal_attribution.py             tests/test_systemd_jobs.py             | tee security-pytest.txt
+      - name: Explicit test totals and native hold
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import xml.etree.ElementTree as ET
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n## Required privileged-socket source cases\n")
+              path = Path("security-results.xml")
+              if not path.exists():
+                  summary.write("No test XML generated.\n")
+                  raise SystemExit(1)
+              root = ET.parse(path).getroot()
+              cases = list(root.iter("testcase"))
+              skipped = sum(c.find("skipped") is not None for c in cases)
+              failures = sum(c.find("failure") is not None for c in cases)
+              errors = sum(c.find("error") is not None for c in cases)
+              summary.write(f"Executed: {len(cases)}, skipped: {skipped}, failed: {failures}, errors: {errors}, deselected: 0.\n")
+              summary.write("Not deployment acceptance: exact host peers/socket DAC and native mount/device/systemd checks pending.\n")
+              if not any("test_stalled_frame_does_not_delay_valid_ping" in c.get("name", "") for c in cases):
+                  raise SystemExit("ingress fairness test absent")
+              if not any("test_privileged_raw_mount_and_unmount_are_not_exposed" in c.get("name", "") for c in cases):
+                  raise SystemExit("raw mount denial test absent")
+              if skipped or failures or errors:
+                  raise SystemExit("privileged socket source security regression")
+          PY
