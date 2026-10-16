@@ -187,3 +187,41 @@ def test_privileged_selected_stage_matches_exact_saved_stage_operation(tmp_path,
         BusctlSystemdBackend._validate_program_selection(
             project, dict(definition, selected_program="renew")
         )
+
+
+@pytest.mark.parametrize("application,program", [
+    ("greetd", "daemon"),
+    ("login-manager", "greet"),
+    ("display-manager", "greetd"),
+    ("desktop", "greetd"),
+    ("local-login-manager", "server"),
+    ("desktop", "seatd"),
+])
+def test_unapproved_local_login_manager_never_reaches_systemd(application, program):
+    definition = {"application_name": application, "program_name": program,
+                  "user": "0", "group": "0", "command": ["/usr/bin/true"]}
+    with pytest.raises(SystemdBackendError, match="local seat"):
+        BusctlSystemdBackend._validate_local_login_manager(definition)
+
+
+def test_local_login_fence_preserves_unprivileged_graphical_and_issuer_services():
+    for application, program in (
+        ("firefox", "browser"),
+        ("x11-server", "xorg"),
+        ("i3", "session"),
+        ("certify-manage", "renew"),
+        ("station-access", "web"),
+    ):
+        BusctlSystemdBackend._validate_local_login_manager(
+            {"application_name": application, "program_name": program}
+        )
+
+
+def test_local_login_fence_occurs_before_any_systemd_runtime_path_inspection():
+    with pytest.raises(SystemdBackendError, match="local seat"):
+        BusctlSystemdBackend._validate_service_definition(
+            "/not-a-real-project", "generation", {
+                "application_name": "greetd", "program_name": "daemon",
+                "unit_name": "forged.service",
+            }
+        )
