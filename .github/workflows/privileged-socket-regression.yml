@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: zog144/box-control
-          ref: eceb1dc718e64d364d2fb14fe4940c24ae571600
+          ref: 45c22d2d033b68483959456e859f267d150b487b
           path: companions/box-control
           persist-credentials: false
       - name: Checkout historical image-build fixture
@@ -41,7 +41,7 @@ jobs:
       - name: Verify source revisions
         run: |
           set -euo pipefail
-          test "$(git -C companions/box-control rev-parse HEAD)" = "eceb1dc718e64d364d2fb14fe4940c24ae571600"
+          test "$(git -C companions/box-control rev-parse HEAD)" = "45c22d2d033b68483959456e859f267d150b487b"
           test "$(git -C historical-zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
           {
             echo "## Privileged socket security source revisions"
