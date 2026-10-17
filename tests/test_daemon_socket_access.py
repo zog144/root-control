@@ -147,3 +147,21 @@ def test_main_rejects_non_numeric_uid_configuration(monkeypatch, invalid):
     monkeypatch.setenv("ROOT_CONTROL_CONTROLLER_UID", invalid)
     with pytest.raises(ValueError, match="numeric UID"):
         daemon.main()
+
+
+def test_console_progress_consumer_never_inherits_general_privileged_socket(monkeypatch):
+    """Separate consumer sockets are not alternate root-control controller UIDs."""
+    from zog.root_control.daemon import RootControlDaemon
+    import struct
+    service = RootControlDaemon("/run/zog/root-control.sock",
+                                systemd_backend=object(),
+                                controller_uid=12002)
+    class Peer:
+        def __init__(self, uid):
+            self.uid = uid
+        def getsockopt(self, level, name, maximum):
+            return struct.pack("3i", 100, self.uid, 12001)
+    service._authorize_peer(Peer(12002))
+    for consumer_uid in (12001, 12003):  # dedicated host-welcome and station
+        with pytest.raises(PermissionError, match="unauthorized"):
+            service._authorize_peer(Peer(consumer_uid))
