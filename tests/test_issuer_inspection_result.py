@@ -96,6 +96,7 @@ def observed(tmp_path, monkeypatch):
     }
     entry = {"_BOOT_ID": BOOT, "_SYSTEMD_INVOCATION_ID": INVOCATION,
              "_SYSTEMD_UNIT": UNIT, "_UID": "200001", "_TRANSPORT": "stdout",
+             "__REALTIME_TIMESTAMP": str(int(now.timestamp()*1_000_000)),
              "MESSAGE": "ZOG_CERTIFY_INSPECT_RESULT_V1 " +
                  json.dumps(value, sort_keys=True, separators=(",", ":"))}
     seen = []
@@ -124,7 +125,7 @@ def test_exact_invocation_one_record_is_proven_but_not_public_tls(observed):
     "missing", "duplicate", "wrong-boot", "wrong-invocation", "wrong-unit",
     "wrong-uid", "wrong-transport", "bad-schema", "wrong-policy", "wrong-san",
     "trailing-duplicate-json", "expired", "future-observation", "stale-observation",
-    "false-positive", "malformed-mark", "oversized",
+    "false-positive", "malformed-mark", "oversized", "wrong-journal-time",
 ])
 def test_journal_and_policy_fail_closed(observed, monkeypatch, failure):
     project, runtime, operation, record, entry, seen = observed
@@ -138,6 +139,8 @@ def test_journal_and_policy_fail_closed(observed, monkeypatch, failure):
                "wrong-unit": "_SYSTEMD_UNIT", "wrong-uid": "_UID",
                "wrong-transport": "_TRANSPORT"}[failure]
         entry[key] = "WRONG"
+    elif failure == "wrong-journal-time":
+        entry["__REALTIME_TIMESTAMP"] = "1234567"
     elif failure == "malformed-mark":
         entry["MESSAGE"] = "ZOG_CERTIFY_INSPECT_RESULT_V1 garbage"
     elif failure == "oversized":
@@ -212,4 +215,16 @@ def test_absent_or_truncated_journal_never_verifies(observed, monkeypatch):
     monkeypatch.setattr(ir, "run_bounded",
                         lambda *a, **k: (_ for _ in ()).throw(ValueError("journal over budget")))
     with pytest.raises(ValueError, match="budget"):
+        ir.read_selected_inspection(project_root=project.path, request_id=REQ)
+
+
+def test_old_but_valid_completed_inspection_is_not_actionable(observed):
+    project, runtime, operation, record, entry, seen = observed
+    past = datetime.now(timezone.utc) - timedelta(minutes=16)
+    operation["created_at"] = past.timestamp()-10
+    record["observed_at"] = past.isoformat()
+    record["operation_updated_at"] = (past-timedelta(minutes=1)).isoformat()
+    entry["__REALTIME_TIMESTAMP"] = str(int(past.timestamp()*1_000_000))
+    entry["MESSAGE"] = "ZOG_CERTIFY_INSPECT_RESULT_V1 " + json.dumps(record)
+    with pytest.raises(ir.IssuerInspectionEvidenceError, match="stale"):
         ir.read_selected_inspection(project_root=project.path, request_id=REQ)
