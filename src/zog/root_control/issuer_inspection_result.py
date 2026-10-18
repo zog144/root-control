@@ -93,9 +93,13 @@ def _record(line, *, policy, created_at):
     for key in ("valid_from", "expires_at", "operation_updated_at"):
         _time(raw[key], nullable=True)
     observed = _time(raw["observed_at"])
+    now = datetime.now(timezone.utc)
     if (not created_at <= observed.timestamp() + 120
-            or observed > datetime.now(timezone.utc) + timedelta(minutes=2)):
-        _fail("issuer inspection observation predates runtime or is in future")
+            or observed > now + timedelta(minutes=2)
+            or observed < now - timedelta(minutes=15)):
+        # Recovery may still inspect the saved controller request/result.
+        # A new selected inspection is required for actionable fresh status.
+        _fail("issuer inspection observation is stale or outside runtime")
     leaf = raw["certificate_fingerprint_sha256"]
     if leaf is not None and (type(leaf) is not str or _HEX.fullmatch(leaf) is None):
         _fail("issuer inspection fingerprint malformed")
@@ -240,8 +244,19 @@ def read_selected_inspection(*, project_root, request_id):
                 _fail("issuer inspect stdout attribution disagrees")
             if len(found) != 0:
                 _fail("duplicate issuer inspection stdout records")
-            found.append(_record(message, policy=policy_identity,
-                                 created_at=record["created_at"]))
+            verified = _record(message, policy=policy_identity,
+                               created_at=record["created_at"])
+            stamp = entry.get("__REALTIME_TIMESTAMP")
+            if (type(stamp) is not str or not stamp.isascii()
+                    or not stamp.isdecimal() or not 1 <= len(stamp) <= 20):
+                _fail("journal message timestamp unavailable")
+            try:
+                logged = datetime.fromtimestamp(int(stamp)/1_000_000, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                _fail("journal message timestamp malformed")
+            if abs((logged - _time(verified["observed_at"])).total_seconds()) > 120:
+                _fail("issuer journal and inspection clocks disagree")
+            found.append(verified)
     if len(found) != 1:
         _fail("issuer inspection has no unique authenticated record")
     evidence = found[0]
