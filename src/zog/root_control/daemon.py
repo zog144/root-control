@@ -145,7 +145,7 @@ class RootControlDaemon:
 
     def _dispatch(self, conn, request, workers, slots):
         operation = self._request_operation(request)
-        lane = 1 if operation in {'ping', 'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe'} else 0
+        lane = 1 if operation in {'ping', 'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
@@ -210,6 +210,13 @@ class RootControlDaemon:
                     or not set(arguments) <= {"project_root", "runtime_id", "limit"}):
                 raise ValueError("unsupported runtime credential inspection arguments")
             return {"ok": True, "result": inspect_runtime_credentials(**arguments)}
+        if operation == "issuer_inspect_result":
+            if set(request) != {"operation", "project_root", "request_id"}:
+                raise ValueError("invalid selected issuer inspection arguments")
+            from .issuer_inspection_result import read_selected_inspection
+            return {"ok": True, "result": read_selected_inspection(
+                project_root=request["project_root"], request_id=request["request_id"],
+            )}
         if operation == "issuer_observe":
             from .issuer_observation import observe_issuer_request
             if set(request) != {"operation", "project_root", "request_id"}:
