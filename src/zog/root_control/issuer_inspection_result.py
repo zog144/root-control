@@ -167,6 +167,7 @@ def _resolved_request(project, request_id):
             or member.unit_name != frozen_member.unit_name
             or member.command != frozen_member.command
             or member.expected_properties != frozen_member.expected_properties
+            or member.mount_inventory != frozen_member.mount_inventory
             or current.state != ApplicationRuntimeState.TERMINATED
             or current.cleanup_pending or current.error
             or member.result != "success" or member.active_state != "inactive"):
