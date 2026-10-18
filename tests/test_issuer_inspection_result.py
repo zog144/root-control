@@ -166,7 +166,7 @@ def test_journal_and_policy_fail_closed(observed, monkeypatch, failure):
 @pytest.mark.parametrize("failure", [
     "pending-request", "selector", "operation-incomplete", "new-runtime",
     "wrong-grant", "wrong-member", "unfinished", "failed-process",
-    "missing-invocation", "reboot-drift", "software-view-drift",
+    "missing-invocation", "reboot-drift", "software-view-drift", "mount-drift",
 ])
 def test_saved_controller_and_runtime_identity_is_mandatory(observed, failure):
     project, runtime, operation, record, entry, seen = observed
@@ -193,6 +193,8 @@ def test_saved_controller_and_runtime_identity_is_mandatory(observed, failure):
         store.save({RID: replace(runtime, programs=(replace(runtime.programs[0], invocation_id=None),))})
     if failure == "reboot-drift": store.save({RID: replace(runtime, boot_id="f"*32)})
     if failure == "software-view-drift": store.save({RID: replace(runtime, software_view="sha256:"+"a"*64)})
+    if failure == "mount-drift":
+        store.save({RID: replace(runtime, programs=(replace(runtime.programs[0], mount_inventory={}),))})
     with pytest.raises(Exception):
         ir.read_selected_inspection(project_root=project.path, request_id=REQ)
 
