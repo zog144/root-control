@@ -234,6 +234,14 @@ class BuildBackend:
         binding = registration['intent']
         if any(request[k] != binding[k] for k in ('execution_user_id', 'execution_group_id')):
             raise SystemdBackendError('execution identity differs from registration')
+        # The registration remains immutable, but host-install ownership can
+        # change between register and prepare. Never promote a previously
+        # separate build principal into the controller project's owner/group.
+        controller_root, _, _ = self.systemd._project(project_root)
+        owner = controller_root.stat()
+        if (binding['execution_user_id'] == owner.st_uid
+                or binding['execution_group_id'] == owner.st_gid):
+            raise SystemdBackendError('build principal now overlaps controller project ownership')
         source, output = Path(binding['source_directory']), Path(binding['output_directory'])
         executable = request['command'][0]
         directory = request['working_directory']
