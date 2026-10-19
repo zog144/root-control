@@ -206,3 +206,50 @@ def test_invalid_cpu_weight_rejected(registered,value):
     _,_,request=registered
     request['resource_limits']['cpu-weight']=value
     with pytest.raises(SystemdBackendError):canonical_request(request)
+
+
+@pytest.mark.parametrize("invalid", [
+    {"execution_user_id": 0},
+    {"execution_group_id": 0},
+    {"execution_user_id": True},
+    {"execution_group_id": True},
+    {"execution_user_id": 2**31},
+    {"execution_group_id": 2**31},
+])
+def test_registration_rejects_invalid_build_identities_before_privileged_import(registered, invalid):
+    backend, args, request = registered
+    with pytest.raises(SystemdBackendError, match="UID/GID"):
+        backend.register(**{**args, "resource_id": "f"*32, **invalid})
+    assert not backend.resource_path(args["project_root"], "f"*32).exists()
+
+
+def test_registration_rejects_controller_owner_gid_even_with_distinct_build_uid(
+        registered, monkeypatch):
+    from types import SimpleNamespace
+    backend, args, request = registered
+    project = args["project_root"]
+    original_stat = Path.stat
+    controller_gid = args["execution_group_id"]
+
+    class OwnerStat:
+        def __init__(self, real):
+            self.real = real
+            self.st_gid = controller_gid
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+    def controller_group(self, *pos, **kw):
+        value = original_stat(self, *pos, **kw)
+        return OwnerStat(value) if self == project else value
+
+    monkeypatch.setattr(Path, "stat", controller_group)
+    with pytest.raises(SystemdBackendError, match="must differ from controller"):
+        backend.register(**dict(args, resource_id="f"*32))
+    assert not backend.resource_path(project, "f"*32).exists()
+
+
+def test_registration_rejects_controller_owner_uid(registered):
+    backend, args, request = registered
+    uid = args["project_root"].stat().st_uid
+    with pytest.raises(SystemdBackendError, match="UID/GID"):
+        backend.register(**{**args, "resource_id": "f"*32, "execution_user_id": uid})
