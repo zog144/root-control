@@ -253,3 +253,27 @@ def test_registration_rejects_controller_owner_uid(registered):
     uid = args["project_root"].stat().st_uid
     with pytest.raises(SystemdBackendError, match="UID/GID"):
         backend.register(**{**args, "resource_id": "f"*32, "execution_user_id": uid})
+
+
+def test_preparation_rechecks_project_owner_after_immutable_registration(registered, monkeypatch):
+    """Changed host ownership cannot silently expand a frozen build grant."""
+    backend, args, request = registered
+    project = args["project_root"]
+    real_stat = Path.stat
+
+    class ChangedGroup:
+        def __init__(self, source):
+            self.source = source
+            self.st_gid = request["execution_group_id"]
+        def __getattr__(self, attribute):
+            return getattr(self.source, attribute)
+
+    def changed_stat(self, *pos, **kw):
+        value = real_stat(self, *pos, **kw)
+        return ChangedGroup(value) if self == project else value
+
+    monkeypatch.setattr(Path, "stat", changed_stat)
+    with pytest.raises(SystemdBackendError, match="now overlaps controller"):
+        backend.prepare(project_root=project, job_id="d"*32, request=request)
+    assert not (backend.resource_path(project, args["resource_id"]) /
+                "jobs" / ("d"*32 + ".json")).exists()
