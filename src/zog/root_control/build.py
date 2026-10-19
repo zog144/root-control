@@ -158,10 +158,14 @@ class BuildBackend:
             raise SystemdBackendError('build inputs must be directories beneath state/image-build/attempts')
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i+1:]):
             raise SystemdBackendError('build root/source/output paths must not overlap')
-        if type(execution_user_id) is not int or type(execution_group_id) is not int or min(execution_user_id, execution_group_id) <= 0:
-            raise SystemdBackendError('nonzero build UID/GID required')
-        if execution_user_id == root.stat().st_uid:
-            raise SystemdBackendError('build UID must differ from controller project owner')
+        if (type(execution_user_id) is not int or type(execution_group_id) is not int
+                or not 0 < execution_user_id < 2**31
+                or not 0 < execution_group_id < 2**31):
+            raise SystemdBackendError('separate nonzero numeric build UID/GID required')
+        project_owner = root.stat()
+        if (execution_user_id == project_owner.st_uid
+                or execution_group_id == project_owner.st_gid):
+            raise SystemdBackendError('build UID/GID must differ from controller project owner')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
