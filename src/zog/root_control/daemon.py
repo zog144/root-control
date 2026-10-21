@@ -112,6 +112,7 @@ class RootControlDaemon:
                 info = candidate.lstat()
                 if (not stat.S_ISDIR(info.st_mode)
                         or info.st_uid != self.controller_uid
+                        or info.st_gid != account.pw_gid
                         or info.st_mode & 0o022):
                     raise PermissionError("build Project ownership or permissions unsafe")
         except (OSError, RuntimeError, KeyError, ValueError) as exc:
