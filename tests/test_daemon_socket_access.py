@@ -242,7 +242,7 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
     def drifted(self):
         value = original(self)
         if self == home:
-            return SimpleNamespace(st_uid=actor_uid, st_mode=value.st_mode)
+            return SimpleNamespace(st_uid=actor_uid, st_gid=20002, st_mode=value.st_mode)
         if self == project:
             return SimpleNamespace(st_uid=actor_uid+1, st_gid=20002, st_mode=value.st_mode)
         return value
