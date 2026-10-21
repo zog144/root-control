@@ -236,8 +236,12 @@ class RootControlDaemon:
 
     def handle(self, request):
         operation = request.get("operation")
-        if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
+        # The scoped Project check applies to privileged build mutations
+        # AND their status/log/process readers; an authenticated controller
+        # cannot use a read-only build operation to inspect another owner.
+        if type(operation) is str and operation.startswith("build_"):
             self._authorize_build_project(request.get("project_root"))
+        if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
             arguments = {k:v for k,v in request.items() if k != "operation"}
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
