@@ -247,7 +247,7 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
             return SimpleNamespace(st_uid=actor_uid+1, st_mode=value.st_mode)
         return value
     monkeypatch.setattr(Path, "lstat", drifted)
-    with pytest.raises(PermissionError, match="ownership"):
+    with pytest.raises(PermissionError, match="build Project authority unavailable"):
         service.handle(request)
     assert len(spy.calls) == 1
 
@@ -258,7 +258,7 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
                                    st_mode=value.st_mode | 0o020)
         return value
     monkeypatch.setattr(Path, "lstat", writable)
-    with pytest.raises(PermissionError, match="ownership"):
+    with pytest.raises(PermissionError, match="build Project authority unavailable"):
         service.handle(request)
     assert len(spy.calls) == 1
 
@@ -275,5 +275,5 @@ def test_build_project_symlink_substitution_denied(tmp_path, monkeypatch):
     ))
     service = daemon.RootControlDaemon(tmp_path / "root.sock",
                                        systemd_backend=object(), controller_uid=20001)
-    with pytest.raises(PermissionError, match="authorized controller home"):
+    with pytest.raises(PermissionError, match="build Project authority unavailable"):
         service._authorize_build_project(str(replaced))
