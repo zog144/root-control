@@ -207,7 +207,7 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
     def owned(self):
         value = original(self)
         if self in (home, project):
-            return SimpleNamespace(st_uid=actor_uid, st_mode=value.st_mode)
+            return SimpleNamespace(st_uid=actor_uid, st_gid=20002, st_mode=value.st_mode)
         return value
     monkeypatch.setattr(Path, "lstat", owned)
     class BuildSpy:
@@ -244,7 +244,7 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
         if self == home:
             return SimpleNamespace(st_uid=actor_uid, st_mode=value.st_mode)
         if self == project:
-            return SimpleNamespace(st_uid=actor_uid+1, st_mode=value.st_mode)
+            return SimpleNamespace(st_uid=actor_uid+1, st_gid=20002, st_mode=value.st_mode)
         return value
     monkeypatch.setattr(Path, "lstat", drifted)
     with pytest.raises(PermissionError, match="build Project authority unavailable"):
@@ -254,11 +254,23 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
     def writable(self):
         value = original(self)
         if self in (home, project):
-            return SimpleNamespace(st_uid=actor_uid,
+            return SimpleNamespace(st_uid=actor_uid, st_gid=20002,
                                    st_mode=value.st_mode | 0o020)
         return value
     monkeypatch.setattr(Path, "lstat", writable)
     with pytest.raises(PermissionError, match="build Project authority unavailable"):
+        service.handle(request)
+    assert len(spy.calls) == 1
+
+    def group_drift(self):
+        value = original(self)
+        if self in (home, project):
+            return SimpleNamespace(st_uid=actor_uid,
+                                   st_gid=20003 if self == project else 20002,
+                                   st_mode=value.st_mode)
+        return value
+    monkeypatch.setattr(Path, "lstat", group_drift)
+    with pytest.raises(PermissionError, match="authority unavailable"):
         service.handle(request)
     assert len(spy.calls) == 1
 
