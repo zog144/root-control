@@ -236,6 +236,13 @@ def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypa
         with pytest.raises(PermissionError):
             service.handle(dict(request, project_root=invalid))
     assert len(spy.calls) == 1
+    # Read-only registration, journal and process interfaces must not
+    # become cross-Project inspection capabilities either.
+    for read in ("build_registration_status", "build_job_logs", "build_job_processes"):
+        with pytest.raises(PermissionError):
+            service.handle({"operation": read, "project_root": str(tmp_path / "other"),
+                            "resource_id": "b"*32, "job_id": "a"*32})
+    assert len(spy.calls) == 1
 
     # Authorization must not silently follow a replacement directory,
     # accept a different non-root owner or grant write access to others.
