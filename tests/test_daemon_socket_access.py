@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import stat
 import struct
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,19 +18,24 @@ def test_root_only_socket_default_is_not_group_accessible(tmp_path, monkeypatch)
     service = daemon.RootControlDaemon(tmp_path / "root-control.sock",
                                        systemd_backend=object())
     service._protect_socket()
-    assert changes == [("chmod", (service.socket_path, 0o600))]
+    assert changes == [
+        ("chown", (service.socket_path, 0, 0)),
+        ("chmod", (service.socket_path, 0o600)),
+    ]
 
 
 def test_exact_controller_uid_and_optional_dedicated_group(tmp_path, monkeypatch):
     changes = []
     monkeypatch.setattr(daemon.os, "chown", lambda *a: changes.append(("chown", a)))
     monkeypatch.setattr(daemon.os, "chmod", lambda *a: changes.append(("chmod", a)))
+    monkeypatch.setattr(daemon.pwd, "getpwuid",
+                        lambda uid: SimpleNamespace(pw_uid=uid, pw_gid=991))
     service = daemon.RootControlDaemon(tmp_path / "root-control.sock",
                                        systemd_backend=object(),
                                        controller_uid=20001, socket_group_gid=991)
     service._protect_socket()
     assert changes == [
-        ("chown", (service.socket_path, 20001, 991)),
+        ("chown", (service.socket_path, 0, 991)),
         ("chmod", (service.socket_path, 0o660)),
     ]
     changes.clear()
@@ -165,3 +171,109 @@ def test_console_progress_consumer_never_inherits_general_privileged_socket(monk
     for consumer_uid in (12001, 12003):  # dedicated host-welcome and station
         with pytest.raises(PermissionError, match="unauthorized"):
             service._authorize_peer(Peer(consumer_uid))
+
+
+def test_group_socket_denies_unreviewed_primary_gid_before_dac_changes(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(daemon.os, "chown", lambda *a: calls.append("chown"))
+    monkeypatch.setattr(daemon.os, "chmod", lambda *a: calls.append("chmod"))
+    service = daemon.RootControlDaemon(
+        tmp_path / "root.sock", systemd_backend=object(),
+        controller_uid=20001, socket_group_gid=20002,
+    )
+    monkeypatch.setattr(daemon.pwd, "getpwuid",
+                        lambda uid: SimpleNamespace(pw_uid=uid, pw_gid=20003))
+    with pytest.raises(PermissionError, match="primary group"):
+        service._protect_socket()
+    assert calls == []
+    monkeypatch.setattr(daemon.pwd, "getpwuid",
+                        lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    with pytest.raises(PermissionError, match="account missing"):
+        service._protect_socket()
+    assert calls == []
+
+
+def test_build_project_bound_to_passwd_home_and_nonroot_owner(tmp_path, monkeypatch):
+    home = tmp_path / "account"
+    project = home / "compiler-project"
+    project.mkdir(parents=True)
+    home.chmod(0o700)
+    project.chmod(0o700)
+    actor_uid = 20001
+    monkeypatch.setattr(daemon.pwd, "getpwuid", lambda uid: SimpleNamespace(
+        pw_uid=uid, pw_gid=20002, pw_dir=str(home)
+    ))
+    original = Path.lstat
+    def owned(self):
+        value = original(self)
+        if self in (home, project):
+            return SimpleNamespace(st_uid=actor_uid, st_mode=value.st_mode)
+        return value
+    monkeypatch.setattr(Path, "lstat", owned)
+    class BuildSpy:
+        def __init__(self): self.calls = []
+        def observe(self, **kw):
+            self.calls.append(kw)
+            return {"state": "running"}
+    service = daemon.RootControlDaemon(
+        tmp_path / "root.sock", systemd_backend=object(),
+        controller_uid=actor_uid, socket_group_gid=20002,
+    )
+    spy = BuildSpy()
+    service.build = spy
+    request = dict(operation="build_observe", project_root=str(project),
+                   job_id="a"*32, build_root_id="b"*32)
+    assert service.handle(request)["result"]["state"] == "running"
+    assert len(spy.calls) == 1
+    for invalid in (
+        str(tmp_path / "other"),
+        str(home),
+        str(project / ".." / "compiler-project"),
+        str(project) + "/not-present",
+        None,
+        12,
+    ):
+        with pytest.raises(PermissionError):
+            service.handle(dict(request, project_root=invalid))
+    assert len(spy.calls) == 1
+
+    # Authorization must not silently follow a replacement directory,
+    # accept a different non-root owner or grant write access to others.
+    def drifted(self):
+        value = original(self)
+        if self == home:
+            return SimpleNamespace(st_uid=actor_uid, st_mode=value.st_mode)
+        if self == project:
+            return SimpleNamespace(st_uid=actor_uid+1, st_mode=value.st_mode)
+        return value
+    monkeypatch.setattr(Path, "lstat", drifted)
+    with pytest.raises(PermissionError, match="ownership"):
+        service.handle(request)
+    assert len(spy.calls) == 1
+
+    def writable(self):
+        value = original(self)
+        if self in (home, project):
+            return SimpleNamespace(st_uid=actor_uid,
+                                   st_mode=value.st_mode | 0o020)
+        return value
+    monkeypatch.setattr(Path, "lstat", writable)
+    with pytest.raises(PermissionError, match="ownership"):
+        service.handle(request)
+    assert len(spy.calls) == 1
+
+
+def test_build_project_symlink_substitution_denied(tmp_path, monkeypatch):
+    home = tmp_path / "account"
+    home.mkdir()
+    original = home / "correct"
+    original.mkdir()
+    replaced = home / "replaced"
+    replaced.symlink_to(original, target_is_directory=True)
+    monkeypatch.setattr(daemon.pwd, "getpwuid", lambda uid: SimpleNamespace(
+        pw_uid=uid, pw_gid=20002, pw_dir=str(home)
+    ))
+    service = daemon.RootControlDaemon(tmp_path / "root.sock",
+                                       systemd_backend=object(), controller_uid=20001)
+    with pytest.raises(PermissionError, match="authorized controller home"):
+        service._authorize_build_project(str(replaced))
