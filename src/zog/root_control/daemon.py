@@ -1,4 +1,5 @@
 import os
+import pwd
 import re
 import socket
 import stat
@@ -61,13 +62,60 @@ class RootControlDaemon:
         self.socket_path.unlink()
 
     def _protect_socket(self):
-        # The exact controller *UID*, not membership in a shared group,
-        # is authorized for the complete privileged mechanism interface.
-        if self.controller_uid is not None or self.socket_group_gid is not None:
-            os.chown(self.socket_path,
-                     self.controller_uid if self.controller_uid is not None else -1,
-                     self.socket_group_gid if self.socket_group_gid is not None else -1)
-        os.chmod(self.socket_path, 0o660 if self.socket_group_gid is not None else 0o600)
+        # With a group grant the socket must remain root-owned. The fixed
+        # controller's *primary* GID allows Linux DAC admission without
+        # supplementary groups; SO_PEERCRED then authorizes its exact UID,
+        # never arbitrary members of that group (nor an SSM root peer).
+        if self.socket_group_gid is not None:
+            try:
+                account = pwd.getpwuid(self.controller_uid)
+            except KeyError as exc:
+                raise PermissionError("authorized controller account missing") from exc
+            if (account.pw_uid != self.controller_uid
+                    or account.pw_gid != self.socket_group_gid):
+                raise PermissionError("controller primary group differs from socket grant")
+            os.chown(self.socket_path, 0, self.socket_group_gid)
+            os.chmod(self.socket_path, 0o660)
+        elif self.controller_uid is not None:
+            # Preserve legacy owner-only mode, without a shared group grant.
+            os.chown(self.socket_path, self.controller_uid, -1)
+            os.chmod(self.socket_path, 0o600)
+        else:
+            os.chown(self.socket_path, 0, 0)
+            os.chmod(self.socket_path, 0o600)
+
+    def _authorize_build_project(self, project_root):
+        """Require an exact nonroot-owned Project below the authorized passwd home.
+
+        Apply before privileged build mutations; a caller cannot use a
+        controller socket grant to select an unrelated user's project.
+        Root-only legacy authority retains its separate installation policy.
+        """
+        if self.controller_uid is None:
+            return
+        if (type(project_root) is not str or not project_root.startswith("/")
+                or ".." in Path(project_root).parts):
+            raise PermissionError("build Project path must be canonical")
+        try:
+            account = pwd.getpwuid(self.controller_uid)
+            home = Path(account.pw_dir)
+            project = Path(project_root)
+            if (account.pw_uid != self.controller_uid or not home.is_absolute()
+                    or project == home or home not in project.parents
+                    or home.resolve(strict=True) != home
+                    or project.resolve(strict=True) != project):
+                raise PermissionError("build Project differs from authorized controller home")
+            candidate = home
+            for part in [None, *project.relative_to(home).parts]:
+                if part is not None:
+                    candidate /= part
+                info = candidate.lstat()
+                if (not stat.S_ISDIR(info.st_mode)
+                        or info.st_uid != self.controller_uid
+                        or info.st_mode & 0o022):
+                    raise PermissionError("build Project ownership or permissions unsafe")
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            raise PermissionError("build Project authority unavailable") from exc
 
     def _authorize_peer(self, conn):
         if not hasattr(socket, "SO_PEERCRED"):
@@ -188,6 +236,7 @@ class RootControlDaemon:
     def handle(self, request):
         operation = request.get("operation")
         if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
+            self._authorize_build_project(request.get("project_root"))
             arguments = {k:v for k,v in request.items() if k != "operation"}
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
