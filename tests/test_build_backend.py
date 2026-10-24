@@ -290,8 +290,7 @@ def test_portable_execstart_encodes_literal_shell_argv_without_changing_request(
     assert props['ExecStart'].signature == 'a(sasb)'
     assert props['ExecStart'].value == [[
         '/bin/cc', [
-            '/bin/cc', '-c', original.replace('$', '$$').replace('%', '%%'),
-            '100%% value', 'literal $$ONE'
+            '/bin/cc', '-c', original.replace('
         ], False
     ]]
     assert info['request']['command'] == request['command']
@@ -337,3 +336,117 @@ def test_reloaded_legacy_bad_setting_never_infers_completed_job_from_exit_zero(r
     assert job_path.read_bytes() == before
     assert json.loads(job_path.read_text())['start_attempted'] is True
     assert backend.systemd.properties['ExecStart'].signature == 'a(sasb)'
+, '$'),
+            '100% value', 'literal $ONE'
+        ], False
+    ]]
+    assert info['request']['command'] == request['command']
+    expected = backend.expected_properties(
+        backend.resource_path(args['project_root'], args['resource_id']), info)
+    assert expected['ExecStart'] == props['ExecStart'].value[0][1]
+    # Reusing the original request is not permission to replay a start.
+    with pytest.raises(SystemdBackendError, match="already attempted"):
+        backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+
+
+@pytest.mark.parametrize('argument', [chr(0), '$env', '%i'])
+def test_reload_safe_execstart_refuses_unsupported_executable(argument):
+    with pytest.raises(SystemdBackendError):
+        BuildBackend._reload_safe_argv(['/bin/' + argument, 'ordinary'])
+
+
+def test_reload_safe_execstart_refuses_embedded_nul_in_argument():
+    with pytest.raises(SystemdBackendError):
+        BuildBackend._reload_safe_argv(['/bin/cc', 'value'+chr(0)+'other'])
+
+
+def test_reloaded_legacy_bad_setting_never_infers_completed_job_from_exit_zero(registered, monkeypatch):
+    """Missing ExecStart after reload is an integrity fault, not job success."""
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+    job_path = backend.resource_path(args['project_root'], args['resource_id']) / 'jobs' / ('a'*32+'.json')
+    before = job_path.read_bytes()
+    # The historical systemd 252 reload drops an ExecStartEx-only command.
+    backend.systemd.observe = lambda **kw: {
+        'exists': True,
+        'unit_name': info['unit_name'],
+        'invocation_id': '1'*32,
+        'active_state': 'inactive',
+        'result': 'success',
+        'properties': [],
+    }
+    backend.systemd._get_unit_path = lambda unit: '/org/freedesktop/systemd1/unit/retained'
+    backend.systemd._get_property = lambda *args: None
+    with pytest.raises(SystemdBackendError, match='build property mismatch'):
+        backend.observe(project_root=args['project_root'], job_id='a'*32,
+                        build_root_id=args['resource_id'])
+    assert job_path.read_bytes() == before
+    assert json.loads(job_path.read_text())['start_attempted'] is True
+    assert backend.systemd.properties['ExecStart'].signature == 'a(sasb)'
+
+
+def test_native_252_reload_execstart_readback_matches_only_bound_argv():
+    """Exact readback from systemd 252.23-12 after a real daemon-reload."""
+    original = [
+        '/fixture', '15', '$HOME', '${FOO}', '${VAR}', '$$',
+        '%i', '%%', 'quote"test', "single'quote", 'two words', 'semi;colon'
+    ]
+    launch = BuildBackend._reload_safe_argv(original)
+    assert launch == [
+        '/fixture', '15', '$$HOME', '${FOO}', '${VAR}', '$$$$',
+        '%i', '%%', 'quote"test', "single'quote", 'two words', 'semi;colon'
+    ]
+    readback_after_reload = [
+        '/fixture', '15', r'\$\$HOME', r'\$\${FOO}', r'\$\${VAR}',
+        r'\$\$\$\$', '%i', '%%', 'quote"test', "single'quote",
+        'two words', r'semi\;colon'
+    ]
+    assert BuildBackend._matches_exec_start(launch, launch)
+    assert BuildBackend._matches_exec_start(readback_after_reload, launch)
+    # All of these would indicate a changed command or invalid systemd
+    # serialization, not a permissible representation of the frozen job.
+    for altered in (
+        launch[:6] + ['%%i', '%%', *launch[8:]],
+        launch[:6] + ['%i', '%%%%', *launch[8:]],
+        readback_after_reload[:-1] + [r'semi\\;colon'],
+        readback_after_reload[:-1] + ['semi;other'],
+        readback_after_reload[1:],
+        [*readback_after_reload, 'extra'],
+        ' '.join(readback_after_reload),
+        None,
+    ):
+        assert not BuildBackend._matches_exec_start(altered, launch)
+
+
+def test_build_observation_native_252_reload_is_exact_not_unescaped(registered):
+    backend, args, request = registered
+    request['command'] = ['cc', '$HOME', '%i', '%%', 'semi;colon']
+    info = backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    expected = backend.expected_properties(path, info)
+    assert expected['ExecStart'] == ['/bin/cc', '$$HOME', '%i', '%%', 'semi;colon']
+    job_path = path / 'jobs' / ('a'*32 + '.json')
+    saved = job_path.read_bytes()
+    observed_props = dict(expected)
+    observed_props['ExecStart'] = ['/bin/cc', r'\$\$HOME', '%i', '%%', r'semi\;colon']
+
+    backend.systemd.observe = lambda **kw: dict(
+        exists=True, active_state='active', control_group=None,
+        properties=list(observed_props.items()), invocation_id='a'*32,
+    )
+    backend.systemd._get_unit_path = lambda unit: '/org/freedesktop/systemd1/unit/retained'
+    def get_property(*args):
+        return {'PrivateNetwork': True, 'NoNewPrivileges': True,
+                'CapabilityBoundingSet': 0,
+                'RuntimeMaxUSec': 8_000_000}.get(args[-1], 0)
+    backend.systemd._get_property = get_property
+    result = backend.observe(project_root=args['project_root'], job_id='a'*32,
+                             build_root_id=args['resource_id'])
+    assert result['exists'] and result['invocation_id'] == 'a'*32
+    assert job_path.read_bytes() == saved
+    # A command change is still a controller integrity fault.
+    observed_props['ExecStart'] = ['/bin/cc', r'\$\$HOME', '%%i', '%%', r'semi\;colon']
+    with pytest.raises(SystemdBackendError, match='build property mismatch: ExecStart'):
+        backend.observe(project_root=args['project_root'], job_id='a'*32,
+                        build_root_id=args['resource_id'])
+    assert job_path.read_bytes() == saved
