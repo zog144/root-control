@@ -59,8 +59,9 @@ def test_properties_enforce_finite_unprivileged_network_disabled_execution(regis
     assert props['RuntimeMaxUSec'].value==8000000
     assert props['TimeoutStartUSec'].value==5000000
     assert props['TimeoutStopUSec'].value==2000000
-    assert props['ExecStartEx'].value[0][0]=='/bin/cc'
-    assert props['ExecStartEx'].value[0][2]==['no-env-expand']
+    assert props['ExecStart'].signature == 'a(sasb)'
+    assert props['ExecStart'].value == [['/bin/cc',['/bin/cc','-v'],False]]
+    assert 'ExecStartEx' not in props
     assert props['ProtectSystem'].value=='strict'
     with pytest.raises(SystemdBackendError): backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
 
@@ -277,3 +278,37 @@ def test_preparation_rechecks_project_owner_after_immutable_registration(registe
         backend.prepare(project_root=project, job_id="d"*32, request=request)
     assert not (backend.resource_path(project, args["resource_id"]) /
                 "jobs" / ("d"*32 + ".json")).exists()
+
+
+def test_portable_execstart_encodes_literal_shell_argv_without_changing_request(registered):
+    backend, args, request = registered
+    original = '/bin/sh -c "printf %s $HOME ${HOME} $$ %n"'
+    request['command'] = ['cc', '-c', original, '100% value', 'literal $ONE']
+    info = backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+    props = backend.systemd.properties
+    assert 'ExecStartEx' not in props
+    assert props['ExecStart'].signature == 'a(sasb)'
+    assert props['ExecStart'].value == [[
+        '/bin/cc', [
+            '/bin/cc', '-c', original.replace('$', '$$').replace('%', '%%'),
+            '100%% value', 'literal $$ONE'
+        ], False
+    ]]
+    assert info['request']['command'] == request['command']
+    expected = backend.expected_properties(
+        backend.resource_path(args['project_root'], args['resource_id']), info)
+    assert expected['ExecStart'] == props['ExecStart'].value[0][1]
+    # Reusing the original request is not permission to replay a start.
+    with pytest.raises(SystemdBackendError, match="already attempted"):
+        backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+
+
+@pytest.mark.parametrize('argument', ['\\x00', '$env', '%i'])
+def test_reload_safe_execstart_refuses_unsupported_executable(argument):
+    with pytest.raises(SystemdBackendError):
+        BuildBackend._reload_safe_argv(['/bin/' + argument, 'ordinary'])
+
+
+def test_reload_safe_execstart_refuses_embedded_nul_in_argument():
+    with pytest.raises(SystemdBackendError):
+        BuildBackend._reload_safe_argv(['/bin/cc', 'value'+'\\x00'+'other'])
