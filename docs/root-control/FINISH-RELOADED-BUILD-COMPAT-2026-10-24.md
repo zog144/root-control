@@ -1,3 +1,5 @@
+> **2026-10-24 later native correction:** The first future-job candidate `5f8b1320...` **FAILED** actual systemd `252.23-12.amzn2023` acceptance. It doubled process percent arguments and post-reload D-Bus `ExecStart` acquired literal backslashes before dollars and semicolons. [Native failure and exact argv evidence](https://github.com/zog144/know-file/blob/c8c538eddcb56e28a682aeab5b55b9b88ef83c3f/root-control/verification/native-reload-2026-10-24/README.md). A subsequent **source-only candidate** `bc52f2e9e8696acaef15db09e50bec21b084248a` corrects percent handling and checks exactly the two known representation arrays without generic unescaping. [Source security CI](https://github.com/zog144/root-control/actions/runs/40119150029) passed 292 cases; [public source CI](https://github.com/zog144/root-control/actions/runs/40119150098) passed. **New native acceptance is still pending**. The earlier source-green statement below is preserved as history, not the latest acceptance. Historical original job recovery remains entirely separate and blocked.
+
 # Finite build transient unit reload compatibility and original compiler recovery
 
 **Date:** 2026-10-24  
