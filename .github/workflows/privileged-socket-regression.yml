@@ -79,7 +79,7 @@ jobs:
       - name: Test privileged socket, mounts and controller grants
         run: |
           set -euo pipefail
-          python -m pytest -q -ra --strict-markers --junitxml=security-results.xml             tests/test_daemon_socket_access.py             tests/test_daemon_admission.py             tests/test_selected_program_authority.py             tests/test_execution_identities.py             tests/test_private_persistent_storage.py             tests/test_root_control_systemd.py             tests/test_mounts.py             tests/test_issuer_observation.py             tests/test_issuer_inspection_result.py             tests/test_journal_attribution.py             tests/test_systemd_jobs.py             tests/test_build_backend.py             | tee security-pytest.txt
+          python -m pytest -q -ra --strict-markers --junitxml=security-results.xml             tests/test_daemon_socket_access.py             tests/test_daemon_admission.py             tests/test_selected_program_authority.py             tests/test_execution_identities.py             tests/test_private_persistent_storage.py             tests/test_root_control_systemd.py             tests/test_mounts.py             tests/test_issuer_observation.py             tests/test_issuer_inspection_result.py             tests/test_journal_attribution.py             tests/test_systemd_jobs.py             tests/test_build_backend.py             tests/test_journal_barrier.py             | tee security-pytest.txt
       - name: Explicit test totals and native hold
         if: always()
         run: |
