@@ -316,6 +316,11 @@ class BuildBackend:
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
         if self.systemd.version() < 250: raise SystemdBackendError('systemd 250 or later required')
+        # Verify the exact reload-safe representation BEFORE persisting the
+        # one-way start_attempted marker or touching systemd.
+        r = info['request']
+        command = [info['resolved_executable'], *r['command'][1:]]
+        literal_argv = self._reload_safe_argv(command)
         null_device = self.private_null(path) if info['request'].get('device_profile') == 'private-null-permission-test' else None
         if self.journal_barrier:
             if request['termination_grace_seconds'] < 3:
@@ -331,7 +336,7 @@ class BuildBackend:
         info['start_attempted'] = True
         replace_json(job_path, info)
         self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
-        r = info['request']; bind = registration['intent']; command = [info['resolved_executable'], *r['command'][1:]]
+        bind = registration['intent']
         # Fixed security policy; callers cannot weaken these properties.
         values = {
             'Description': ('s', 'Zog finite build job'), 'Slice': ('s', info['slice_name']),
@@ -362,7 +367,6 @@ class BuildBackend:
         # releases accept ExecStartEx over D-Bus but serialize it as an
         # unknown key on daemon-reload, destroying observation properties.
         # Explicit encoding retains the frozen literal argv semantics.
-        literal_argv = self._reload_safe_argv(command)
         props += [self.systemd._property('Environment', 'as', len(environment), *environment),
                   self.systemd._property('ExecStart', 'a(sasb)', 1,
                       command[0], len(literal_argv), *literal_argv, 'false'),
