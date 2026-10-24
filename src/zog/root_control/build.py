@@ -303,10 +303,10 @@ class BuildBackend:
         while preserving the original argv separately in the durable job.
         A native systemd 252 reload test is required before deployment.
         """
-        if (not command or any(type(arg) is not str or "\\x00" in arg for arg in command)
+        if (not command or any(type(arg) is not str or "\x00" in arg for arg in command)
                 or "$" in command[0] or "%" in command[0]):
             raise SystemdBackendError("unsupported literal build executable")
-        return [command[0], *(arg.replace("$", "$").replace("%", "%%")
+        return [command[0], *(arg.replace("$", "$$").replace("%", "%%")
                               for arg in command[1:])]
 
     def start(self, *, project_root, job_id, request):
