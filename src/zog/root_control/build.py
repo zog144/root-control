@@ -291,6 +291,24 @@ class BuildBackend:
         synchronize_directory(path)
         return node
 
+    @staticmethod
+    def _reload_safe_argv(command):
+        """Encode literal argv for the portable systemd ExecStart D-Bus property.
+
+        ExecStartEx/no-env-expand survives the initial D-Bus launch on some
+        releases but systemd 252 serializes it as an unrecognized unit-file
+        key. ExecStart is understood when a transient unit is reloaded.
+        Its environment/specifier substitution must not reinterpret the
+        controller's saved command bytes: quote the special characters here
+        while preserving the original argv separately in the durable job.
+        A native systemd 252 reload test is required before deployment.
+        """
+        if (not command or any(type(arg) is not str or "\\x00" in arg for arg in command)
+                or "$" in command[0] or "%" in command[0]):
+            raise SystemdBackendError("unsupported literal build executable")
+        return [command[0], *(arg.replace("$", "$").replace("%", "%%")
+                              for arg in command[1:])]
+
     def start(self, *, project_root, job_id, request):
         info = self.prepare(project_root=project_root, job_id=job_id, request=request)
         path, registration = self.load(project_root, request['build_root_id'])
@@ -340,8 +358,14 @@ class BuildBackend:
         environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
         binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
         if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
+        # Use the stable ExecStart property, not ExecStartEx. Older systemd
+        # releases accept ExecStartEx over D-Bus but serialize it as an
+        # unknown key on daemon-reload, destroying observation properties.
+        # Explicit encoding retains the frozen literal argv semantics.
+        literal_argv = self._reload_safe_argv(command)
         props += [self.systemd._property('Environment', 'as', len(environment), *environment),
-                  ['ExecStartEx',Variant('a(sasas)',[[command[0],command,['no-env-expand']]])],
+                  self.systemd._property('ExecStart', 'a(sasb)', 1,
+                      command[0], len(literal_argv), *literal_argv, 'false'),
                   self.systemd._property('BindPaths','a(ssbt)',len(binds)//4,*binds)]
         if self.journal_barrier:
             # All injected paths are under the controller-created /run directory.
@@ -352,9 +376,11 @@ class BuildBackend:
                 self.systemd._property('BindReadOnlyPaths','a(ssbt)',2,
                     str(self.journal_barrier.socket_path.parent),'/run/zog-journal','false',0,
                     str(self.journal_barrier.helper),'/run/zog-journal/wait','false',0),
-                ['ExecStopPostEx',Variant('a(sasas)',[[
-                    '/run/zog-journal/wait', ['/run/zog-journal/wait',info['journal_barrier_token']],
-                    ['no-env-expand','ignore-failure']]])]]
+                # ExecStopPostEx has the same reload-serialization defect.
+                # The last boolean preserves its ignore-failure policy.
+                self.systemd._property('ExecStopPost', 'a(sasb)', 1,
+                    '/run/zog-journal/wait', 2, '/run/zog-journal/wait',
+                    info['journal_barrier_token'], 'true')]
         self.systemd._job('StartTransientUnit','ssa(sv)a(sa(sv))',[info['unit_name'],'fail',props,[]])
         return info
 
@@ -365,7 +391,8 @@ class BuildBackend:
                 'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
-                'ExecStart':[info['resolved_executable'], *r['command'][1:]],
+                'ExecStart':BuildBackend._reload_safe_argv(
+                    [info['resolved_executable'], *r['command'][1:]]),
                 'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
                 'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
 
