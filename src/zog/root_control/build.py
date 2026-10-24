@@ -293,21 +293,299 @@ class BuildBackend:
 
     @staticmethod
     def _reload_safe_argv(command):
-        """Encode literal argv for the portable systemd ExecStart D-Bus property.
+        """Encode frozen literal argv for systemd's ExecStart D-Bus launch.
 
-        ExecStartEx/no-env-expand survives the initial D-Bus launch on some
-        releases but systemd 252 serializes it as an unrecognized unit-file
-        key. ExecStart is understood when a transient unit is reloaded.
-        Its environment/specifier substitution must not reinterpret the
-        controller's saved command bytes: quote the special characters here
-        while preserving the original argv separately in the durable job.
-        A native systemd 252 reload test is required before deployment.
+        On systemd 252, ExecStart expands dollars during execution, requiring
+        '$' to pass one literal '
+    def start(self, *, project_root, job_id, request):
+        info = self.prepare(project_root=project_root, job_id=job_id, request=request)
+        path, registration = self.load(project_root, request['build_root_id'])
+        job_path = path/'jobs'/(job_id+'.json')
+        if info.get('start_attempted'):
+            raise SystemdBackendError('build start already attempted; inspect existing job')
+        if self.systemd.version() < 250: raise SystemdBackendError('systemd 250 or later required')
+        # Verify the exact reload-safe representation BEFORE persisting the
+        # one-way start_attempted marker or touching systemd.
+        r = info['request']
+        command = [info['resolved_executable'], *r['command'][1:]]
+        literal_argv = self._reload_safe_argv(command)
+        null_device = self.private_null(path) if info['request'].get('device_profile') == 'private-null-permission-test' else None
+        if self.journal_barrier:
+            if request['termination_grace_seconds'] < 3:
+                raise SystemdBackendError('journal barrier requires at least 3 seconds termination grace')
+            # Registration is durable before systemd can run the exit hook.
+            # Retry before start reuses its identity; attempted jobs never restart.
+            if not info.get('journal_barrier_token'):
+                info['journal_barrier_token'] = self.journal_barrier.register(
+                    info['unit_name'], request['execution_user_id'], job_id)
+                replace_json(job_path, info)
+        elif info.get('journal_barrier_token'):
+            raise SystemdBackendError('prepared journal barrier requires enabled broker')
+        info['start_attempted'] = True
+        replace_json(job_path, info)
+        self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
+        bind = registration['intent']
+        # Fixed security policy; callers cannot weaken these properties.
+        values = {
+            'Description': ('s', 'Zog finite build job'), 'Slice': ('s', info['slice_name']),
+            'Type': ('s', 'exec'), 'ExitType': ('s', 'cgroup'), 'Restart': ('s', 'no'),
+            'KillMode': ('s', 'control-group'), 'RemainAfterExit': ('b', False), 'AddRef': ('b', True),
+            'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
+            'User': ('s', str(r['execution_user_id'])), 'Group': ('s', str(r['execution_group_id'])),
+            'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
+            'PrivateTmp': ('b', True), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
+            'CapabilityBoundingSet': ('t', 0), 'AmbientCapabilities': ('t', 0),
+            'StandardOutput': ('s', 'journal'), 'StandardError': ('s', 'journal'),
+            'TimeoutStartUSec': ('t', int(r['startup_timeout_seconds']*1000000)),
+            'RuntimeMaxUSec': ('t', int(r['execution_timeout_seconds']*1000000)),
+            'TimeoutStopUSec': ('t', int(r['termination_grace_seconds']*1000000)),
+            'SendSIGKILL': ('b', True), 'TasksMax': ('t', r['resource_limits']['thread-count-maximum']),
+            'MemoryMax': ('t', r['resource_limits']['memory-maximum-bytes'])}
+        if 'cpu-weight' in r['resource_limits']:
+            values['CPUWeight'] = ('t', r['resource_limits']['cpu-weight'])
+        if 'stack-maximum-bytes' in r['resource_limits']:
+            stack = r['resource_limits']['stack-maximum-bytes']
+            values['LimitSTACK'] = ('t', stack)
+            values['LimitSTACKSoft'] = ('t', stack)
+        props = [self.systemd._property(k, sig, value) for k,(sig,value) in values.items()]
+        environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
+        binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
+        if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
+        # Use the stable ExecStart property, not ExecStartEx. Older systemd
+        # releases accept ExecStartEx over D-Bus but serialize it as an
+        # unknown key on daemon-reload, destroying observation properties.
+        # Explicit encoding retains the frozen literal argv semantics.
+        props += [self.systemd._property('Environment', 'as', len(environment), *environment),
+                  self.systemd._property('ExecStart', 'a(sasb)', 1,
+                      command[0], len(literal_argv), *literal_argv, 'false'),
+                  self.systemd._property('BindPaths','a(ssbt)',len(binds)//4,*binds)]
+        if self.journal_barrier:
+            # All injected paths are under the controller-created /run directory.
+            target = path/'root/run/zog-journal'
+            if target.is_symlink(): raise SystemdBackendError('unsafe barrier mount target')
+            target.mkdir(exist_ok=True)
+            props += [
+                self.systemd._property('BindReadOnlyPaths','a(ssbt)',2,
+                    str(self.journal_barrier.socket_path.parent),'/run/zog-journal','false',0,
+                    str(self.journal_barrier.helper),'/run/zog-journal/wait','false',0),
+                # ExecStopPostEx has the same reload-serialization defect.
+                # The last boolean preserves its ignore-failure policy.
+                self.systemd._property('ExecStopPost', 'a(sasb)', 1,
+                    '/run/zog-journal/wait', 2, '/run/zog-journal/wait',
+                    info['journal_barrier_token'], 'true')]
+        self.systemd._job('StartTransientUnit','ssa(sv)a(sa(sv))',[info['unit_name'],'fail',props,[]])
+        return info
+
+    @staticmethod
+    def expected_properties(path, info):
+        r = info['request']
+        return {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
+                'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
+                'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
+                'WorkingDirectory':r['working_directory'],
+                'ExecStart':BuildBackend._reload_safe_argv(
+                    [info['resolved_executable'], *r['command'][1:]]),
+                'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
+                'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
+
+    def observe(self, *, project_root, job_id, build_root_id):
+        path, _ = self.load(project_root, build_root_id)
+        job_path = path/'jobs'/(identity(job_id)+'.json')
+        if not job_path.exists(): return {'exists':False}
+        info = json.loads(job_path.read_text())
+        expected = self.expected_properties(path,info)
+        try:
+            raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
+            if raw['exists']:
+                obj = self.systemd._get_unit_path(info['unit_name'])
+                properties = dict(raw['properties'])
+                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec'):
+                    properties[name]=self.systemd._get_property(obj,'org.freedesktop.systemd1.Service',name)
+                for name,value in expected.items():
+                    observed = properties.get(name)
+                    matching = (self._matches_exec_start(observed, value)
+                                if name == 'ExecStart' else observed == value)
+                    if not matching:
+                        raise SystemdBackendError(f'build property mismatch: {name}')
+                for key in ('ExecMainCode', 'ExecMainStatus', 'ExecMainExitTimestampMonotonic'):
+                    raw[key] = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', key)
+                raw['cgroup_empty'] = (self.cgroup_empty(raw.get('control_group')) if raw.get('control_group') else raw.get('active_state') in ('inactive','failed'))
+        except SystemdBackendError:
+            # The last AddRef can vanish during this multi-property observation.
+            # Only independently verified absence allows the durable fallback.
+            if self.systemd._get_unit_path(info['unit_name']) is not None: raise
+            raw = {'exists':False}
+        token = info.get('journal_barrier_token')
+        if token:
+            from .journal_barrier import JournalBarrier
+            barrier = self.journal_barrier or JournalBarrier()
+            raw['journal_barrier'] = barrier.status(token)
+            if not raw.get('exists'):
+                evidence = barrier.evidence(token,unit=info['unit_name'],job_id=job_id,
+                                            uid=info['request']['execution_user_id'])
+                if evidence is not None:
+                    properties=dict(evidence['properties'])
+                    properties['ExecStart']=self.systemd._normalize_exec_start(properties.get('ExecStart'))
+                    for name,value in expected.items():
+                        observed = properties.get(name)
+                        matching = (self._matches_exec_start(observed, value)
+                                    if name == 'ExecStart' else observed == value)
+                        if not matching:
+                            raise SystemdBackendError(f'exit evidence property mismatch: {name}')
+                    raw['terminal_evidence']={k:v for k,v in evidence.items() if k!='properties'}
+            if raw['journal_barrier']['status'] in ('pending','attempted') and (not raw.get('exists') or raw.get('active_state') in ('inactive','failed')):
+                raw['journal_barrier']['status'] = 'unconfirmed'
+        else:
+            raw['journal_barrier'] = {'status':'not-enabled'}
+        return raw
+
+    @staticmethod
+    def cgroup_empty(group):
+        if not group: return False
+        path = Path('/sys/fs/cgroup') / group.lstrip('/')
+        if not path.resolve().is_relative_to('/sys/fs/cgroup'): raise SystemdBackendError('invalid cgroup path')
+        try:
+            values = dict(line.split() for line in (path/'cgroup.events').read_text().splitlines())
+            return values.get('populated') == '0'
+        except FileNotFoundError: return True
+
+    def cleanup(self, *, project_root, job_id, build_root_id):
+        path, _ = self.load(project_root, build_root_id)
+        job_path = path/'jobs'/(identity(job_id)+'.json')
+        if not job_path.exists(): return True  # No start is possible without its durable privileged record.
+        info = json.loads(job_path.read_text())
+        for unit in (info['unit_name'], info['slice_name']):
+            raw = self.systemd.observe(project_root=project_root, unit_name=unit)
+            if raw['exists']:
+                if raw.get('control_group'):
+                    if not self.cgroup_empty(raw['control_group']): return False
+                elif unit.endswith('.service') and raw.get('active_state') not in ('inactive','failed'):
+                    return False
+                self.systemd.stop(project_root=project_root, unit_name=unit)
+                self.systemd.reset_failed(project_root=project_root, unit_name=unit)
+                self.systemd.release(project_root=project_root, unit_name=unit)
+                if self.systemd.observe(project_root=project_root, unit_name=unit)['exists']: return False
+        info['process_cleanup_complete'] = True
+        replace_json(job_path, info)
+        return True
+
+    def cancel(self, *, project_root, job_id, build_root_id, expected_invocation_id=None):
+        path, _ = self.load(project_root, build_root_id)
+        job_path = path/'jobs'/(identity(job_id)+'.json')
+        if not job_path.exists(): return
+        info = json.loads(job_path.read_text())
+        observed = self.observe(project_root=project_root,job_id=job_id,build_root_id=build_root_id)
+        if not observed.get('exists'): return
+        if expected_invocation_id and observed.get('invocation_id') != expected_invocation_id:
+            raise SystemdBackendError('refusing to cancel a different build invocation')
+        self.systemd.stop(project_root=project_root, unit_name=info['unit_name'])
+
+    def reclaim_workspace_directories(self, *, project_root, build_root_id):
+        """Return directory ownership after all jobs stop; preserve file modes/data.
+
+        Only recorded source/output workspaces are accepted. This also supports
+        an administrator migrating already-released registrations. A workspace
+        re-registered for another build remains protected.
+        """
+        project, _, _ = self.systemd._project(project_root)
+        owner = Path(project).stat()
+        uid, gid = owner.st_uid, owner.st_gid
+        path = self.resource_path(project_root, build_root_id)
+        record = json.loads((path/'registration.json').read_text())
+        if record['state'] not in ('releasing', 'released'):
+            raise SystemdBackendError('workspace ownership requires resource release')
+        for job in (path/'jobs').glob('*.json'):
+            if not json.loads(job.read_text())['process_cleanup_complete']:
+                raise SystemdBackendError('workspace still pinned by unfinished job')
+        allowed = Path(project)/'state/image-build/attempts'
+        workspaces = [Path(record['intent'][key]) for key in ('source_directory','output_directory')]
+        for workspace in workspaces:
+            if workspace.is_symlink() or workspace.resolve() != workspace or not workspace.is_relative_to(allowed):
+                raise SystemdBackendError('recorded workspace path changed')
+            for other in path.parent.glob('*/registration.json'):
+                if other == path/'registration.json': continue
+                prior = json.loads(other.read_text())
+                if prior['state'] == 'released': continue
+                for key in ('source_directory','output_directory'):
+                    other_workspace = Path(prior['intent'][key])
+                    if workspace == other_workspace or workspace.is_relative_to(other_workspace) or other_workspace.is_relative_to(workspace):
+                        raise SystemdBackendError('workspace protected by another registration')
+            if not workspace.exists(): continue
+            for line in Path('/proc/self/mountinfo').read_text().splitlines():
+                mount = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split()[4]))
+                if mount == workspace or workspace in mount.parents:
+                    raise SystemdBackendError('workspace contains a mount')
+            # Descriptor-relative traversal avoids following directory symlinks.
+            # Files (including hard links) are never chowned or chmodded.
+            for current, dirs, files, descriptor in os.fwalk(workspace, topdown=False, follow_symlinks=False):
+                os.fchown(descriptor, uid, gid)
+                os.fsync(descriptor)
+
+    def release(self, *, project_root, build_root_id):
+        path = self.resource_path(project_root, build_root_id)
+        manifest = path/'registration.json'
+        if not manifest.exists():
+            if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
+            return {'state': 'released'}
+        record = json.loads(manifest.read_text())
+        if record['state'] == 'released': return record
+        for job in (path/'jobs').glob('*.json'):
+            if not json.loads(job.read_text())['process_cleanup_complete']:
+                raise SystemdBackendError('build root still pinned by unfinished job')
+        # Mark intent before deletion; retry repeats removal and its barriers.
+        record['state'] = 'releasing'
+        replace_json(manifest, record)
+        if (path/'root').exists(): shutil.rmtree(path/'root')
+        self.reclaim_workspace_directories(project_root=project_root, build_root_id=build_root_id)
+        (path/'permission-test-null').unlink(missing_ok=True)
+        synchronize_directory(path)
+        record['state'] = 'released'
+        replace_json(manifest, record)
+        return record
+
+    def forget(self, *, project_root, build_root_id):
+        path = self.resource_path(project_root, build_root_id)
+        if not path.exists():
+            synchronize_directory(path.parent)
+            return
+        raw = json.loads((path/'registration.json').read_text())
+        if raw['state'] != 'released': raise SystemdBackendError('cannot forget retained build root')
+        from .journal_barrier import JournalBarrier
+        for job in (path/'jobs').glob('*.json'):
+            token=json.loads(job.read_text()).get('journal_barrier_token')
+            if token: (self.journal_barrier or JournalBarrier()).forget(token)
+        shutil.rmtree(path)
+        synchronize_directory(path.parent)
+. D-Bus argv percent signs, however, reach
+        the process unchanged: doubling them altered the actual build argv.
+        The extended ExecStartEx form is unusable after daemon-reload on the
+        observed Amazon Linux 252 unit-file parser.
         """
         if (not command or any(type(arg) is not str or "\x00" in arg for arg in command)
                 or "$" in command[0] or "%" in command[0]):
             raise SystemdBackendError("unsupported literal build executable")
-        return [command[0], *(arg.replace("$", "$$").replace("%", "%%")
-                              for arg in command[1:])]
+        return [command[0], *(arg.replace("$", "$") for arg in command[1:])]
+
+    @staticmethod
+    def _matches_exec_start(observed, expected):
+        """Exact alternate ExecStart readbacks observed before/after 252 reload.
+
+        The 252 transient unit parser retains a backslash before every dollar
+        and semicolon in the *D-Bus argv readback* after reload. Do not
+        strip or decode arbitrary escapes: accept only the single precise
+        serialization derivable from this job's frozen expected argv.
+        Other properties remain subject to exact equality comparisons.
+        """
+        if (type(expected) is not list or not expected
+                or any(type(arg) is not str for arg in expected)
+                or type(observed) is not list
+                or any(type(arg) is not str for arg in observed)):
+            return False
+        reloaded = [expected[0], *(
+            arg.replace("$", "\\$").replace(";", "\\;")
+            for arg in expected[1:]
+        )]
+        return observed == expected or observed == reloaded
 
     def start(self, *, project_root, job_id, request):
         info = self.prepare(project_root=project_root, job_id=job_id, request=request)
