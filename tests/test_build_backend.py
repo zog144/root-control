@@ -312,3 +312,28 @@ def test_reload_safe_execstart_refuses_unsupported_executable(argument):
 def test_reload_safe_execstart_refuses_embedded_nul_in_argument():
     with pytest.raises(SystemdBackendError):
         BuildBackend._reload_safe_argv(['/bin/cc', 'value'+chr(0)+'other'])
+
+
+def test_reloaded_legacy_bad_setting_never_infers_completed_job_from_exit_zero(registered, monkeypatch):
+    """Missing ExecStart after reload is an integrity fault, not job success."""
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
+    job_path = backend.resource_path(args['project_root'], args['resource_id']) / 'jobs' / ('a'*32+'.json')
+    before = job_path.read_bytes()
+    # The historical systemd 252 reload drops an ExecStartEx-only command.
+    backend.systemd.observe = lambda **kw: {
+        'exists': True,
+        'unit_name': info['unit_name'],
+        'invocation_id': '1'*32,
+        'active_state': 'inactive',
+        'result': 'success',
+        'properties': [],
+    }
+    backend.systemd._get_unit_path = lambda unit: '/org/freedesktop/systemd1/unit/retained'
+    backend.systemd._get_property = lambda *args: None
+    with pytest.raises(SystemdBackendError, match='build property mismatch'):
+        backend.observe(project_root=args['project_root'], job_id='a'*32,
+                        build_root_id=args['resource_id'])
+    assert job_path.read_bytes() == before
+    assert json.loads(job_path.read_text())['start_attempted'] is True
+    assert backend.systemd.properties['ExecStart'].signature == 'a(sasb)'
