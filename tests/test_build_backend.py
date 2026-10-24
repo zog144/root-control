@@ -303,7 +303,7 @@ def test_portable_execstart_encodes_literal_shell_argv_without_changing_request(
         backend.start(project_root=args['project_root'], job_id='a'*32, request=request)
 
 
-@pytest.mark.parametrize('argument', ['\\x00', '$env', '%i'])
+@pytest.mark.parametrize('argument', [chr(0), '$env', '%i'])
 def test_reload_safe_execstart_refuses_unsupported_executable(argument):
     with pytest.raises(SystemdBackendError):
         BuildBackend._reload_safe_argv(['/bin/' + argument, 'ordinary'])
@@ -311,4 +311,4 @@ def test_reload_safe_execstart_refuses_unsupported_executable(argument):
 
 def test_reload_safe_execstart_refuses_embedded_nul_in_argument():
     with pytest.raises(SystemdBackendError):
-        BuildBackend._reload_safe_argv(['/bin/cc', 'value'+'\\x00'+'other'])
+        BuildBackend._reload_safe_argv(['/bin/cc', 'value'+chr(0)+'other'])
