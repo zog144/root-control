@@ -290,3 +290,40 @@ def test_client_cannot_set_role_in_rpc(restricted):
     ):
         with pytest.raises(PermissionError):
             service.handle(request)
+
+
+def test_allowed_build_observe_and_registration_reach_only_own_backend(restricted):
+    service, _, project = restricted
+    calls = []
+
+    class Build:
+        def observe(self, **kwargs):
+            calls.append(("observe", kwargs))
+            return {"state": "running", "invocation_id": "a" * 32}
+        def registration_status(self, **kwargs):
+            calls.append(("registration_status", kwargs))
+            return {"state": "ready"}
+
+    service.build = Build()
+    job = "b" * 32
+    resource = "c" * 32
+    result = service.handle({
+        "operation": "build_observe",
+        "project_root": str(project),
+        "job_id": job,
+        "build_root_id": resource,
+    })
+    assert result["ok"] is True
+    assert result["result"]["invocation_id"] == "a" * 32
+    registration = service.handle({
+        "operation": "build_registration_status",
+        "project_root": str(project),
+        "resource_id": resource,
+    })
+    assert registration == {"ok": True, "result": {"state": "ready"}}
+    assert calls == [
+        ("observe", {"project_root": str(project),
+                     "job_id": job, "build_root_id": resource}),
+        ("registration_status", {"project_root": str(project),
+                                 "resource_id": resource}),
+    ]
