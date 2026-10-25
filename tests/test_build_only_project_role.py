@@ -245,7 +245,7 @@ def test_dedicated_listener_will_not_unlink_existing_socket(restricted, monkeypa
             value = original(self)
             if self == listener:
                 return SimpleNamespace(st_uid=0, st_gid=0, st_mode=value.st_mode)
-            if self in (tmp_path, tmp_path.parent):
+            if self in listener.parents:
                 return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
             return value
         monkeypatch.setattr(Path, "lstat", parent_trusted)
