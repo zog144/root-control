@@ -64,6 +64,13 @@ class RootControlDaemon:
                         self.socket_path.name,
                     )):
                 raise ValueError("build-only listener needs exact project, peer UID/GID and dedicated socket")
+        # A compiler-named socket may never accidentally start in the
+        # original full-authority mode due to omitted installer fields.
+        if (self.socket_path.parent == DEFAULT_SOCKET.parent
+                and re.fullmatch(r"root-control-[a-z0-9][a-z0-9-]{0,47}\.sock",
+                                 self.socket_path.name)
+                and role != BUILD_ONLY_PROJECT_ROLE):
+            raise ValueError("dedicated compiler socket requires build-only role")
         self.role = role
         self.authorized_project_root = authorized_project_root
         self.socket_group_gid = socket_group_gid
@@ -123,6 +130,11 @@ class RootControlDaemon:
             return
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
             raise PermissionError("untrusted existing privileged socket")
+        if self.role == BUILD_ONLY_PROJECT_ROLE:
+            # Never unlink an existing, possibly active privileged sidecar.
+            # An installer must independently attest and retire a stale
+            # listener before restarting a uniquely named build-only unit.
+            raise PermissionError("build-only listener already exists")
         self.socket_path.unlink()
 
     def _protect_socket(self):
