@@ -35,6 +35,7 @@ class ParentSystemd(BusctlSystemdBackend):
     def _get_property(self, obj, iface, name, **kwargs):
         if obj.endswith("parent"):
             return {
+                "LoadState": "loaded",
                 "ActiveState": "active" if self.parent_active else "inactive",
                 "ControlGroup": self.parent_group,
             }[name]
