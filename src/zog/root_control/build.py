@@ -347,9 +347,10 @@ class BuildBackend:
             prior = json.loads(job_path.read_text())
             if prior['request'] != request: raise SystemdBackendError('job identity already bound')
             if (prior.get("parent_slice") != self.parent_slice
-                    or prior.get("log_namespace") != self.log_namespace
                     or prior.get("slice_name") != slice_name):
                 raise SystemdBackendError("prepared job slice differs from protected parent")
+            if prior.get("log_namespace") != self.log_namespace:
+                raise SystemdBackendError("prepared job logging binding differs from protected role")
             return prior
         for other in jobs.glob('*.json'):
             if not json.loads(other.read_text())['process_cleanup_complete']:
