@@ -19,6 +19,13 @@ from .systemd import SystemdBackendError
 from dbus_next import Variant
 
 
+# The one approved host-deploy fresh compiler parent. This is selected by
+# root-control's protected build-only role, never an RPC payload or a
+# controller-generated per-job name.
+FRESH_COMPILER_PROJECT = "fresh-cross-bootstrap-oct25"
+FRESH_COMPILER_PARENT_SLICE = "zogfreshcrossbootstrapoct25.slice"
+
+
 def identity(value):
     if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
         raise SystemdBackendError('invalid build identity')
@@ -100,10 +107,64 @@ def root_path(root, source, output, virtual):
 
 
 class BuildBackend:
-    def __init__(self, systemd, directory=Path('/var/lib/zog/build-resources'), *, journal_barrier=None):
+    def __init__(self, systemd, directory=Path('/var/lib/zog/build-resources'), *, journal_barrier=None,
+                 parent_slice=None, authorized_project_root=None):
+        # Only the protected fresh compiler role may select this exact parent.
+        # Existing shared-controller deployments keep their original naming.
+        if parent_slice is not None:
+            if (parent_slice != FRESH_COMPILER_PARENT_SLICE
+                    or type(authorized_project_root) is not str
+                    or Path(authorized_project_root).name != FRESH_COMPILER_PROJECT
+                    or str(Path(authorized_project_root)) != authorized_project_root):
+                raise SystemdBackendError("invalid bound compiler parent slice and Project")
+        elif authorized_project_root is not None:
+            raise SystemdBackendError("unbound compiler parent Project")
         self.systemd = systemd
         self.journal_barrier = journal_barrier
         self.directory = Path(directory)
+        self.parent_slice = parent_slice
+        self.authorized_project_root = authorized_project_root
+
+    def _check_parent_binding(self, project_root, stored):
+        if self.parent_slice is None:
+            if stored is not None:
+                raise SystemdBackendError("historical build parent binding cannot change")
+            return
+        if (type(project_root) is not str
+                or project_root != self.authorized_project_root
+                or stored != self.parent_slice):
+            raise SystemdBackendError("build parent slice binding differs from protected role")
+
+    def _verify_active_parent(self):
+        if self.parent_slice is None:
+            return
+        # No generic privileged parent-slice RPC is granted to the controller.
+        # Read exact manager properties directly from this pinned identifier.
+        obj = self.systemd._get_unit_path(self.parent_slice)
+        if obj is None:
+            raise SystemdBackendError("protected compiler parent slice missing")
+        from .systemd import _UNIT_IFACE, _SLICE_IFACE
+        state = self.systemd._get_property(obj, _UNIT_IFACE, "ActiveState")
+        group = self.systemd._get_property(obj, _SLICE_IFACE, "ControlGroup")
+        if state != "active" or group != "/" + self.parent_slice:
+            raise SystemdBackendError("protected compiler parent slice not active or relocated")
+
+    @staticmethod
+    def _check_worker_cgroup(info, observed):
+        parent = info.get("parent_slice")
+        if parent is None or not observed.get("exists"):
+            return
+        if parent != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("invalid saved compiler parent slice")
+        child = info["slice_name"]
+        expected = "/" + parent + "/" + child + "/" + info["unit_name"]
+        group = observed.get("control_group")
+        if group:
+            if group != expected:
+                raise SystemdBackendError("compiler worker escaped protected parent cgroup")
+        elif observed.get("active_state") not in ("inactive", "failed"):
+            raise SystemdBackendError("active compiler worker lacks protected cgroup")
+
 
     def area(self, project_root):
         root, _, _ = self.systemd._project(project_root)
@@ -116,6 +177,7 @@ class BuildBackend:
         path = self.resource_path(project_root, resource_id)
         raw = json.loads((path / 'registration.json').read_text())
         if raw['state'] != 'ready': raise SystemdBackendError('build registration is not ready')
+        self._check_parent_binding(str(Path(project_root)), raw["intent"].get("parent_slice"))
         return path, raw
 
     @staticmethod
@@ -168,8 +230,11 @@ class BuildBackend:
             raise SystemdBackendError('build UID/GID must differ from controller project owner')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
+        self._check_parent_binding(str(root), self.parent_slice)
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
                       input_manifest_id=input_manifest_id, execution_user_id=execution_user_id, execution_group_id=execution_group_id)
+        if self.parent_slice is not None:
+            intent["parent_slice"] = self.parent_slice
         path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
         ensure_directory(self.directory)
@@ -232,6 +297,7 @@ class BuildBackend:
         identity(job_id)
         path, registration = self.load(project_root, request['build_root_id'])
         binding = registration['intent']
+        self._check_parent_binding(str(Path(project_root)), binding.get("parent_slice"))
         if any(request[k] != binding[k] for k in ('execution_user_id', 'execution_group_id')):
             raise SystemdBackendError('execution identity differs from registration')
         # The registration remains immutable, but host-install ownership can
@@ -256,15 +322,21 @@ class BuildBackend:
                 break
         if resolved is None: raise SystemdBackendError('executable not found inside build root and explicit PATH')
         unit = f'zog-{Path(project_root).name}-build{job_id}.service'
-        slice_name = f'zog-{Path(project_root).name}-build{job_id}.slice'
+        slice_name = (f'{self.parent_slice[:-6]}-build{job_id}.slice' if self.parent_slice
+                      else f'zog-{Path(project_root).name}-build{job_id}.slice')
         result = dict(request=request, job_id=job_id, unit_name=unit, slice_name=slice_name,
                       resolved_executable=resolved, process_cleanup_complete=False)
+        if self.parent_slice is not None:
+            result["parent_slice"] = self.parent_slice
         jobs = path / 'jobs'
         ensure_directory(jobs)
         job_path = jobs / (job_id+'.json')
         if job_path.exists():
             prior = json.loads(job_path.read_text())
             if prior['request'] != request: raise SystemdBackendError('job identity already bound')
+            if (prior.get("parent_slice") != self.parent_slice
+                    or prior.get("slice_name") != slice_name):
+                raise SystemdBackendError("prepared job slice differs from protected parent")
             return prior
         for other in jobs.glob('*.json'):
             if not json.loads(other.read_text())['process_cleanup_complete']:
@@ -331,6 +403,14 @@ class BuildBackend:
         job_path = path/'jobs'/(job_id+'.json')
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
+        if self.parent_slice is not None:
+            expected_slice = f'{self.parent_slice[:-6]}-build{identity(job_id)}.slice'
+            if info["slice_name"] != expected_slice:
+                raise SystemdBackendError("build job slice changed from protected parent")
+            # Do not persist start_attempted unless the host-owned parent is
+            # already active and has exactly the expected PID1 cgroup.
+            self._verify_active_parent()
         if self.systemd.version() < 250: raise SystemdBackendError('systemd 250 or later required')
         # Verify the exact reload-safe representation BEFORE persisting the
         # one-way start_attempted marker or touching systemd.
@@ -407,7 +487,7 @@ class BuildBackend:
     @staticmethod
     def expected_properties(path, info):
         r = info['request']
-        return {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
+        expected = {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
                 'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
@@ -415,15 +495,22 @@ class BuildBackend:
                     [info['resolved_executable'], *r['command'][1:]]),
                 'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
                 'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
+        if info.get("parent_slice") is not None:
+            if info["parent_slice"] != FRESH_COMPILER_PARENT_SLICE:
+                raise SystemdBackendError("invalid prepared compiler parent")
+            expected["Slice"] = info["slice_name"]
+        return expected
 
     def observe(self, *, project_root, job_id, build_root_id):
         path, _ = self.load(project_root, build_root_id)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return {'exists':False}
         info = json.loads(job_path.read_text())
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
         expected = self.expected_properties(path,info)
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
+            self._check_worker_cgroup(info, raw)
             if raw['exists']:
                 obj = self.systemd._get_unit_path(info['unit_name'])
                 properties = dict(raw['properties'])
@@ -482,8 +569,15 @@ class BuildBackend:
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return True  # No start is possible without its durable privileged record.
         info = json.loads(job_path.read_text())
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
         for unit in (info['unit_name'], info['slice_name']):
             raw = self.systemd.observe(project_root=project_root, unit_name=unit)
+            if info.get("parent_slice") is not None:
+                parent = info["parent_slice"]
+                expected_group = ("/" + parent + "/" + info["slice_name"]
+                                  + ("/" + info["unit_name"] if unit.endswith(".service") else ""))
+                if raw["exists"] and raw.get("control_group") != expected_group:
+                    raise SystemdBackendError("cannot cleanup worker outside bound parent")
             if raw['exists']:
                 if raw.get('control_group'):
                     if not self.cgroup_empty(raw['control_group']): return False
