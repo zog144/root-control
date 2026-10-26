@@ -136,7 +136,19 @@ class BusctlSystemdBackend:
     @classmethod
     def _validate_unit(cls, project_root: str | Path, unit_name: str) -> Path:
         root, _identity, prefix = cls._project(project_root)
-        if not unit_name.startswith(prefix) or not unit_name.endswith((".service", ".slice")):
+        # The *only* alternate slice prefix is the reviewed fresh compiler
+        # child of host-deploy's protected parent. PID1's hierarchical slice
+        # naming requires this prefix; the ordinary Project prefix cannot
+        # represent a descendant of zogfreshcrossbootstrapoct25.slice.
+        fresh_child = (
+            identity == "fresh-cross-bootstrap-oct25"
+            and re.fullmatch(
+                r"zogfreshcrossbootstrapoct25-build[0-9a-f]{32}\.slice", unit_name
+            ) is not None
+        )
+        if not fresh_child and (
+                not unit_name.startswith(prefix)
+                or not unit_name.endswith((".service", ".slice"))):
             raise SystemdBackendError(
                 f"unit does not belong to project {root.name!r}: {unit_name!r}"
             )
