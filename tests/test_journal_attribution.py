@@ -71,3 +71,33 @@ def test_diagnostic_default_has_no_privileged_hook():
     assert 'ExecStopPostEx' not in dict(probe.properties('probe','marker','success'))
     with pytest.raises(ValueError):
         probe.properties('probe','marker','success',barrier='/untrusted/command')
+
+
+def test_fixed_compiler_journal_namespace_is_not_a_caller_selected_query(monkeypatch):
+    seen = []
+    boot, invocation = 'b' * 32, 'a' * 32
+    def bounded(cmd, **kwargs):
+        seen.append(list(cmd))
+        return [{
+            '__CURSOR': 'cursor1', '_BOOT_ID': boot,
+            '_SYSTEMD_INVOCATION_ID': invocation, 'MESSAGE': 'compiler output'
+        }]
+    monkeypatch.setattr(journal, 'run_bounded', bounded)
+    page = dict(entries=[], next_cursor=None, has_more=False, status='ok')
+    fixed = journal._read_page(dict(page), Path('/fixture'), ['build-job', 'c' * 32],
+                               boot, invocation, None, 50,
+                               journal_namespace='zogfreshcrossbootstrapoct25')
+    assert fixed['status'] == 'ok'
+    assert fixed['entries'][0]['message'] == 'compiler output'
+    assert '--namespace=zogfreshcrossbootstrapoct25' in seen[-1]
+    assert '_BOOT_ID=' + boot in seen[-1]
+    assert '_SYSTEMD_INVOCATION_ID=' + invocation in seen[-1]
+
+    # Namespaced cursors cannot be used against the default journal.
+    with pytest.raises(ValueError, match='cursor'):
+        journal._read_page(dict(page), Path('/fixture'), ['build-job', 'c' * 32],
+                           boot, invocation, fixed['next_cursor'], 50)
+
+    journal._read_page(dict(page), Path('/fixture'), ['build-job', 'c' * 32],
+                       boot, invocation, None, 50)
+    assert not any(x.startswith('--namespace=') for x in seen[-1])
