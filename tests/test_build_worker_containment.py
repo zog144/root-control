@@ -198,7 +198,7 @@ def test_prepared_slice_and_registration_mismatch_fail_closed(bound):
     record = json.loads((path / "registration.json").read_text())
     record["intent"].pop("parent_slice")
     (path / "registration.json").write_text(json.dumps(record))
-    with pytest.raises(SystemdBackendError, match="parent slice binding"):
+    with pytest.raises(SystemdBackendError, match="parent/logging binding"):
         backend.registration_status(project_root=project, resource_id=args["resource_id"])
 
 
