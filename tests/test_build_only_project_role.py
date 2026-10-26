@@ -24,7 +24,7 @@ WORKER_UID = 24302
 @pytest.fixture
 def restricted(tmp_path, monkeypatch):
     home = tmp_path / "owner"
-    project = home / "compiler"
+    project = home / "fresh-cross-bootstrap-oct25"
     project.mkdir(parents=True)
     home.chmod(0o700)
     project.chmod(0o700)
