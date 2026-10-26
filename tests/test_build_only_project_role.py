@@ -345,3 +345,23 @@ def test_fresh_role_rejects_unscoped_default_journal_barrier_before_side_effects
     with pytest.raises(ValueError, match="namespace-aware journal barrier"):
         daemon.main()
     assert calls == []
+
+
+def test_fixed_journal_namespace_is_selected_by_sidecar_not_log_caller(restricted, monkeypatch):
+    service, _, project = restricted
+    from zog.root_control import journal
+    received = []
+    def read(**kwargs):
+        received.append(kwargs)
+        return {"status": "ok", "entries": []}
+    monkeypatch.setattr(journal, "read_build_logs", read)
+    request = {"operation": "build_job_logs", "project_root": str(project),
+               "job_id": "b" * 32}
+    assert service.handle(request)["result"]["status"] == "ok"
+    assert received[-1] == {
+        "project_root": str(project), "job_id": "b" * 32,
+        "journal_namespace": "zogfreshcrossbootstrapoct25",
+    }
+    with pytest.raises(ValueError, match="unsupported privileged build log arguments"):
+        service.handle(dict(request, journal_namespace="other"))
+    assert len(received) == 1
