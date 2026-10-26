@@ -135,7 +135,7 @@ class BusctlSystemdBackend:
 
     @classmethod
     def _validate_unit(cls, project_root: str | Path, unit_name: str) -> Path:
-        root, _identity, prefix = cls._project(project_root)
+        root, identity, prefix = cls._project(project_root)
         # The *only* alternate slice prefix is the reviewed fresh compiler
         # child of host-deploy's protected parent. PID1's hierarchical slice
         # naming requires this prefix; the ordinary Project prefix cannot
