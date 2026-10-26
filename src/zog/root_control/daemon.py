@@ -374,7 +374,14 @@ class RootControlDaemon:
                 project_root=request['project_root'], resource_id=request['resource_id'])}
         if operation == "build_job_logs":
             from .journal import read_build_logs
-            return {"ok": True, "result": read_build_logs(**{k:v for k,v in request.items() if k != "operation"})}
+            if set(request) - {"operation", "project_root", "job_id", "cursor", "limit"}:
+                raise ValueError("unsupported privileged build log arguments")
+            arguments = {k:v for k,v in request.items() if k != "operation"}
+            # The listener's startup-frozen Project role, not an untrusted
+            # RPC parameter, determines which journal namespace is readable.
+            if self.role == BUILD_ONLY_PROJECT_ROLE:
+                arguments["journal_namespace"] = self.build.log_namespace
+            return {"ok": True, "result": read_build_logs(**arguments)}
         if operation == "application_logs":
             from .journal import read_logs
             return {"ok": True, "result": read_logs(**{k:v for k,v in request.items() if k != "operation"})}
