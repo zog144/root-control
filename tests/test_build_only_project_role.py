@@ -327,3 +327,21 @@ def test_allowed_build_observe_and_registration_reach_only_own_backend(restricte
         ("registration_status", {"project_root": str(project),
                                  "resource_id": resource}),
     ]
+
+
+def test_fresh_role_rejects_unscoped_default_journal_barrier_before_side_effects(monkeypatch):
+    """Do not start the old broker, whose journalctl --sync is not namespaced."""
+    calls = []
+    class Forbidden:
+        def __init__(self, *args, **kwargs):
+            calls.append("constructed")
+        def start(self):
+            calls.append("started")
+    import sys
+    from zog.root_control import journal_barrier
+    monkeypatch.setattr(journal_barrier, "JournalBarrier", Forbidden)
+    monkeypatch.setenv("ROOT_CONTROL_ROLE", ROLE)
+    monkeypatch.setenv("ROOT_CONTROL_JOURNAL_BARRIER", "1")
+    with pytest.raises(ValueError, match="namespace-aware journal barrier"):
+        daemon.main()
+    assert calls == []
