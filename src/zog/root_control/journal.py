@@ -71,24 +71,33 @@ def read_logs(*, project_root, runtime_id, program, cursor=None, limit=50):
                       reference.boot_id, member.invocation_id, cursor, limit)
 
 
-def read_build_logs(*, project_root, job_id, cursor=None, limit=50):
+def read_build_logs(*, project_root, job_id, cursor=None, limit=50, journal_namespace=None):
     from types import SimpleNamespace
     from zog.box_control.build_jobs import BuildJobs
     project = Project(Path(project_root))
     store = BuildJobs(SimpleNamespace(project=project, systemd_transport=None))
     record = store.load('job:' + job_id)
+    # The server, never the caller, selects the fixed fresh compiler journal
+    # namespace. An arbitrary namespace would become a privileged journal
+    # reader and cannot be accepted by this interface.
+    if journal_namespace not in (None, 'zogfreshcrossbootstrapoct25'):
+        raise ValueError('unapproved build journal namespace')
     page = dict(job_id=job_id, entries=[], next_cursor=cursor, has_more=False, status='ok')
     return _read_page(page, project.path, ['build-job', job_id],
-                      record.get('boot_id'), record.get('invocation_id'), cursor, limit)
+                      record.get('boot_id'), record.get('invocation_id'),
+                      cursor, limit, journal_namespace=journal_namespace)
 
 
-def _read_page(page, project_path, stream, boot_id, invocation_id, cursor, limit):
+def _read_page(page, project_path, stream, boot_id, invocation_id, cursor, limit, *, journal_namespace=None):
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('log limit must be an integer from 1 through 100')
     if not boot_id or not invocation_id:
         return dict(page, status='identity-unavailable')
     boot, invocation = _identity(boot_id), _identity(invocation_id)
-    scope = hashlib.sha256(json.dumps([str(project_path), *stream, boot, invocation]).encode()).hexdigest()
+    identity_parts = [str(project_path), *stream, boot, invocation]
+    if journal_namespace is not None:
+        identity_parts.append(journal_namespace)
+    scope = hashlib.sha256(json.dumps(identity_parts).encode()).hexdigest()
     after = None
     if cursor is not None:
         try:
@@ -100,8 +109,10 @@ def _read_page(page, project_path, stream, boot_id, invocation_id, cursor, limit
         except (ValueError, KeyError, TypeError):
             raise ValueError('invalid cursor or cursor belongs to another log stream') from None
     command=['journalctl','--no-pager','--quiet','--output=json',
-             '--output-fields=__CURSOR,__REALTIME_TIMESTAMP,PRIORITY,MESSAGE,_BOOT_ID,_SYSTEMD_INVOCATION_ID',
-             '_BOOT_ID='+boot,'_SYSTEMD_INVOCATION_ID='+invocation]
+             '--output-fields=__CURSOR,__REALTIME_TIMESTAMP,PRIORITY,MESSAGE,_BOOT_ID,_SYSTEMD_INVOCATION_ID']
+    if journal_namespace is not None:
+        command.append('--namespace='+journal_namespace)
+    command += ['_BOOT_ID='+boot,'_SYSTEMD_INVOCATION_ID='+invocation]
     deadline=time.monotonic()+5
     try:
         if after:
