@@ -144,9 +144,10 @@ class BuildBackend:
         if obj is None:
             raise SystemdBackendError("protected compiler parent slice missing")
         from .systemd import _UNIT_IFACE, _SLICE_IFACE
+        load_state = self.systemd._get_property(obj, _UNIT_IFACE, "LoadState")
         state = self.systemd._get_property(obj, _UNIT_IFACE, "ActiveState")
         group = self.systemd._get_property(obj, _SLICE_IFACE, "ControlGroup")
-        if state != "active" or group != "/" + self.parent_slice:
+        if load_state != "loaded" or state != "active" or group != "/" + self.parent_slice:
             raise SystemdBackendError("protected compiler parent slice not active or relocated")
 
     @staticmethod
