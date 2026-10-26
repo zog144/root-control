@@ -16,7 +16,7 @@ from zog.root_control.systemd import BusctlSystemdBackend, SystemdBackendError
 
 class ParentSystemd(BusctlSystemdBackend):
     def __init__(self):
-        self.jobs = []
+        self.job_calls = []
         self.slice_requests = []
         self.parent_active = True
         self.parent_group = "/" + FRESH_COMPILER_PARENT_SLICE
@@ -62,7 +62,7 @@ class ParentSystemd(BusctlSystemdBackend):
         return [name, Variant(signature, value)]
 
     def _job(self, method, signature, body):
-        self.jobs.append((method, body))
+        self.job_calls.append((method, body))
 
     def observe(self, *, project_root, unit_name):
         self._validate_unit(project_root, unit_name)
@@ -144,10 +144,10 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     assert prepared["parent_slice"] == FRESH_COMPILER_PARENT_SLICE
     assert prepared["slice_name"] == expected_child
     assert backend.prepare(project_root=project, job_id=job, request=request) == prepared
-    assert systemd.jobs == []
+    assert systemd.job_calls == []
     backend.start(project_root=project, job_id=job, request=request)
     assert systemd.slice_requests[0]["slice_name"] == expected_child
-    launched = systemd.jobs[0]
+    launched = systemd.job_calls[0]
     assert launched[0] == "StartTransientUnit"
     props = dict(launched[1][2])
     assert props["Slice"].value == expected_child
@@ -172,7 +172,7 @@ def test_bad_parent_prevents_start_before_irreversible_attempt(bound, active, gr
         backend.start(project_root=args["project_root"], job_id=job, request=request)
     saved = json.loads((path / "jobs" / (job + ".json")).read_text())
     assert "start_attempted" not in saved
-    assert not systemd.slice_requests and not systemd.jobs
+    assert not systemd.slice_requests and not systemd.job_calls
 
 
 def test_prepared_slice_and_registration_mismatch_fail_closed(bound):
@@ -185,7 +185,7 @@ def test_prepared_slice_and_registration_mismatch_fail_closed(bound):
     target.write_text(json.dumps(changed))
     with pytest.raises(SystemdBackendError, match="slice differs"):
         backend.prepare(project_root=project, job_id=job, request=request)
-    assert systemd.jobs == []
+    assert systemd.job_calls == []
 
     record = json.loads((path / "registration.json").read_text())
     record["intent"].pop("parent_slice")
@@ -247,7 +247,7 @@ def test_cleanup_fails_closed_on_escaped_worker_without_mutation(bound):
         backend.cleanup(project_root=args["project_root"], job_id=jid,
                         build_root_id=args["resource_id"])
     assert job_path.read_bytes() == original
-    assert len(systemd.jobs) == 1
+    assert len(systemd.job_calls) == 1
 
 
 def test_exact_fresh_slice_validator_never_grants_parent_or_other_project(tmp_path):
