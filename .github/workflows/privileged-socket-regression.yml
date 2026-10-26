@@ -120,6 +120,10 @@ jobs:
                   "test_worker_observe_checks_slice_property_and_real_cgroup",
                   "test_cleanup_fails_closed_on_escaped_worker_without_mutation",
                   "test_exact_fresh_slice_validator_never_grants_parent_or_other_project",
+                  "test_frozen_log_namespace_cannot_be_removed_or_changed",
+                  "test_worker_log_namespace_readback_must_match_real_service",
+                  "test_namespaced_worker_requires_explicitly_supported_barrier",
+                  "test_fresh_role_rejects_unscoped_default_journal_barrier_before_side_effects",
               ):
                   if not any(name in c.get("name", "") for c in cases):
                       raise SystemExit("compiler worker containment security test absent: " + name)
