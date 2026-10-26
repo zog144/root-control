@@ -19,6 +19,7 @@ class ParentSystemd(BusctlSystemdBackend):
         self.job_calls = []
         self.slice_requests = []
         self.parent_active = True
+        self.parent_load_state = "loaded"
         self.parent_group = "/" + FRESH_COMPILER_PARENT_SLICE
         self.worker = None
 
@@ -35,7 +36,7 @@ class ParentSystemd(BusctlSystemdBackend):
     def _get_property(self, obj, iface, name, **kwargs):
         if obj.endswith("parent"):
             return {
-                "LoadState": "loaded",
+                "LoadState": self.parent_load_state,
                 "ActiveState": "active" if self.parent_active else "inactive",
                 "ControlGroup": self.parent_group,
             }[name]
@@ -281,3 +282,14 @@ def test_unscoped_shared_controller_retains_historical_worker_slice_names(tmp_pa
             "execution_timeout_seconds": 1,
         },
     })
+
+
+def test_parent_load_state_bad_setting_blocks_new_start_without_touching_job(bound):
+    backend, systemd, args, request, jid = bound
+    systemd.parent_load_state = "bad-setting"
+    path = backend.resource_path(args["project_root"], args["resource_id"])
+    with pytest.raises(SystemdBackendError, match="parent slice"):
+        backend.start(project_root=args["project_root"], job_id=jid, request=request)
+    saved = json.loads((path / "jobs" / (jid + ".json")).read_text())
+    assert "start_attempted" not in saved
+    assert not systemd.job_calls
