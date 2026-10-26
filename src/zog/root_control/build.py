@@ -208,6 +208,7 @@ class BuildBackend:
             record = json.loads(path.read_text())
         except FileNotFoundError:
             return {'resource_id': resource_id, 'state': 'absent'}
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"))
         return record
 
     def register(self, *, project_root, resource_id, prepared_root, source_directory, output_directory,
@@ -577,7 +578,9 @@ class BuildBackend:
                 expected_group = ("/" + parent + "/" + info["slice_name"]
                                   + ("/" + info["unit_name"] if unit.endswith(".service") else ""))
                 if raw["exists"] and raw.get("control_group") != expected_group:
-                    raise SystemdBackendError("cannot cleanup worker outside bound parent")
+                    if (raw.get("control_group")
+                            or raw.get("active_state") not in ("inactive", "failed")):
+                        raise SystemdBackendError("cannot cleanup worker outside bound parent")
             if raw['exists']:
                 if raw.get('control_group'):
                     if not self.cgroup_empty(raw['control_group']): return False
@@ -650,6 +653,7 @@ class BuildBackend:
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
             return {'state': 'released'}
         record = json.loads(manifest.read_text())
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"))
         if record['state'] == 'released': return record
         for job in (path/'jobs').glob('*.json'):
             if not json.loads(job.read_text())['process_cleanup_complete']:
