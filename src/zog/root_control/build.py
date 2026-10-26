@@ -24,6 +24,7 @@ from dbus_next import Variant
 # controller-generated per-job name.
 FRESH_COMPILER_PROJECT = "fresh-cross-bootstrap-oct25"
 FRESH_COMPILER_PARENT_SLICE = "zogfreshcrossbootstrapoct25.slice"
+FRESH_COMPILER_LOG_NAMESPACE = "zogfreshcrossbootstrapoct25"
 
 
 def identity(value):
@@ -124,16 +125,23 @@ class BuildBackend:
         self.directory = Path(directory)
         self.parent_slice = parent_slice
         self.authorized_project_root = authorized_project_root
+        self.log_namespace = (FRESH_COMPILER_LOG_NAMESPACE if parent_slice is not None else None)
+        # The legacy journal-barrier broker synchronizes only the default
+        # journal namespace. For this new isolated namespace we must not
+        # claim that a default-journal sync proves the build's logs durable.
+        if self.log_namespace and journal_barrier is not None:
+            raise SystemdBackendError("fresh build journal barrier lacks namespaced synchronization")
 
-    def _check_parent_binding(self, project_root, stored):
+    def _check_parent_binding(self, project_root, stored, logging=None):
         if self.parent_slice is None:
-            if stored is not None:
-                raise SystemdBackendError("historical build parent binding cannot change")
+            if stored is not None or logging is not None:
+                raise SystemdBackendError("historical build parent/logging binding cannot change")
             return
         if (type(project_root) is not str
                 or project_root != self.authorized_project_root
-                or stored != self.parent_slice):
-            raise SystemdBackendError("build parent slice binding differs from protected role")
+                or stored != self.parent_slice
+                or logging != self.log_namespace):
+            raise SystemdBackendError("build parent/logging binding differs from protected role")
 
     def _verify_active_parent(self):
         if self.parent_slice is None:
@@ -178,7 +186,7 @@ class BuildBackend:
         path = self.resource_path(project_root, resource_id)
         raw = json.loads((path / 'registration.json').read_text())
         if raw['state'] != 'ready': raise SystemdBackendError('build registration is not ready')
-        self._check_parent_binding(str(Path(project_root)), raw["intent"].get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), raw["intent"].get("parent_slice"), raw["intent"].get("log_namespace"))
         return path, raw
 
     @staticmethod
@@ -209,7 +217,7 @@ class BuildBackend:
             record = json.loads(path.read_text())
         except FileNotFoundError:
             return {'resource_id': resource_id, 'state': 'absent'}
-        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"), record["intent"].get("log_namespace"))
         return record
 
     def register(self, *, project_root, resource_id, prepared_root, source_directory, output_directory,
@@ -232,11 +240,12 @@ class BuildBackend:
             raise SystemdBackendError('build UID/GID must differ from controller project owner')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
-        self._check_parent_binding(str(root), self.parent_slice)
+        self._check_parent_binding(str(root), self.parent_slice, self.log_namespace)
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
                       input_manifest_id=input_manifest_id, execution_user_id=execution_user_id, execution_group_id=execution_group_id)
         if self.parent_slice is not None:
             intent["parent_slice"] = self.parent_slice
+            intent["log_namespace"] = self.log_namespace
         path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
         ensure_directory(self.directory)
@@ -299,7 +308,7 @@ class BuildBackend:
         identity(job_id)
         path, registration = self.load(project_root, request['build_root_id'])
         binding = registration['intent']
-        self._check_parent_binding(str(Path(project_root)), binding.get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), binding.get("parent_slice"), binding.get("log_namespace"))
         if any(request[k] != binding[k] for k in ('execution_user_id', 'execution_group_id')):
             raise SystemdBackendError('execution identity differs from registration')
         # The registration remains immutable, but host-install ownership can
@@ -330,6 +339,7 @@ class BuildBackend:
                       resolved_executable=resolved, process_cleanup_complete=False)
         if self.parent_slice is not None:
             result["parent_slice"] = self.parent_slice
+            result["log_namespace"] = self.log_namespace
         jobs = path / 'jobs'
         ensure_directory(jobs)
         job_path = jobs / (job_id+'.json')
@@ -337,6 +347,7 @@ class BuildBackend:
             prior = json.loads(job_path.read_text())
             if prior['request'] != request: raise SystemdBackendError('job identity already bound')
             if (prior.get("parent_slice") != self.parent_slice
+                    or prior.get("log_namespace") != self.log_namespace
                     or prior.get("slice_name") != slice_name):
                 raise SystemdBackendError("prepared job slice differs from protected parent")
             return prior
@@ -405,7 +416,7 @@ class BuildBackend:
         job_path = path/'jobs'/(job_id+'.json')
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
-        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         if self.parent_slice is not None:
             expected_slice = f'{self.parent_slice[:-6]}-build{identity(job_id)}.slice'
             if info["slice_name"] != expected_slice:
@@ -451,6 +462,10 @@ class BuildBackend:
             'TimeoutStopUSec': ('t', int(r['termination_grace_seconds']*1000000)),
             'SendSIGKILL': ('b', True), 'TasksMax': ('t', r['resource_limits']['thread-count-maximum']),
             'MemoryMax': ('t', r['resource_limits']['memory-maximum-bytes'])}
+        if self.log_namespace is not None:
+            # Fixed trusted worker log routing; caller may not supply any
+            # journal namespace or output-path override in canonical_request.
+            values["LogNamespace"] = ("s", self.log_namespace)
         if 'cpu-weight' in r['resource_limits']:
             values['CPUWeight'] = ('t', r['resource_limits']['cpu-weight'])
         if 'stack-maximum-bytes' in r['resource_limits']:
@@ -500,7 +515,12 @@ class BuildBackend:
         if info.get("parent_slice") is not None:
             if info["parent_slice"] != FRESH_COMPILER_PARENT_SLICE:
                 raise SystemdBackendError("invalid prepared compiler parent")
+            if info.get("log_namespace") != FRESH_COMPILER_LOG_NAMESPACE:
+                raise SystemdBackendError("saved compiler log namespace differs from bound role")
             expected["Slice"] = info["slice_name"]
+            expected["LogNamespace"] = info["log_namespace"]
+            expected["StandardOutput"] = "journal"
+            expected["StandardError"] = "journal"
         return expected
 
     def observe(self, *, project_root, job_id, build_root_id):
@@ -508,7 +528,7 @@ class BuildBackend:
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return {'exists':False}
         info = json.loads(job_path.read_text())
-        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         expected = self.expected_properties(path,info)
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
@@ -516,7 +536,8 @@ class BuildBackend:
             if raw['exists']:
                 obj = self.systemd._get_unit_path(info['unit_name'])
                 properties = dict(raw['properties'])
-                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec'):
+                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec', 
+                             *(['LogNamespace'] if self.log_namespace is not None else [])):
                     properties[name]=self.systemd._get_property(obj,'org.freedesktop.systemd1.Service',name)
                 for name,value in expected.items():
                     observed = properties.get(name)
@@ -571,7 +592,7 @@ class BuildBackend:
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return True  # No start is possible without its durable privileged record.
         info = json.loads(job_path.read_text())
-        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         for unit in (info['unit_name'], info['slice_name']):
             raw = self.systemd.observe(project_root=project_root, unit_name=unit)
             if info.get("parent_slice") is not None:
@@ -654,7 +675,7 @@ class BuildBackend:
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
             return {'state': 'released'}
         record = json.loads(manifest.read_text())
-        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"))
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"), record["intent"].get("log_namespace"))
         if record['state'] == 'released': return record
         for job in (path/'jobs').glob('*.json'):
             if not json.loads(job.read_text())['process_cleanup_complete']:
