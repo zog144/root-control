@@ -76,7 +76,15 @@ class RootControlDaemon:
         self.socket_group_gid = socket_group_gid
         self.controller_uid = controller_uid
         self.systemd = systemd_backend or BusctlSystemdBackend()
-        self.build = BuildBackend(self.systemd, journal_barrier=journal_barrier)
+        if role == BUILD_ONLY_PROJECT_ROLE:
+            from .build import FRESH_COMPILER_PARENT_SLICE
+            self.build = BuildBackend(
+                self.systemd, journal_barrier=journal_barrier,
+                parent_slice=FRESH_COMPILER_PARENT_SLICE,
+                authorized_project_root=authorized_project_root,
+            )
+        else:
+            self.build = BuildBackend(self.systemd, journal_barrier=journal_barrier)
 
     def _validate_role_startup(self):
         if self.role != BUILD_ONLY_PROJECT_ROLE:
