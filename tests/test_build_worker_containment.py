@@ -42,6 +42,7 @@ class ParentSystemd(BusctlSystemdBackend):
             }[name]
         return {"PrivateNetwork": True, "NoNewPrivileges": True,
                 "CapabilityBoundingSet": 0, "RuntimeMaxUSec": 8_000_000,
+                "LogNamespace": "zogfreshcrossbootstrapoct25",
                 "ExecMainCode": 1, "ExecMainStatus": 0,
                 "ExecMainExitTimestampMonotonic": 1}.get(name)
 
@@ -141,9 +142,11 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     path = backend.resource_path(project, arguments["resource_id"])
     registration = json.loads((path / "registration.json").read_text())
     assert registration["intent"]["parent_slice"] == FRESH_COMPILER_PARENT_SLICE
+    assert registration["intent"]["log_namespace"] == "zogfreshcrossbootstrapoct25"
     prepared = backend.prepare(project_root=project, job_id=job, request=request)
     expected_child = "zogfreshcrossbootstrapoct25-build" + job + ".slice"
     assert prepared["parent_slice"] == FRESH_COMPILER_PARENT_SLICE
+    assert prepared["log_namespace"] == "zogfreshcrossbootstrapoct25"
     assert prepared["slice_name"] == expected_child
     assert backend.prepare(project_root=project, job_id=job, request=request) == prepared
     assert systemd.job_calls == []
@@ -153,6 +156,9 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     assert launched[0] == "StartTransientUnit"
     props = dict(launched[1][2])
     assert props["Slice"].value == expected_child
+    assert props["LogNamespace"].value == "zogfreshcrossbootstrapoct25"
+    assert props["StandardOutput"].value == "journal"
+    assert props["StandardError"].value == "journal"
     assert expected_child.startswith(FRESH_COMPILER_PARENT_SLICE[:-6] + "-")
     assert props["ExitType"].value == "cgroup"
     assert props["KillMode"].value == "control-group"
@@ -293,3 +299,57 @@ def test_parent_load_state_bad_setting_blocks_new_start_without_touching_job(bou
     saved = json.loads((path / "jobs" / (jid + ".json")).read_text())
     assert "start_attempted" not in saved
     assert not systemd.job_calls
+
+
+def test_frozen_log_namespace_cannot_be_removed_or_changed(bound):
+    backend, systemd, args, request, jid = bound
+    project = args["project_root"]
+    path = backend.resource_path(project, args["resource_id"])
+    prepared = backend.prepare(project_root=project, job_id=jid, request=request)
+    jpath = path / "jobs" / (jid + ".json")
+    baseline = jpath.read_bytes()
+    for namespace in (None, "default", "other-logs"):
+        changed = dict(prepared)
+        if namespace is None:
+            changed.pop("log_namespace")
+        else:
+            changed["log_namespace"] = namespace
+        jpath.write_text(json.dumps(changed))
+        with pytest.raises(SystemdBackendError, match="logging binding"):
+            backend.prepare(project_root=project, job_id=jid, request=request)
+        with pytest.raises(SystemdBackendError, match="logging binding"):
+            backend.observe(project_root=project, job_id=jid,
+                            build_root_id=args["resource_id"])
+        assert not systemd.job_calls
+    jpath.write_bytes(baseline)
+    assert backend.prepare(project_root=project, job_id=jid, request=request) == prepared
+
+
+def test_worker_log_namespace_readback_must_match_real_service(bound):
+    backend, systemd, args, request, jid = bound
+    info, path, worker = _active_worker(backend, systemd, args, request, jid)
+    saved = (path / "jobs" / (jid + ".json")).read_bytes()
+    backend.observe(project_root=args["project_root"], job_id=jid,
+                    build_root_id=args["resource_id"])
+    original = systemd._get_property
+
+    def corrupted(obj, iface, name, **kwargs):
+        if name == "LogNamespace":
+            return "default"
+        return original(obj, iface, name, **kwargs)
+    systemd._get_property = corrupted
+    with pytest.raises(SystemdBackendError, match="property mismatch: LogNamespace"):
+        backend.observe(project_root=args["project_root"], job_id=jid,
+                        build_root_id=args["resource_id"])
+    assert (path / "jobs" / (jid + ".json")).read_bytes() == saved
+
+
+def test_namespaced_worker_requires_explicitly_supported_barrier(tmp_path):
+    backend = ParentSystemd()
+    with pytest.raises(SystemdBackendError, match="namespaced synchronization"):
+        BuildBackend(
+            backend, tmp_path / "priv",
+            journal_barrier=object(),
+            parent_slice=FRESH_COMPILER_PARENT_SLICE,
+            authorized_project_root="/home/owner/" + FRESH_COMPILER_PROJECT,
+        )
