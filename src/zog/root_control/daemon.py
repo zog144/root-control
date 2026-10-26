@@ -450,6 +450,11 @@ def main():
     # Environment override is for root-control deployment/testing only. The
     # box-control public API itself has no environment-variable configuration.
     socket_path = os.environ.get("ROOT_CONTROL_SOCKET", str(DEFAULT_SOCKET))
+    # The existing broker synchronizes the default journal only. Never
+    # start its root-owned socket/ledger under a fresh namespaced build role.
+    if (os.environ.get("ROOT_CONTROL_ROLE") == BUILD_ONLY_PROJECT_ROLE
+            and os.environ.get("ROOT_CONTROL_JOURNAL_BARRIER") == "1"):
+        raise ValueError("fresh compiler requires reviewed namespace-aware journal barrier")
     barrier = None
     if os.environ.get('ROOT_CONTROL_JOURNAL_BARRIER') == '1':
         from .journal_barrier import JournalBarrier
