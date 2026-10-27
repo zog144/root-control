@@ -436,6 +436,41 @@ class BuildBackend:
         return result
 
     @staticmethod
+    def _pid1_resource_path(path, *, fresh):
+        """Translate a sidecar-private registration path to PID1 host view.
+
+        The 30-GiB host image appears at /var/lib/zog/build-resources only
+        inside the *controller's* BindPaths namespace. PID1's worker unit
+        properties, unlike controller I/O, are interpreted in the host view.
+        Never pass the private path to RootDirectory or device BindPaths.
+        """
+        target = Path(path)
+        if not fresh:
+            return target
+        try:
+            relative = target.relative_to(FRESH_COMPILER_RESOURCES)
+        except ValueError as exc:
+            raise SystemdBackendError("worker PID1 path is not a registered fresh resource") from exc
+        if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            raise SystemdBackendError("worker PID1 path does not select a resource")
+        return FRESH_COMPILER_RESOURCES_SOURCE.joinpath(*relative.parts)
+
+    def _verify_pid1_resource_visibility(self, path):
+        """Require identical source/sidecar inodes before PID1 StartTransientUnit."""
+        if self.parent_slice is None:
+            return
+        source = Path(path)
+        visible = self._pid1_resource_path(source, fresh=True)
+        for target, other in ((source, visible),):
+            if target.is_symlink() or other.is_symlink():
+                raise SystemdBackendError("worker rootfs PID1 path was redirected")
+            a, b = target.stat(), other.stat()
+            if (not stat.S_ISDIR(a.st_mode) or not stat.S_ISDIR(b.st_mode)
+                    or (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino)
+                    or a.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+                raise SystemdBackendError("worker rootfs is not PID1-visible on bounded build mount")
+
+    @staticmethod
     def private_null(path):
         """Dedicated inode; never bind the host device or follow caller paths."""
         node = path / 'permission-test-null'
@@ -565,6 +600,7 @@ class BuildBackend:
         elif info.get('journal_barrier_token'):
             raise SystemdBackendError('prepared journal barrier requires enabled broker')
         scratch = self._prepare_fresh_scratch(path, info, registration) if self.parent_slice else None
+        self._verify_pid1_resource_visibility(path / 'root')
         info['start_attempted'] = True
         replace_json(job_path, info)
         self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
@@ -574,7 +610,8 @@ class BuildBackend:
             'Description': ('s', 'Zog finite build job'), 'Slice': ('s', info['slice_name']),
             'Type': ('s', 'exec'), 'ExitType': ('s', 'cgroup'), 'Restart': ('s', 'no'),
             'KillMode': ('s', 'control-group'), 'RemainAfterExit': ('b', False), 'AddRef': ('b', True),
-            'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
+            'RootDirectory': ('s', str(self._pid1_resource_path(path/'root', fresh=self.parent_slice is not None))),
+            'WorkingDirectory': ('s', r['working_directory']),
             'User': ('s', str(r['execution_user_id'])), 'Group': ('s', str(r['execution_group_id'])),
             'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
             'PrivateTmp': ('b', self.parent_slice is None), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
@@ -608,7 +645,9 @@ class BuildBackend:
         if scratch is not None:
             for source, dest in zip(scratch, ('/tmp', '/var/tmp', '/run')):
                 binds += [str(source), dest, 'false', 0]
-        if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
+        if null_device is not None:
+            binds += [str(self._pid1_resource_path(null_device, fresh=self.parent_slice is not None)),
+                      '/dev/null','false',0]
         # Use the stable ExecStart property, not ExecStartEx. Older systemd
         # releases accept ExecStartEx over D-Bus but serialize it as an
         # unknown key on daemon-reload, destroying observation properties.
@@ -637,7 +676,9 @@ class BuildBackend:
     @staticmethod
     def expected_properties(path, info):
         r = info['request']
-        expected = {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
+        expected = {'RootDirectory':str(BuildBackend._pid1_resource_path(
+                    path/'root', fresh=info.get("parent_slice") is not None)),
+                    'User':str(r['execution_user_id']),
                 'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
@@ -670,6 +711,7 @@ class BuildBackend:
         info = json.loads(job_path.read_text())
         self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         expected = self.expected_properties(path,info)
+        self._verify_pid1_resource_visibility(path / 'root')
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
             self._check_worker_cgroup(info, raw)
