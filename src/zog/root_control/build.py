@@ -186,9 +186,20 @@ class BuildBackend:
         attempts = project / "state/image-build/attempts"
         if project != Path(self.authorized_project_root):
             raise SystemdBackendError("fresh Project identity changed")
-        for mount in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT, attempts):
+        for mount in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
             if mount.is_symlink() or not os.path.ismount(mount):
                 raise SystemdBackendError("fresh compiler quota mount is missing")
+        # os.path.ismount() cannot reliably identify bind mounts on the SAME
+        # filesystem: demand an exact kernel mountinfo target for attempts.
+        mountpoints = set()
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 10:
+                raise SystemdBackendError("invalid kernel mount inventory")
+            mountpoints.add(Path(re.sub(
+                r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
+        if attempts not in mountpoints:
+            raise SystemdBackendError("fresh attempts bind mount is missing")
         if (attempts.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
                 or self.directory.stat().st_dev != FRESH_COMPILER_EXTERNAL_MOUNT.stat().st_dev
                 or self.directory.is_symlink()):
@@ -201,12 +212,7 @@ class BuildBackend:
                 raise SystemdBackendError("fresh worker input escapes quota")
         if paths:
             checked = [Path(p).resolve() for p in paths]
-            for line in Path("/proc/self/mountinfo").read_text().splitlines():
-                parts = line.split()
-                if len(parts) < 5:
-                    raise SystemdBackendError("invalid kernel mount inventory")
-                mount = Path(re.sub(r"\\([0-7]{3})",
-                                    lambda m: chr(int(m[1], 8)), parts[4]))
+            for mount in mountpoints:
                 if any(mount == p or mount.is_relative_to(p) for p in checked):
                     raise SystemdBackendError("unreviewed nested worker mount")
 
