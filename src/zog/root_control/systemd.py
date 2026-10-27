@@ -1150,6 +1150,13 @@ class BusctlSystemdBackend:
 
     def start_service(self, *, project_root, generation: str, definition: dict) -> None:
         self._validate_service_definition(project_root, generation, definition)
+        # Timings are diagnostic only, not evidence of program completion.
+        # Emit only the already validated fixed systemd unit identity; no
+        # command, environment, credential, policy or writable path values.
+        from .events import emit
+        started_at = time.monotonic()
+        unit = definition["unit_name"]
+        emit("systemd-start-service-validated", unit_name=unit)
         generation_root = Path(definition["generation_root"]).resolve()
         self._prepare_runtime_scaffold(
             project_root, generation, generation_root, definition
@@ -1206,8 +1213,18 @@ class BusctlSystemdBackend:
         props.append(self._property("AddRef", "b", "true"))
         # Bound systemd's own stop escalation as well as our wait for its job.
         props.append(self._property("TimeoutStopUSec", "t", int(definition["timeout_stop_microseconds"])))
-        self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
-                  [definition["unit_name"], "fail", props, []])
+        emit("systemd-start-service-job-submitted", unit_name=unit,
+             preparation_seconds=round(time.monotonic() - started_at, 6))
+        try:
+            self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
+                      [unit, "fail", props, []])
+        except Exception:
+            # A failed local wait cannot prove PID1 rejected the job.
+            emit("systemd-start-service-job-unconfirmed", unit_name=unit,
+                 elapsed_seconds=round(time.monotonic() - started_at, 6))
+            raise
+        emit("systemd-start-service-job-completed", unit_name=unit,
+             elapsed_seconds=round(time.monotonic() - started_at, 6))
 
     def _get_unit_path(self, unit_name: str) -> str | None:
         output = self._run(
