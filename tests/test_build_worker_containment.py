@@ -389,61 +389,95 @@ def test_namespaced_worker_requires_explicitly_supported_barrier(tmp_path):
 
 
 def test_fresh_quota_backing_is_required_before_any_registration_mutation(tmp_path):
-    """Missing fixed loop mounts must fail; no source copy or resource record."""
+    """Missing protected mounts must refuse registration before a host write."""
     project = tmp_path / "owner" / FRESH_COMPILER_PROJECT
     project.mkdir(parents=True)
     backend = BuildBackend(ParentSystemd(), tmp_path / "ignored",
         parent_slice=FRESH_COMPILER_PARENT_SLICE,
         authorized_project_root=str(project))
-    assert str(backend.directory).endswith(
-        "/external/artifacts/build-resources")
+    assert str(backend.directory) == "/var/lib/zog/build-resources"
     with pytest.raises(SystemdBackendError, match="quota mount"):
         backend._verify_fresh_storage(str(project))
-    assert not backend.directory.exists()
 
 
-def test_exact_attempts_bind_mount_and_nested_mount_guard(tmp_path, monkeypatch):
-    """Kernel mountinfo is required even for a bind sharing a device number."""
+def test_exact_state_and_registration_mount_inode_and_nested_guards(tmp_path, monkeypatch):
+    """Host-deploy's actual binds are Project/state and private registration."""
     from zog.root_control import build as build_mod
+    from types import SimpleNamespace
     build_mount, external = tmp_path / "work", tmp_path / "external"
-    attempts = tmp_path / "owner" / FRESH_COMPILER_PROJECT / "state/image-build/attempts"
+    state = tmp_path / "owner" / FRESH_COMPILER_PROJECT / "state"
+    attempts = state / "image-build/attempts"
     source = attempts / "one/source"
-    for p in (build_mount, external / "artifacts/build-resources", source):
-        p.mkdir(parents=True)
+    work_state = build_mount / "state"
+    work_resources = build_mount / "controller-build-resources"
+    resources = tmp_path / "namespace" / "build-resources"
+    for p in (external, source, work_state, work_resources, resources):
+        p.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(build_mod, "FRESH_COMPILER_BUILD_MOUNT", build_mount)
     monkeypatch.setattr(build_mod, "FRESH_COMPILER_EXTERNAL_MOUNT", external)
-    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES",
-                        external / "artifacts/build-resources")
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_STATE_SOURCE", work_state)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES_SOURCE", work_resources)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES", resources)
     backend = BuildBackend(ParentSystemd(), tmp_path / "ignored",
         parent_slice=FRESH_COMPILER_PARENT_SLICE,
-        authorized_project_root=str(attempts.parents[2]))
+        authorized_project_root=str(state.parent))
     monkeypatch.setattr(os.path, "ismount", lambda p: Path(p) in (build_mount, external))
-    actual = Path.read_text
-    mount_rows = []
+    original_read = Path.read_text
+    rows = []
     def read(self, *args, **kwargs):
         if self == Path("/proc/self/mountinfo"):
-            return "\n".join(mount_rows)
-        return actual(self, *args, **kwargs)
+            return "\n".join(rows)
+        return original_read(self, *args, **kwargs)
     monkeypatch.setattr(Path, "read_text", read)
-    with pytest.raises(SystemdBackendError, match="attempts bind mount"):
-        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
-    mount_rows.append(f"101 100 7:1 / {attempts} rw - ext4 /dev/loop1 rw")
-    # An untrusted test-account-owned mount root must still fail.
+    with pytest.raises(SystemdBackendError, match="state or privileged resource bind mount"):
+        backend._verify_fresh_storage(str(state.parent), [source])
+    rows.extend((
+        f"101 100 7:1 /state {state} rw - ext4 /dev/loop1 rw",
+        f"102 100 7:1 /controller-build-resources {resources} rw - ext4 /dev/loop1 rw",
+    ))
+    # Test runner's nonroot mount roots must fail even with matching mount names.
     with pytest.raises(SystemdBackendError, match="mount root ownership"):
-        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
-    from types import SimpleNamespace
+        backend._verify_fresh_storage(str(state.parent), [source])
     original_stat = Path.stat
-    def trusted_mount(self, *args, **kwargs):
+    same_inodes = True
+    def trusted(self, *args, **kwargs):
         value = original_stat(self, *args, **kwargs)
         if self in (build_mount, external):
             return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0,
-                                   st_dev=value.st_dev)
+                                   st_dev=value.st_dev, st_ino=value.st_ino)
+        if self == resources:
+            base = original_stat(work_resources)
+            return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0,
+                                   st_dev=value.st_dev,
+                                   st_ino=base.st_ino if same_inodes else value.st_ino)
+        if self == state:
+            base = original_stat(work_state)
+            return SimpleNamespace(st_mode=value.st_mode, st_uid=value.st_uid,
+                                   st_gid=value.st_gid, st_dev=value.st_dev,
+                                   st_ino=base.st_ino if same_inodes else value.st_ino)
         return value
-    monkeypatch.setattr(Path, "stat", trusted_mount)
-    backend._verify_fresh_storage(str(attempts.parents[2]), [source])
-    mount_rows.append(f"102 101 8:1 / {source / 'submount'} rw - ext4 /dev/sda rw")
+    monkeypatch.setattr(Path, "stat", trusted)
+    backend._verify_fresh_storage(str(state.parent), [source])
+    same_inodes = False
+    with pytest.raises(SystemdBackendError, match="backing differs"):
+        backend._verify_fresh_storage(str(state.parent), [source])
+    same_inodes = True
+    rows.append(f"103 101 8:1 / {source / 'submount'} rw - ext4 /dev/sda rw")
     with pytest.raises(SystemdBackendError, match="nested worker"):
-        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
+        backend._verify_fresh_storage(str(state.parent), [source])
+
+
+def test_private_registration_directory_must_remain_root_only(tmp_path, monkeypatch):
+    """Never chmod the 30-GiB imported rootfs staging directory to 0755."""
+    from zog.root_control import build as build_mod
+    project = tmp_path / "owner" / FRESH_COMPILER_PROJECT
+    project.mkdir(parents=True)
+    service = BuildBackend(ParentSystemd(), tmp_path / "ignored",
+                           parent_slice=FRESH_COMPILER_PARENT_SLICE,
+                           authorized_project_root=str(project))
+    assert service.directory == build_mod.FRESH_COMPILER_RESOURCES
+    assert service.directory == Path("/var/lib/zog/build-resources")
+
 
 
 def test_fresh_scratch_symlink_refusal_before_start_marker(bound, tmp_path):
