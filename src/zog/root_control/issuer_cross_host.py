@@ -36,9 +36,9 @@ _SSH = Path("/usr/bin/ssh")
 _UUID = credentials._UUID
 _HEX64 = credentials._HEX64
 _HEX32 = credentials._HEX32
-_HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\\Z")
-_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\\Z")
-_SHA = re.compile(r"SHA256:[A-Za-z0-9+/]{43}\\Z")
+_HOST = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}\Z")
+_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
+_SHA = re.compile(r"SHA256:[A-Za-z0-9+/]{43}\Z")
 
 class CrossHostDenied(credentials.IssuerCredentialError):
     """Fixed non-secret denial."""
@@ -55,11 +55,11 @@ def _pairs(pairs):
     return obj
 
 def _read_request(raw):
-    if not isinstance(raw, bytes) or not 1 <= len(raw) <= 1024 or not raw.endswith(b"\\n"):
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= 1024 or not raw.endswith(b"\n"):
         _deny()
     try:
         value = json.loads(raw[:-1].decode("ascii"), object_pairs_hook=_pairs)
-        if credentials._canonical(value) + b"\\n" != raw:
+        if credentials._canonical(value) + b"\n" != raw:
             _deny()
     except (UnicodeError, ValueError, TypeError, OverflowError):
         _deny()
@@ -162,7 +162,7 @@ def _request(binding):
     fields = {key: binding[key] for key in ("authorization_id", "host_id",
         "installation_id", "assignment_id", "assignment_revision", "receipt_sha256")}
     fields.update(schema=SCHEMA, operation=OPERATION, nonce=secrets.token_hex(16))
-    result = credentials._canonical(fields) + b"\\n"
+    result = credentials._canonical(fields) + b"\n"
     if len(result) > 1024:
         _deny()
     return result
@@ -317,7 +317,7 @@ def _consume_nonce(binding, request):
             info = os.fstat(record)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 _deny()
-            os.write(record, b"used\\n")
+            os.write(record, b"used\n")
             os.fsync(record)
         finally:
             os.close(record)
