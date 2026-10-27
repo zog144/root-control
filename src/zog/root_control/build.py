@@ -200,6 +200,12 @@ class BuildBackend:
                 r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
         if attempts not in mountpoints:
             raise SystemdBackendError("fresh attempts bind mount is missing")
+        # The worker must not own a quota mount root: otherwise it could
+        # rename the root-owned scratch bind source within the mount.
+        for fixed in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
+            meta = fixed.stat()
+            if (meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022):
+                raise SystemdBackendError("untrusted quota mount root ownership")
         if (attempts.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
                 or self.directory.stat().st_dev != FRESH_COMPILER_EXTERNAL_MOUNT.stat().st_dev
                 or self.directory.is_symlink()):
