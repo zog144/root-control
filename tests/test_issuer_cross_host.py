@@ -176,6 +176,8 @@ def test_station_broker_midstream_authorization_rotation_returns_zero_bytes(monk
         right.sendall(wire(request))
         right.shutdown(socket.SHUT_WR)
         assert not cross._serve_broker_connection(left, bound)
+        left.close()  # Forced-command wrapper closes the rejected connection.
+        right.settimeout(1)
         assert right.recv(8192) == b""
     finally:
         left.close()
