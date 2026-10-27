@@ -25,6 +25,9 @@ from dbus_next import Variant
 FRESH_COMPILER_PROJECT = "fresh-cross-bootstrap-oct25"
 FRESH_COMPILER_PARENT_SLICE = "zogfreshcrossbootstrapoct25.slice"
 FRESH_COMPILER_LOG_NAMESPACE = "zogfreshcrossbootstrapoct25"
+FRESH_COMPILER_BUILD_MOUNT = Path("/home/zog-cross-owner/fresh-cross-bootstrap-oct25/work")
+FRESH_COMPILER_EXTERNAL_MOUNT = Path("/var/lib/zog/host-deploy/fresh-cross-bootstrap-oct25/external")
+FRESH_COMPILER_RESOURCES = FRESH_COMPILER_EXTERNAL_MOUNT / "artifacts/build-resources"
 
 
 def identity(value):
@@ -122,7 +125,7 @@ class BuildBackend:
             raise SystemdBackendError("unbound compiler parent Project")
         self.systemd = systemd
         self.journal_barrier = journal_barrier
-        self.directory = Path(directory)
+        self.directory = (FRESH_COMPILER_RESOURCES if parent_slice is not None else Path(directory))
         self.parent_slice = parent_slice
         self.authorized_project_root = authorized_project_root
         self.log_namespace = (FRESH_COMPILER_LOG_NAMESPACE if parent_slice is not None else None)
@@ -174,6 +177,38 @@ class BuildBackend:
         elif observed.get("active_state") not in ("inactive", "failed"):
             raise SystemdBackendError("active compiler worker lacks protected cgroup")
 
+
+    def _verify_fresh_storage(self, project_root, paths=()):
+        """Require real bounded mount backing before modifying fresh compiler state."""
+        if self.parent_slice is None:
+            return
+        project = Path(project_root)
+        attempts = project / "state/image-build/attempts"
+        if project != Path(self.authorized_project_root):
+            raise SystemdBackendError("fresh Project identity changed")
+        for mount in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT, attempts):
+            if mount.is_symlink() or not os.path.ismount(mount):
+                raise SystemdBackendError("fresh compiler quota mount is missing")
+        if (attempts.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
+                or self.directory.stat().st_dev != FRESH_COMPILER_EXTERNAL_MOUNT.stat().st_dev
+                or self.directory.is_symlink()):
+            raise SystemdBackendError("fresh build or privileged registration storage escapes quota")
+        for source in paths:
+            item = Path(source)
+            if (item.is_symlink()
+                    or not item.resolve().is_relative_to(attempts.resolve())
+                    or item.stat().st_dev != attempts.stat().st_dev):
+                raise SystemdBackendError("fresh worker input escapes quota")
+        if paths:
+            checked = [Path(p).resolve() for p in paths]
+            for line in Path("/proc/self/mountinfo").read_text().splitlines():
+                parts = line.split()
+                if len(parts) < 5:
+                    raise SystemdBackendError("invalid kernel mount inventory")
+                mount = Path(re.sub(r"\\([0-7]{3})",
+                                    lambda m: chr(int(m[1], 8)), parts[4]))
+                if any(mount == p or mount.is_relative_to(p) for p in checked):
+                    raise SystemdBackendError("unreviewed nested worker mount")
 
     def area(self, project_root):
         root, _, _ = self.systemd._project(project_root)
@@ -241,6 +276,7 @@ class BuildBackend:
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
         self._check_parent_binding(str(root), self.parent_slice, self.log_namespace)
+        self._verify_fresh_storage(str(root), paths)
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
                       input_manifest_id=input_manifest_id, execution_user_id=execution_user_id, execution_group_id=execution_group_id)
         if self.parent_slice is not None:
@@ -248,6 +284,8 @@ class BuildBackend:
             intent["log_namespace"] = self.log_namespace
         path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
+        if self.parent_slice is not None and not self.directory.is_dir():
+            raise SystemdBackendError('fresh privileged resource root not installed')
         ensure_directory(self.directory)
         os.chmod(self.directory, 0o755)
         ensure_directory(path)
@@ -320,6 +358,7 @@ class BuildBackend:
                 or binding['execution_group_id'] == owner.st_gid):
             raise SystemdBackendError('build principal now overlaps controller project ownership')
         source, output = Path(binding['source_directory']), Path(binding['output_directory'])
+        self._verify_fresh_storage(project_root, (binding['prepared_root'], source, output))
         executable = request['command'][0]
         directory = request['working_directory']
         cwd, _ = root_path(path/'root', source, output, directory)
@@ -419,6 +458,7 @@ class BuildBackend:
             raise SystemdBackendError('build start already attempted; inspect existing job')
         self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         if self.parent_slice is not None:
+            self._verify_fresh_storage(project_root, (registration['intent']['prepared_root'], registration['intent']['source_directory'], registration['intent']['output_directory']))
             expected_slice = f'{self.parent_slice[:-6]}-build{identity(job_id)}.slice'
             if info["slice_name"] != expected_slice:
                 raise SystemdBackendError("build job slice changed from protected parent")
