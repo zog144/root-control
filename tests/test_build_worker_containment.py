@@ -43,6 +43,9 @@ class ParentSystemd(BusctlSystemdBackend):
         return {"PrivateNetwork": True, "NoNewPrivileges": True,
                 "CapabilityBoundingSet": 0, "RuntimeMaxUSec": 8_000_000,
                 "LogNamespace": "zogfreshcrossbootstrapoct25",
+                "PrivateTmp": False, "PrivateMounts": True,
+                "ProtectControlGroups": True, "Delegate": False,
+                "ProtectKernelTunables": True, "RestrictNamespaces": 0, "LimitCORE": 0,
                 "ExecMainCode": 1, "ExecMainStatus": 0,
                 "ExecMainExitTimestampMonotonic": 1}.get(name)
 
@@ -93,6 +96,9 @@ def bound(tmp_path, monkeypatch):
         parent_slice=FRESH_COMPILER_PARENT_SLICE,
         authorized_project_root=str(project),
     )
+    # The independent mount/identity cases exercise the real native guard;
+    # this PID1 mock focuses only on typed worker properties.
+    monkeypatch.setattr(backend, "_verify_fresh_storage", lambda *args, **kwargs: None)
     rid = "b" * 32
     jid = "c" * 32
     arguments = {
@@ -159,6 +165,16 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     assert props["LogNamespace"].value == "zogfreshcrossbootstrapoct25"
     assert props["StandardOutput"].value == "journal"
     assert props["StandardError"].value == "journal"
+    assert props["PrivateTmp"].value is False
+    assert props["PrivateMounts"].value is True
+    assert props["ProtectControlGroups"].value is True
+    assert props["Delegate"].value is False
+    assert props["RestrictNamespaces"].value == 0
+    assert props["LimitCORE"].value == 0
+    binds = props["BindPaths"].value
+    assert {b[1] for b in binds} >= {"/tmp", "/var/tmp", "/run", "/image-build/source", "/image-build/output"}
+    assert all(b[0].startswith(str(arguments["output_directory"]) + "/")
+               for b in binds if b[1] in {"/tmp", "/var/tmp", "/run"})
     assert expected_child.startswith(FRESH_COMPILER_PARENT_SLICE[:-6] + "-")
     assert props["ExitType"].value == "cgroup"
     assert props["KillMode"].value == "control-group"
