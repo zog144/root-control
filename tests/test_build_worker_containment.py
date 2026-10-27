@@ -372,3 +372,80 @@ def test_namespaced_worker_requires_explicitly_supported_barrier(tmp_path):
             parent_slice=FRESH_COMPILER_PARENT_SLICE,
             authorized_project_root="/home/owner/" + FRESH_COMPILER_PROJECT,
         )
+
+
+def test_fresh_quota_backing_is_required_before_any_registration_mutation(tmp_path):
+    """Missing fixed loop mounts must fail; no source copy or resource record."""
+    project = tmp_path / "owner" / FRESH_COMPILER_PROJECT
+    project.mkdir(parents=True)
+    backend = BuildBackend(ParentSystemd(), tmp_path / "ignored",
+        parent_slice=FRESH_COMPILER_PARENT_SLICE,
+        authorized_project_root=str(project))
+    assert str(backend.directory).endswith(
+        "/external/artifacts/build-resources")
+    with pytest.raises(SystemdBackendError, match="quota mount"):
+        backend._verify_fresh_storage(str(project))
+    assert not backend.directory.exists()
+
+
+def test_exact_attempts_bind_mount_and_nested_mount_guard(tmp_path, monkeypatch):
+    """Kernel mountinfo is required even for a bind sharing a device number."""
+    from zog.root_control import build as build_mod
+    build_mount, external = tmp_path / "work", tmp_path / "external"
+    attempts = tmp_path / "owner" / FRESH_COMPILER_PROJECT / "state/image-build/attempts"
+    source = attempts / "one/source"
+    for p in (build_mount, external / "artifacts/build-resources", source):
+        p.mkdir(parents=True)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_BUILD_MOUNT", build_mount)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_EXTERNAL_MOUNT", external)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES",
+                        external / "artifacts/build-resources")
+    backend = BuildBackend(ParentSystemd(), tmp_path / "ignored",
+        parent_slice=FRESH_COMPILER_PARENT_SLICE,
+        authorized_project_root=str(attempts.parents[2]))
+    monkeypatch.setattr(os.path, "ismount", lambda p: Path(p) in (build_mount, external))
+    actual = Path.read_text
+    mount_rows = []
+    def read(self, *args, **kwargs):
+        if self == Path("/proc/self/mountinfo"):
+            return "\n".join(mount_rows)
+        return actual(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(SystemdBackendError, match="attempts bind mount"):
+        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
+    mount_rows.append(f"101 100 7:1 / {attempts} rw - ext4 /dev/loop1 rw")
+    backend._verify_fresh_storage(str(attempts.parents[2]), [source])
+    mount_rows.append(f"102 101 8:1 / {source / 'submount'} rw - ext4 /dev/sda rw")
+    with pytest.raises(SystemdBackendError, match="nested worker"):
+        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
+
+
+def test_fresh_scratch_symlink_refusal_before_start_marker(bound, tmp_path):
+    backend, systemd, args, request, jid = bound
+    output = args["output_directory"]
+    outsider = tmp_path / "unbounded"
+    outsider.mkdir()
+    (output / ".zog-runtime").symlink_to(outsider, target_is_directory=True)
+    path = backend.resource_path(args["project_root"], args["resource_id"])
+    with pytest.raises(SystemdBackendError, match="fresh scratch"):
+        backend.start(project_root=args["project_root"], job_id=jid, request=request)
+    saved = json.loads((path / "jobs" / (jid + ".json")).read_text())
+    assert "start_attempted" not in saved
+    assert not systemd.job_calls
+
+
+@pytest.mark.parametrize("key, bad", [
+    ("PrivateTmp", True), ("ProtectControlGroups", False),
+    ("Delegate", True), ("RestrictNamespaces", 65535),
+    ("LimitCORE", 1024), ("PrivateMounts", False),
+])
+def test_fresh_worker_pid1_isolation_properties_cannot_be_relaxed(bound, key, bad):
+    backend, systemd, args, request, jid = bound
+    info, path, worker = _active_worker(backend, systemd, args, request, jid)
+    original = systemd._get_property
+    def tampered(obj, iface, name, **kwargs):
+        return bad if name == key else original(obj, iface, name, **kwargs)
+    systemd._get_property = tampered
+    with pytest.raises(SystemdBackendError, match="build property mismatch: " + key):
+        backend.observe(project_root=args["project_root"], job_id=jid,
+                        build_root_id=args["resource_id"])
