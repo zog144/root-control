@@ -218,3 +218,67 @@ def test_client_rotation_after_remote_token_fails_before_install(tmp_path, monke
                         lambda *a, **kw: pytest.fail("rotated token must not install"))
     with pytest.raises(cross.CrossHostDenied):
         cross.transfer_and_install(project.path)
+
+
+def test_client_profile_requires_actual_owner_ledger_and_single_pinned_host_key(tmp_path, monkeypatch):
+    import base64
+    import hashlib
+    project = Project(tmp_path / "project")
+    request = sample_request()
+    owner = b"retained-authority-receipt\n"
+    signer = b"independently-installed-station-key\n"
+    identity = b"operator-provisioned-test-identity"
+    ssh_blob = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + b"K" * 32
+    known = ("[station.example.org]:2222 ssh-ed25519 " +
+             base64.b64encode(ssh_blob).decode() + "\n").encode()
+    profile = dict(
+        schema=cross.CLIENT_SCHEMA, project=str(project.path),
+        authorization_id=request["authorization_id"], host_id=request["host_id"],
+        installation_id=request["installation_id"],
+        state_volume_id=str(uuid.uuid4()), host_fingerprint="a" * 64,
+        registry_id="test-registry",
+        assignment_id=request["assignment_id"],
+        assignment_revision=request["assignment_revision"],
+        receipt_sha256=request["receipt_sha256"],
+        ssh_host="station.example.org", ssh_port=2222,
+        ssh_user="issuer_bridge", ssh_identity="/etc/zog/ssh-issuer/client",
+        ssh_known_hosts="/etc/zog/ssh-issuer/known_hosts",
+        ssh_known_hosts_sha256=hashlib.sha256(known).hexdigest(),
+        owner_authority_sha256=hashlib.sha256(owner).hexdigest(),
+        station_signer_pin_sha256=hashlib.sha256(signer).hexdigest(),
+    )
+    protected = {
+        "/state/host-install/certificate-owner-authority/authority.json": owner,
+        "/etc/zog/host-install/certificate-assignment-authority.json": signer,
+        profile["ssh_identity"]: identity,
+        profile["ssh_known_hosts"]: known,
+    }
+    monkeypatch.setattr(cross, "_load_json", lambda path: dict(profile))
+    monkeypatch.setattr(cross, "_root_regular",
+                        lambda path, **kw: protected[str(path)])
+    assert cross._client_binding(project) == profile
+    protected["/state/host-install/certificate-owner-authority/authority.json"] = b"changed-ledger"
+    with pytest.raises(cross.CrossHostDenied):
+        cross._client_binding(project)
+    protected["/state/host-install/certificate-owner-authority/authority.json"] = owner
+    protected[profile["ssh_known_hosts"]] = known + known
+    with pytest.raises(cross.CrossHostDenied):
+        cross._client_binding(project)
+    protected[profile["ssh_known_hosts"]] = known
+    profile["ssh_host"] = "-oProxyCommand=malicious"
+    with pytest.raises(cross.CrossHostDenied):
+        cross._client_binding(project)
+
+
+@pytest.mark.parametrize("changed", ["schema", "peer_uid", "ssh_key_fingerprint",
+                                     "host_id", "assignment_revision", "projection_path"])
+def test_station_binding_rejects_stale_or_untrusted_service_principal(monkeypatch, changed):
+    request = sample_request()
+    config = binding(request)
+    config[changed] = (0 if changed == "peer_uid" else
+                       "ssh-rsa-not-accepted" if changed == "ssh_key_fingerprint" else
+                       "../escaped" if changed == "projection_path" else
+                       -1 if changed == "assignment_revision" else "invalid")
+    monkeypatch.setattr(cross, "_load_json", lambda path: config)
+    with pytest.raises(cross.CrossHostDenied):
+        cross._station_binding()
