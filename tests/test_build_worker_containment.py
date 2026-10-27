@@ -4,6 +4,7 @@ This file uses a fake PID1 adapter and does not start a native service.
 """
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
