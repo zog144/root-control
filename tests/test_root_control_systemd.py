@@ -1320,3 +1320,38 @@ def test_persistent_root_alias_rejected_by_resolved_host_uid(tmp_path, monkeypat
     with pytest.raises(SystemdBackendError, match="must be unprivileged"):
         BusctlSystemdBackend._persistent_directories(tmp_path, definition)
     assert not base.exists()
+
+
+def test_start_service_reports_bounded_preparation_vs_job_phases(tmp_path, monkeypatch):
+    from zog.root_control import events
+
+    project, generation, definition = _definition(tmp_path)
+    emitted = []
+    monkeypatch.setattr(events, "emit", lambda event, **fields:
+                        emitted.append((event, fields)))
+    backend = BusctlSystemdBackend(
+        runner=RecordingRunner(),
+        jobs=SimpleNamespace(call=lambda *a, **kw: "/job/42"))
+    raw = definition.to_transport_dict()
+    backend.start_service(project_root=project.path, generation=generation, definition=raw)
+    assert [name for name, _ in emitted] == [
+        "systemd-start-service-validated",
+        "systemd-start-service-job-submitted",
+        "systemd-start-service-job-completed",
+    ]
+    assert all(fields["unit_name"] == raw["unit_name"] for _, fields in emitted)
+    assert all("command" not in fields and "policy" not in fields
+               for _, fields in emitted)
+    assert emitted[1][1]["preparation_seconds"] >= 0
+
+    emitted.clear()
+    def lost(*args, **kwargs):
+        from zog.root_control.jobs import JobError
+        raise JobError("job deadline exceeded; outcome unknown")
+    backend.jobs.call = lost
+    with pytest.raises(SystemdBackendError, match="deadline exceeded"):
+        backend.start_service(project_root=project.path,
+                              generation=generation, definition=raw)
+    assert [name for name, _ in emitted][-1] == "systemd-start-service-job-unconfirmed"
+    assert not any(name == "systemd-start-service-job-completed"
+                   for name, _ in emitted)
