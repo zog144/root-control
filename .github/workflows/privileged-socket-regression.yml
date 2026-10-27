@@ -127,7 +127,7 @@ jobs:
                   "test_fixed_journal_namespace_is_selected_by_sidecar_not_log_caller",
                   "test_fixed_compiler_journal_namespace_is_not_a_caller_selected_query",
                   "test_fresh_quota_backing_is_required_before_any_registration_mutation",
-                  "test_exact_attempts_bind_mount_and_nested_mount_guard",
+                  "test_exact_state_and_registration_mount_inode_and_nested_guards",
                   "test_fresh_scratch_symlink_refusal_before_start_marker",
                   "test_fresh_worker_pid1_isolation_properties_cannot_be_relaxed",
                   "test_quota_mount_loss_blocks_inspection_cleanup_release_and_cancel",
