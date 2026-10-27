@@ -47,6 +47,7 @@ class ParentSystemd(BusctlSystemdBackend):
                 "PrivateTmp": False, "PrivateMounts": True,
                 "ProtectControlGroups": True, "Delegate": False,
                 "ProtectKernelTunables": True, "RestrictNamespaces": 0, "LimitCORE": 0,
+                "MemorySwapMax": 0, "MemoryMax": 10_000_000,
                 "ExecMainCode": 1, "ExecMainStatus": 0,
                 "ExecMainExitTimestampMonotonic": 1}.get(name)
 
@@ -198,6 +199,8 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     assert props["Delegate"].value is False
     assert props["RestrictNamespaces"].value == 0
     assert props["LimitCORE"].value == 0
+    assert props["MemorySwapMax"].value == 0
+    assert props["MemoryMax"].value == request["resource_limits"]["memory-maximum-bytes"]
     binds = props["BindPaths"].value
     assert {b[1] for b in binds} >= {"/tmp", "/var/tmp", "/run", "/image-build/source", "/image-build/output"}
     assert all(b[0].startswith(str(backend._test_scratch_mount) + "/")
@@ -585,7 +588,8 @@ def test_fresh_scratch_symlink_refusal_before_start_marker(bound, tmp_path):
 @pytest.mark.parametrize("key, bad", [
     ("PrivateTmp", True), ("ProtectControlGroups", False),
     ("Delegate", True), ("RestrictNamespaces", 65535),
-    ("LimitCORE", 1024), ("PrivateMounts", False),
+    ("LimitCORE", 1024), ("MemorySwapMax", 4096),
+    ("MemoryMax", 20_000_000), ("PrivateMounts", False),
 ])
 def test_fresh_worker_pid1_isolation_properties_cannot_be_relaxed(bound, key, bad):
     backend, systemd, args, request, jid = bound
