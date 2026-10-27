@@ -128,6 +128,8 @@ jobs:
                   "test_fixed_compiler_journal_namespace_is_not_a_caller_selected_query",
                   "test_fresh_quota_backing_is_required_before_any_registration_mutation",
                   "test_exact_state_and_registration_mount_inode_and_nested_guards",
+                  "test_pid1_worker_root_and_null_bind_are_host_visible_not_sidecar_private",
+                  "test_pid1_root_inode_must_match_quota_host_view_before_start",
                   "test_fresh_scratch_symlink_refusal_before_start_marker",
                   "test_fresh_worker_pid1_isolation_properties_cannot_be_relaxed",
                   "test_quota_mount_loss_blocks_inspection_cleanup_release_and_cancel",
