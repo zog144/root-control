@@ -365,3 +365,21 @@ def test_fixed_journal_namespace_is_selected_by_sidecar_not_log_caller(restricte
     with pytest.raises(ValueError, match="unsupported privileged build log arguments"):
         service.handle(dict(request, journal_namespace="other"))
     assert len(received) == 1
+
+
+def test_fresh_process_reader_cannot_select_another_cgroup(restricted, monkeypatch):
+    service, _, project = restricted
+    from zog.root_control import processes
+    calls = []
+    def inspect(**kwargs):
+        calls.append(kwargs)
+        return {"status": "observed", "processes": []}
+    monkeypatch.setattr(processes, "inspect", inspect)
+    req = {"operation": "build_job_processes", "project_root": str(project),
+           "job_id": "c" * 32}
+    result = service.handle(req)
+    assert result["result"]["status"] == "observed"
+    assert calls[0]["required_parent_slice"] == "zogfreshcrossbootstrapoct25.slice"
+    with pytest.raises(ValueError, match="unsupported process"):
+        service.handle(dict(req, required_parent_slice="system.slice"))
+    assert len(calls) == 1
