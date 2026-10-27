@@ -27,7 +27,11 @@ FRESH_COMPILER_PARENT_SLICE = "zogfreshcrossbootstrapoct25.slice"
 FRESH_COMPILER_LOG_NAMESPACE = "zogfreshcrossbootstrapoct25"
 FRESH_COMPILER_BUILD_MOUNT = Path("/home/zog-cross-owner/fresh-cross-bootstrap-oct25/work")
 FRESH_COMPILER_EXTERNAL_MOUNT = Path("/var/lib/zog/host-deploy/fresh-cross-bootstrap-oct25/external")
-FRESH_COMPILER_RESOURCES = FRESH_COMPILER_EXTERNAL_MOUNT / "artifacts/build-resources"
+# This destination exists only in the fresh sidecar's private mount namespace.
+# host-deploy binds the source from the SAME 30-GiB volume before activation.
+FRESH_COMPILER_RESOURCES = Path("/var/lib/zog/build-resources")
+FRESH_COMPILER_RESOURCES_SOURCE = FRESH_COMPILER_BUILD_MOUNT / "controller-build-resources"
+FRESH_COMPILER_STATE_SOURCE = FRESH_COMPILER_BUILD_MOUNT / "state"
 
 
 def identity(value):
@@ -183,14 +187,16 @@ class BuildBackend:
         if self.parent_slice is None:
             return
         project = Path(project_root)
-        attempts = project / "state/image-build/attempts"
+        state = project / "state"
+        attempts = state / "image-build/attempts"
         if project != Path(self.authorized_project_root):
             raise SystemdBackendError("fresh Project identity changed")
         for mount in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
             if mount.is_symlink() or not os.path.ismount(mount):
                 raise SystemdBackendError("fresh compiler quota mount is missing")
-        # os.path.ismount() cannot reliably identify bind mounts on the SAME
-        # filesystem: demand an exact kernel mountinfo target for attempts.
+        # Host-deploy binds <work>/state to <Project>/state and a second
+        # <work>/controller-build-resources into ONLY this sidecar namespace.
+        # Never infer these binds from a directory name or equal st_dev alone.
         mountpoints = set()
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
             fields = line.split()
@@ -198,18 +204,31 @@ class BuildBackend:
                 raise SystemdBackendError("invalid kernel mount inventory")
             mountpoints.add(Path(re.sub(
                 r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
-        if attempts not in mountpoints:
-            raise SystemdBackendError("fresh attempts bind mount is missing")
-        # The worker must not own a quota mount root: otherwise it could
-        # rename the root-owned scratch bind source within the mount.
+        if state not in mountpoints or self.directory not in mountpoints:
+            raise SystemdBackendError("fresh state or privileged resource bind mount is missing")
         for fixed in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
             meta = fixed.stat()
             if (meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022):
                 raise SystemdBackendError("untrusted quota mount root ownership")
-        if (attempts.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
-                or self.directory.stat().st_dev != FRESH_COMPILER_EXTERNAL_MOUNT.stat().st_dev
-                or self.directory.is_symlink()):
-            raise SystemdBackendError("fresh build or privileged registration storage escapes quota")
+        # Same (st_dev, st_ino) binds the *exact* host-deploy source directory
+        # in this mount namespace. Matching just the filesystem device would
+        # permit two unrelated directories on the same ext4 image.
+        for target, source in (
+            (state, FRESH_COMPILER_STATE_SOURCE),
+            (self.directory, FRESH_COMPILER_RESOURCES_SOURCE),
+        ):
+            if target.is_symlink() or source.is_symlink():
+                raise SystemdBackendError("fresh protected mount source is redirected")
+            t, b = target.stat(), source.stat()
+            if ((t.st_dev, t.st_ino) != (b.st_dev, b.st_ino)
+                    or t.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+                raise SystemdBackendError("fresh state or privileged registration backing differs")
+        owner = self.directory.stat()
+        if (owner.st_uid != 0 or owner.st_gid != 0
+                or owner.st_mode & 0o077):
+            raise SystemdBackendError("fresh privileged registration root not protected")
+        if not attempts.is_dir() or attempts.is_symlink():
+            raise SystemdBackendError("fresh attempts directory is untrusted")
         for source in paths:
             item = Path(source)
             if (item.is_symlink()
@@ -305,7 +324,8 @@ class BuildBackend:
         if self.parent_slice is not None and not self.directory.is_dir():
             raise SystemdBackendError('fresh privileged resource root not installed')
         ensure_directory(self.directory)
-        os.chmod(self.directory, 0o755)
+        if self.parent_slice is None:
+            os.chmod(self.directory, 0o755)
         ensure_directory(path)
         if manifest.exists():
             previous = json.loads(manifest.read_text())
