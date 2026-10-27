@@ -98,6 +98,8 @@ def bound(tmp_path, monkeypatch):
     )
     # The independent mount/identity cases exercise the real native guard;
     # this PID1 mock focuses only on typed worker properties.
+    backend.directory = tmp_path / "privileged"
+    backend.directory.mkdir()
     monkeypatch.setattr(backend, "_verify_fresh_storage", lambda *args, **kwargs: None)
     rid = "b" * 32
     jid = "c" * 32
