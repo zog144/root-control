@@ -336,6 +336,9 @@ class RootControlDaemon:
             arguments = {k:v for k,v in request.items() if k != "operation"}
             if not set(arguments) <= allowed:
                 raise ValueError("unsupported process inspection arguments")
+            if operation == "build_job_processes" and self.role == BUILD_ONLY_PROJECT_ROLE:
+                from .build import FRESH_COMPILER_PARENT_SLICE
+                arguments["required_parent_slice"] = FRESH_COMPILER_PARENT_SLICE
             return {"ok": True, "result": inspect(**arguments)}
         if operation == "execution_identity_resolve":
             from .identities import resolve
