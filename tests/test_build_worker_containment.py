@@ -115,6 +115,12 @@ def bound(tmp_path, monkeypatch):
     # this PID1 mock focuses only on typed worker properties.
     backend.directory = tmp_path / "privileged"
     backend.directory.mkdir()
+    # CI simulates a second PID1-visible spelling of the same fixed source,
+    # while the real code still rejects arbitrary/non-source paths.
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES", backend.directory)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES_SOURCE",
+                        fixed_work / "controller-build-resources")
+    (fixed_work / "controller-build-resources").mkdir()
     backend._test_scratch_mount = fixed_work
     monkeypatch.setattr(backend, "_verify_fresh_storage", lambda *args, **kwargs: None)
     # PID1 path/inode tests below exercise the live verifier separately.
@@ -410,6 +416,11 @@ def test_pid1_worker_root_and_null_bind_are_host_visible_not_sidecar_private(bou
     # Even the optional private device is translated to a PID1-host path.
     request = dict(request, device_profile="private-null-permission-test")
     fresh = "d" * 32
+    # Device creation itself needs root and is separately covered; this case
+    # verifies only that PID1 receives the host-visible source path.
+    test_null = backend.resource_path(args["project_root"], args["resource_id"]) / "permission-test-null"
+    test_null.touch()
+    backend.private_null = lambda path: test_null
     info = backend.start(project_root=args["project_root"], job_id=fresh, request=request)
     assert info["start_attempted"]
     properties = dict(systemd.job_calls[-1][1][2])
