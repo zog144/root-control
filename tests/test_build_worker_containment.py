@@ -60,7 +60,7 @@ class ParentSystemd(BusctlSystemdBackend):
         elif signature == "as":
             value = list(args[1:])
         elif signature == "a(ssbt)":
-            value = []
+            value = [list(args[i:i+4]) for i in range(1, len(args), 4)]
         else:
             value = args[0]
             if signature == "b":
