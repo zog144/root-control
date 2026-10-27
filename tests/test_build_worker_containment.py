@@ -428,6 +428,18 @@ def test_exact_attempts_bind_mount_and_nested_mount_guard(tmp_path, monkeypatch)
     with pytest.raises(SystemdBackendError, match="attempts bind mount"):
         backend._verify_fresh_storage(str(attempts.parents[2]), [source])
     mount_rows.append(f"101 100 7:1 / {attempts} rw - ext4 /dev/loop1 rw")
+    # An untrusted test-account-owned mount root must still fail.
+    with pytest.raises(SystemdBackendError, match="mount root ownership"):
+        backend._verify_fresh_storage(str(attempts.parents[2]), [source])
+    from types import SimpleNamespace
+    original_stat = Path.stat
+    def trusted_mount(self, *args, **kwargs):
+        value = original_stat(self, *args, **kwargs)
+        if self in (build_mount, external):
+            return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0,
+                                   st_dev=value.st_dev)
+        return value
+    monkeypatch.setattr(Path, "stat", trusted_mount)
     backend._verify_fresh_storage(str(attempts.parents[2]), [source])
     mount_rows.append(f"102 101 8:1 / {source / 'submount'} rw - ext4 /dev/sda rw")
     with pytest.raises(SystemdBackendError, match="nested worker"):
@@ -446,6 +458,7 @@ def test_fresh_scratch_symlink_refusal_before_start_marker(bound, tmp_path):
     saved = json.loads((path / "jobs" / (jid + ".json")).read_text())
     assert "start_attempted" not in saved
     assert not systemd.job_calls
+    assert not any(outsider.iterdir())
 
 
 @pytest.mark.parametrize("key, bad", [
