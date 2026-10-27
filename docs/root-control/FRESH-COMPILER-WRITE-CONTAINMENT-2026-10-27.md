@@ -1,5 +1,7 @@
 # Fresh compiler: exact worker-write, namespace and descendant containment — source correction
 
+> **Successor correction (2026-10-27):** Host-deploy's newer `prepare-work` binds `<work>/state` at **`<Project>/state`**, not at `<Project>/state/image-build/attempts`. Its new transient sidecar binds **`<work>/controller-build-resources`** to `/var/lib/zog/build-resources` within the new sidecar's own mount namespace, **not** to the 2-GiB external accounting pool. Root-control corrected both source bindings at `7619a10db64d80b47cb02bdc035bd5631ce5b9bc`, verifies exact mountinfo targets and **matching `st_dev` + `st_ino`**, and retains root-only resource permissions. Previous path/table instructions below describe the pre-host-deploy-4129ec proposal and are superseded by [the exact mount correction](./FRESH-COMPILER-MOUNT-BINDING-SUCCESSOR-2026-10-27.md). Historical jobs stay unchanged. Actual native proof and total 32-GiB host-write enforcement remain NO-GO.
+
 **Date:** 2026-10-27  
 **Owner:** root-control Regular / box-control controller-contract reviewer  
 **Tracking:** [root-control #11](https://github.com/zog144/root-control/issues/11), [host-deploy #5](https://github.com/zog144/host-deploy/issues/5), [host-deploy draft PR #2](https://github.com/zog144/host-deploy/pull/2)  
