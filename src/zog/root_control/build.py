@@ -328,7 +328,7 @@ class BuildBackend:
         shutil.copytree(paths[0], imported, symlinks=True,
             ignore=lambda directory,names: set(names)&{'dev','proc','sys','run','tmp'} if Path(directory)==paths[0] else set())
         if (imported / 'image-build').is_symlink(): raise SystemdBackendError('reserved mount parent is a symlink')
-        for name in ('image-build/source', 'image-build/output', 'tmp', 'run', 'run/zog-journal', 'proc', 'sys', 'dev'):
+        for name in ('image-build/source', 'image-build/output', 'tmp', 'run', 'run/zog-journal', 'proc', 'sys', 'dev', *(['var/tmp'] if self.parent_slice else [])):
             dest = imported / name
             if dest.is_symlink(): raise SystemdBackendError('reserved build mount target is a symlink')
             dest.mkdir(parents=True, exist_ok=True)
@@ -416,6 +416,35 @@ class BuildBackend:
         synchronize_directory(path)
         return node
 
+    def _prepare_fresh_scratch(self, path, info, registration):
+        """Bind all mutable guest temporary paths to the 30-GiB worker mount.
+
+        No host /tmp or /var/tmp PrivateTmp directories are permitted on the
+        fresh compiler role. These are created before the no-replay marker.
+        """
+        output = Path(registration['intent']['output_directory'])
+        scratch_root = output / '.zog-runtime'
+        self._verify_fresh_storage(self.authorized_project_root, (output,))
+        scratch_root.mkdir(mode=0o700, exist_ok=True)
+        if (scratch_root.is_symlink()
+                or scratch_root.stat().st_dev != output.stat().st_dev):
+            raise SystemdBackendError('fresh scratch outside worker quota')
+        job = scratch_root / identity(info['job_id'])
+        if job.is_symlink():
+            raise SystemdBackendError('redirected fresh scratch')
+        job.mkdir(mode=0o700, exist_ok=True)
+        directories = []
+        for name in ('tmp', 'vartmp', 'run'):
+            candidate = job / name
+            candidate.mkdir(mode=0o700, exist_ok=True)
+            if (candidate.is_symlink() or candidate.stat().st_dev != output.stat().st_dev
+                    or candidate.resolve() != candidate):
+                raise SystemdBackendError('fresh scratch was redirected')
+            os.chown(candidate, info['request']['execution_user_id'],
+                     info['request']['execution_group_id'], follow_symlinks=False)
+            directories.append(candidate)
+        return directories
+
     @staticmethod
     def _reload_safe_argv(command):
         """Encode literal argv for portable systemd ExecStart D-Bus execution.
@@ -483,6 +512,7 @@ class BuildBackend:
                 replace_json(job_path, info)
         elif info.get('journal_barrier_token'):
             raise SystemdBackendError('prepared journal barrier requires enabled broker')
+        scratch = self._prepare_fresh_scratch(path, info, registration) if self.parent_slice else None
         info['start_attempted'] = True
         replace_json(job_path, info)
         self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
@@ -495,7 +525,7 @@ class BuildBackend:
             'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
             'User': ('s', str(r['execution_user_id'])), 'Group': ('s', str(r['execution_group_id'])),
             'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
-            'PrivateTmp': ('b', True), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
+            'PrivateTmp': ('b', self.parent_slice is None), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
             'CapabilityBoundingSet': ('t', 0), 'AmbientCapabilities': ('t', 0),
             'StandardOutput': ('s', 'journal'), 'StandardError': ('s', 'journal'),
             'TimeoutStartUSec': ('t', int(r['startup_timeout_seconds']*1000000)),
@@ -503,6 +533,11 @@ class BuildBackend:
             'TimeoutStopUSec': ('t', int(r['termination_grace_seconds']*1000000)),
             'SendSIGKILL': ('b', True), 'TasksMax': ('t', r['resource_limits']['thread-count-maximum']),
             'MemoryMax': ('t', r['resource_limits']['memory-maximum-bytes'])}
+        if self.parent_slice is not None:
+            values['PrivateMounts'] = ('b', True)
+            values['ProtectControlGroups'] = ('b', True)
+            values['Delegate'] = ('b', False)
+            values['ProtectKernelTunables'] = ('b', True)
         if self.log_namespace is not None:
             # Fixed trusted worker log routing; caller may not supply any
             # journal namespace or output-path override in canonical_request.
@@ -516,6 +551,9 @@ class BuildBackend:
         props = [self.systemd._property(k, sig, value) for k,(sig,value) in values.items()]
         environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
         binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
+        if scratch is not None:
+            for source, dest in zip(scratch, ('/tmp', '/var/tmp', '/run')):
+                binds += [str(source), dest, 'false', 0]
         if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
         # Use the stable ExecStart property, not ExecStartEx. Older systemd
         # releases accept ExecStartEx over D-Bus but serialize it as an
@@ -562,6 +600,11 @@ class BuildBackend:
             expected["LogNamespace"] = info["log_namespace"]
             expected["StandardOutput"] = "journal"
             expected["StandardError"] = "journal"
+            expected['PrivateTmp'] = False
+            expected['PrivateMounts'] = True
+            expected['ProtectControlGroups'] = True
+            expected['Delegate'] = False
+            expected['ProtectKernelTunables'] = True
         return expected
 
     def observe(self, *, project_root, job_id, build_root_id):
@@ -577,8 +620,9 @@ class BuildBackend:
             if raw['exists']:
                 obj = self.systemd._get_unit_path(info['unit_name'])
                 properties = dict(raw['properties'])
-                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec', 
-                             *(['LogNamespace'] if self.log_namespace is not None else [])):
+                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec',
+                             *(['LogNamespace', 'PrivateTmp', 'PrivateMounts', 'ProtectControlGroups',
+                                'Delegate', 'ProtectKernelTunables'] if self.log_namespace is not None else [])):
                     properties[name]=self.systemd._get_property(obj,'org.freedesktop.systemd1.Service',name)
                 for name,value in expected.items():
                     observed = properties.get(name)
