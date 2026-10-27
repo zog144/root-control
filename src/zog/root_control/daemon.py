@@ -294,12 +294,16 @@ class RootControlDaemon:
     def _serve_request(self, conn, request, slot, queued_at=None):
         started = time.monotonic()
         registration = request.get('operation') == 'build_register'
+        starting_service = request.get('operation') == 'systemd_start_service'
         rid = request.get('resource_id')
         # Do not echo arbitrary client strings into diagnostics.
         rid = rid if isinstance(rid, str) and len(rid) == 32 and all(c in '0123456789abcdef' for c in rid) else None
         if registration:
             emit('build-registration-start', resource_id=rid,
                  queued_seconds=started-(queued_at if queued_at is not None else started))
+        if starting_service:
+            emit('systemd-start-service-dispatched',
+                 queued_seconds=round(started-(queued_at if queued_at is not None else started), 6))
         try:
             with conn:
                 try:
@@ -315,7 +319,14 @@ class RootControlDaemon:
                 if registration:
                     emit('build-registration-finish', resource_id=rid, ok=response.get('ok') is True,
                          elapsed_seconds=time.monotonic()-started)
-                self._respond(conn, response, operation='build_register' if registration else None, resource_id=rid)
+                if starting_service:
+                    emit('systemd-start-service-handler-finished',
+                         rpc_ok=response.get('ok') is True,
+                         elapsed_seconds=round(time.monotonic()-started, 6))
+                self._respond(conn, response,
+                              operation=('build_register' if registration else
+                                         'systemd_start_service' if starting_service else None),
+                              resource_id=rid)
         finally:
             slot.release()
 
