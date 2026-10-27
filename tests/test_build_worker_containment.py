@@ -117,6 +117,9 @@ def bound(tmp_path, monkeypatch):
     backend.directory.mkdir()
     backend._test_scratch_mount = fixed_work
     monkeypatch.setattr(backend, "_verify_fresh_storage", lambda *args, **kwargs: None)
+    # PID1 path/inode tests below exercise the live verifier separately.
+    monkeypatch.setattr(backend, "_verify_pid1_resource_visibility",
+                        lambda *args, **kwargs: None)
     rid = "b" * 32
     jid = "c" * 32
     arguments = {
@@ -388,6 +391,73 @@ def test_namespaced_worker_requires_explicitly_supported_barrier(tmp_path):
             authorized_project_root="/home/owner/" + FRESH_COMPILER_PROJECT,
         )
 
+
+
+
+def test_pid1_worker_root_and_null_bind_are_host_visible_not_sidecar_private(bound):
+    backend, systemd, args, request, jid = bound
+    from zog.root_control import build as build_mod
+    private = build_mod.FRESH_COMPILER_RESOURCES
+    host = build_mod.FRESH_COMPILER_RESOURCES_SOURCE
+    info = backend.prepare(project_root=args["project_root"], job_id=jid, request=request)
+    root = backend.resource_path(args["project_root"], args["resource_id"]) / "root"
+    expected = host / root.relative_to(private)
+    assert backend._pid1_resource_path(root, fresh=True) == expected
+    assert backend.expected_properties(root.parent, info)["RootDirectory"] == str(expected)
+    assert backend._pid1_resource_path(root, fresh=False) == root
+    with pytest.raises(SystemdBackendError, match="not a registered fresh resource"):
+        backend._pid1_resource_path(Path("/tmp/arbitrary/root"), fresh=True)
+    # Even the optional private device is translated to a PID1-host path.
+    request = dict(request, device_profile="private-null-permission-test")
+    fresh = "d" * 32
+    info = backend.start(project_root=args["project_root"], job_id=fresh, request=request)
+    assert info["start_attempted"]
+    properties = dict(systemd.job_calls[-1][1][2])
+    bind_values = properties["BindPaths"].value
+    assert any(entry[0].startswith(str(host) + "/")
+               and entry[1] == "/dev/null" for entry in bind_values)
+    assert not any(entry[0].startswith(str(private) + "/")
+                   for entry in bind_values)
+
+
+def test_pid1_root_inode_must_match_quota_host_view_before_start(tmp_path, monkeypatch):
+    from zog.root_control import build as build_mod
+    from types import SimpleNamespace
+    owner = tmp_path / "owner"
+    project = owner / FRESH_COMPILER_PROJECT
+    project.mkdir(parents=True)
+    bound_build = tmp_path / "work"
+    visible = bound_build / "controller-build-resources" / ("a" * 64) / ("b" * 32) / "root"
+    private = tmp_path / "private" / ("a" * 64) / ("b" * 32) / "root"
+    private.mkdir(parents=True)
+    visible.mkdir(parents=True)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_BUILD_MOUNT", bound_build)
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES_SOURCE",
+                        bound_build / "controller-build-resources")
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_RESOURCES",
+                        tmp_path / "private")
+    backend = BuildBackend(ParentSystemd(), tmp_path / "ignore",
+                           parent_slice=FRESH_COMPILER_PARENT_SLICE,
+                           authorized_project_root=str(project))
+    original = Path.stat
+    correct = True
+    def mapped(self, *args, **kwargs):
+        value = original(self, *args, **kwargs)
+        if self == private and correct:
+            target = original(visible)
+            return SimpleNamespace(st_mode=value.st_mode, st_dev=target.st_dev,
+                                   st_ino=target.st_ino)
+        return value
+    monkeypatch.setattr(Path, "stat", mapped)
+    backend._verify_pid1_resource_visibility(private)
+    correct = False
+    with pytest.raises(SystemdBackendError, match="not PID1-visible"):
+        backend._verify_pid1_resource_visibility(private)
+    # Even a matching inode must not bless a symlink redirection.
+    private.rmdir()
+    private.symlink_to(visible, target_is_directory=True)
+    with pytest.raises(SystemdBackendError, match="redirected"):
+        backend._verify_pid1_resource_visibility(private)
 
 def test_fresh_quota_backing_is_required_before_any_registration_mutation(tmp_path):
     """Missing protected mounts must refuse registration before a host write."""
