@@ -448,15 +448,22 @@ class BuildBackend:
         self._verify_fresh_storage(self.authorized_project_root, (
             registration['intent']['output_directory'],))
         scratch_root.mkdir(mode=0o755, exist_ok=True)
+        # Check the parent *before* creating anything beneath it. No path
+        # creation is allowed through an existing symlink or untrusted owner.
+        metadata = scratch_root.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or scratch_root.is_symlink()
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or metadata.st_mode & 0o022
+                or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+            raise SystemdBackendError("untrusted fresh scratch parent")
         job = scratch_root / identity(info['job_id'])
         job.mkdir(mode=0o755, exist_ok=True)
-        for parent in (scratch_root, job):
-            metadata = parent.lstat()
-            if (not stat.S_ISDIR(metadata.st_mode) or parent.is_symlink()
-                    or metadata.st_uid != 0 or metadata.st_gid != 0
-                    or metadata.st_mode & 0o022
-                    or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
-                raise SystemdBackendError("untrusted fresh scratch parent")
+        metadata = job.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or job.is_symlink()
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or metadata.st_mode & 0o022
+                or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+            raise SystemdBackendError("untrusted fresh scratch job")
         directories = []
         for name in ('tmp', 'vartmp', 'run'):
             candidate = job / name
