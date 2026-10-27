@@ -429,10 +429,16 @@ class BuildBackend:
         if (scratch_root.is_symlink()
                 or scratch_root.stat().st_dev != output.stat().st_dev):
             raise SystemdBackendError('fresh scratch outside worker quota')
+        os.chown(scratch_root, info['request']['execution_user_id'],
+                 info['request']['execution_group_id'], follow_symlinks=False)
         job = scratch_root / identity(info['job_id'])
         if job.is_symlink():
             raise SystemdBackendError('redirected fresh scratch')
         job.mkdir(mode=0o700, exist_ok=True)
+        if (job.is_symlink() or job.stat().st_dev != output.stat().st_dev):
+            raise SystemdBackendError("fresh scratch job escaped quota")
+        os.chown(job, info['request']['execution_user_id'],
+                 info['request']['execution_group_id'], follow_symlinks=False)
         directories = []
         for name in ('tmp', 'vartmp', 'run'):
             candidate = job / name
