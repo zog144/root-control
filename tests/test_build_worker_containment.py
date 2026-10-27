@@ -420,7 +420,7 @@ def test_pid1_worker_root_and_null_bind_are_host_visible_not_sidecar_private(bou
         backend._pid1_resource_path(Path("/tmp/arbitrary/root"), fresh=True)
     # Even the optional private device is translated to a PID1-host path.
     request = dict(request, device_profile="private-null-permission-test")
-    fresh = "d" * 32
+    fresh = jid  # The source fixture attests this exact preapproved scratch job.
     # Device creation itself needs root and is separately covered; this case
     # verifies only that PID1 receives the host-visible source path.
     test_null = backend.resource_path(args["project_root"], args["resource_id"]) / "permission-test-null"
