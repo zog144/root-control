@@ -449,3 +449,37 @@ def test_fresh_worker_pid1_isolation_properties_cannot_be_relaxed(bound, key, ba
     with pytest.raises(SystemdBackendError, match="build property mismatch: " + key):
         backend.observe(project_root=args["project_root"], job_id=jid,
                         build_root_id=args["resource_id"])
+
+
+def test_quota_mount_loss_blocks_inspection_cleanup_release_and_cancel(bound, monkeypatch):
+    backend, systemd, args, request, jid = bound
+    backend.prepare(project_root=args["project_root"], job_id=jid, request=request)
+    path = backend.resource_path(args["project_root"], args["resource_id"])
+    original = (path / 'registration.json').read_bytes()
+    job_record = (path / 'jobs' / (jid + '.json')).read_bytes()
+    def lost(*args, **kwargs):
+        raise SystemdBackendError("fresh compiler quota mount is missing")
+    monkeypatch.setattr(backend, "_verify_fresh_storage", lost)
+    actions = (
+        lambda: backend.registration_status(
+            project_root=args["project_root"], resource_id=args["resource_id"]),
+        lambda: backend.observe(
+            project_root=args["project_root"], job_id=jid,
+            build_root_id=args["resource_id"]),
+        lambda: backend.cancel(
+            project_root=args["project_root"], job_id=jid,
+            build_root_id=args["resource_id"]),
+        lambda: backend.cleanup(
+            project_root=args["project_root"], job_id=jid,
+            build_root_id=args["resource_id"]),
+        lambda: backend.release(
+            project_root=args["project_root"], build_root_id=args["resource_id"]),
+        lambda: backend.forget(
+            project_root=args["project_root"], build_root_id=args["resource_id"]),
+    )
+    for action in actions:
+        with pytest.raises(SystemdBackendError, match="quota mount"):
+            action()
+    assert (path / 'registration.json').read_bytes() == original
+    assert (path / 'jobs' / (jid + '.json')).read_bytes() == job_record
+    assert not systemd.job_calls
