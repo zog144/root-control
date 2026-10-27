@@ -114,10 +114,16 @@ def _scan(group, limit, deadline, *, cgroup_root=Path('/sys/fs/cgroup'), proc_ro
     return dict(processes=processes, truncated=truncated, skipped_processes=skipped)
 
 
-def inspect(*, project_root, runtime_id=None, program=None, job_id=None, limit=50):
+def inspect(*, project_root, runtime_id=None, program=None, job_id=None, limit=50,
+            required_parent_slice=None):
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('process limit must be an integer from 1 through 100')
     project=Project(Path(project_root))
+    if required_parent_slice is not None:
+        from .build import FRESH_COMPILER_PARENT_SLICE, FRESH_COMPILER_PROJECT
+        if (job_id is None or required_parent_slice != FRESH_COMPILER_PARENT_SLICE
+                or Path(project_root).name != FRESH_COMPILER_PROJECT):
+            raise ValueError('invalid privileged build process scope')
     if job_id is not None:
         if runtime_id is not None or program is not None: raise ValueError('ambiguous process target')
         from zog.box_control.build_jobs import BuildJobs
@@ -151,6 +157,12 @@ def inspect(*, project_root, runtime_id=None, program=None, job_id=None, limit=5
         before=_unit(backend,project,unit)
         if before is None: return dict(result,status='absent')
         if before[0]!=invocation: raise IdentityChanged('unit invocation differs from saved identity')
+        if required_parent_slice is not None:
+            from .build import identity
+            expected = ('/' + required_parent_slice + '/' + required_parent_slice[:-6]
+                        + '-build' + identity(job_id) + '.slice/' + unit)
+            if before[1] != expected:
+                raise IdentityChanged('worker cgroup differs from protected compiler parent')
         if not before[1]: return dict(result,status='no-cgroup')
         observed=_scan(before[1],limit,deadline)
         after=_unit(backend,project,unit)
