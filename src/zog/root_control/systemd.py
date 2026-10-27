@@ -1213,7 +1213,7 @@ class BusctlSystemdBackend:
         props.append(self._property("AddRef", "b", "true"))
         # Bound systemd's own stop escalation as well as our wait for its job.
         props.append(self._property("TimeoutStopUSec", "t", int(definition["timeout_stop_microseconds"])))
-        emit("systemd-start-service-job-submitted", unit_name=unit,
+        emit("systemd-start-service-job-dispatch-attempt", unit_name=unit,
              preparation_seconds=round(time.monotonic() - started_at, 6))
         try:
             self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
