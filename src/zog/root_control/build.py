@@ -217,6 +217,9 @@ class BuildBackend:
                     raise SystemdBackendError("unreviewed nested worker mount")
 
     def area(self, project_root):
+        # Every API path, including status, cancellation, release and forget,
+        # must fail closed if either fixed backing mount disappeared.
+        self._verify_fresh_storage(project_root)
         root, _, _ = self.systemd._project(project_root)
         return self.directory / hashlib.sha256(str(root).encode()).hexdigest()
 
@@ -228,6 +231,9 @@ class BuildBackend:
         raw = json.loads((path / 'registration.json').read_text())
         if raw['state'] != 'ready': raise SystemdBackendError('build registration is not ready')
         self._check_parent_binding(str(Path(project_root)), raw["intent"].get("parent_slice"), raw["intent"].get("log_namespace"))
+        self._verify_fresh_storage(project_root, (
+            raw['intent']['prepared_root'], raw['intent']['source_directory'],
+            raw['intent']['output_directory']))
         return path, raw
 
     @staticmethod
