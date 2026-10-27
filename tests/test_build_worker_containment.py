@@ -405,7 +405,12 @@ def test_pid1_worker_root_and_null_bind_are_host_visible_not_sidecar_private(bou
     from zog.root_control import build as build_mod
     private = build_mod.FRESH_COMPILER_RESOURCES
     host = build_mod.FRESH_COMPILER_RESOURCES_SOURCE
-    info = backend.prepare(project_root=args["project_root"], job_id=jid, request=request)
+    # Derive PID1 path without occupying the one unfinished prepared-job slot.
+    # The actual device test below performs exactly one preparation/start.
+    info = dict(request=request, resolved_executable="/bin/cc",
+                parent_slice=FRESH_COMPILER_PARENT_SLICE,
+                log_namespace="zogfreshcrossbootstrapoct25",
+                slice_name="zogfreshcrossbootstrapoct25-build" + jid + ".slice")
     root = backend.resource_path(args["project_root"], args["resource_id"]) / "root"
     expected = host / root.relative_to(private)
     assert backend._pid1_resource_path(root, fresh=True) == expected
