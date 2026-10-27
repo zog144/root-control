@@ -92,6 +92,19 @@ def bound(tmp_path, monkeypatch):
     (root / "bin/cc").write_text("fake")
     (root / "bin/cc").chmod(0o755)
     systemd = ParentSystemd()
+    from types import SimpleNamespace
+    from zog.root_control import build as build_mod
+    fixed_work = tmp_path / "trusted-work"
+    fixed_work.mkdir()
+    monkeypatch.setattr(build_mod, "FRESH_COMPILER_BUILD_MOUNT", fixed_work)
+    original_lstat = Path.lstat
+    def trusted_scratch(self):
+        actual = original_lstat(self)
+        if self == fixed_work / ".zog-runtime" or self == fixed_work / ".zog-runtime" / ("c" * 32):
+            return SimpleNamespace(st_mode=actual.st_mode, st_uid=0, st_gid=0,
+                                   st_dev=actual.st_dev)
+        return actual
+    monkeypatch.setattr(Path, "lstat", trusted_scratch)
     backend = BuildBackend(
         systemd, tmp_path / "privileged",
         parent_slice=FRESH_COMPILER_PARENT_SLICE,
@@ -101,6 +114,7 @@ def bound(tmp_path, monkeypatch):
     # this PID1 mock focuses only on typed worker properties.
     backend.directory = tmp_path / "privileged"
     backend.directory.mkdir()
+    backend._test_scratch_mount = fixed_work
     monkeypatch.setattr(backend, "_verify_fresh_storage", lambda *args, **kwargs: None)
     rid = "b" * 32
     jid = "c" * 32
@@ -176,7 +190,7 @@ def test_parent_binding_is_durable_before_worker_start(bound):
     assert props["LimitCORE"].value == 0
     binds = props["BindPaths"].value
     assert {b[1] for b in binds} >= {"/tmp", "/var/tmp", "/run", "/image-build/source", "/image-build/output"}
-    assert all(b[0].startswith(str(arguments["output_directory"]) + "/")
+    assert all(b[0].startswith(str(backend._test_scratch_mount) + "/")
                for b in binds if b[1] in {"/tmp", "/var/tmp", "/run"})
     assert expected_child.startswith(FRESH_COMPILER_PARENT_SLICE[:-6] + "-")
     assert props["ExitType"].value == "cgroup"
@@ -425,7 +439,7 @@ def test_fresh_scratch_symlink_refusal_before_start_marker(bound, tmp_path):
     output = args["output_directory"]
     outsider = tmp_path / "unbounded"
     outsider.mkdir()
-    (output / ".zog-runtime").symlink_to(outsider, target_is_directory=True)
+    (backend._test_scratch_mount / ".zog-runtime").symlink_to(outsider, target_is_directory=True)
     path = backend.resource_path(args["project_root"], args["resource_id"])
     with pytest.raises(SystemdBackendError, match="fresh scratch"):
         backend.start(project_root=args["project_root"], job_id=jid, request=request)
