@@ -434,28 +434,29 @@ class BuildBackend:
         No host /tmp or /var/tmp PrivateTmp directories are permitted on the
         fresh compiler role. These are created before the no-replay marker.
         """
-        output = Path(registration['intent']['output_directory'])
-        scratch_root = output / '.zog-runtime'
-        self._verify_fresh_storage(self.authorized_project_root, (output,))
-        scratch_root.mkdir(mode=0o700, exist_ok=True)
-        if (scratch_root.is_symlink()
-                or scratch_root.stat().st_dev != output.stat().st_dev):
-            raise SystemdBackendError('fresh scratch outside worker quota')
-        os.chown(scratch_root, info['request']['execution_user_id'],
-                 info['request']['execution_group_id'], follow_symlinks=False)
+        # Source directories MUST be rooted in a privileged, non-worker-
+        # writable parent. Putting these beneath output (owned by the build
+        # UID) allows that UID to rename a parent after validation and before
+        # PID1 consumes the BindPaths transaction.
+        scratch_root = FRESH_COMPILER_BUILD_MOUNT / ".zog-runtime"
+        self._verify_fresh_storage(self.authorized_project_root, (
+            registration['intent']['output_directory'],))
+        scratch_root.mkdir(mode=0o755, exist_ok=True)
         job = scratch_root / identity(info['job_id'])
-        if job.is_symlink():
-            raise SystemdBackendError('redirected fresh scratch')
-        job.mkdir(mode=0o700, exist_ok=True)
-        if (job.is_symlink() or job.stat().st_dev != output.stat().st_dev):
-            raise SystemdBackendError("fresh scratch job escaped quota")
-        os.chown(job, info['request']['execution_user_id'],
-                 info['request']['execution_group_id'], follow_symlinks=False)
+        job.mkdir(mode=0o755, exist_ok=True)
+        for parent in (scratch_root, job):
+            metadata = parent.lstat()
+            if (not stat.S_ISDIR(metadata.st_mode) or parent.is_symlink()
+                    or metadata.st_uid != 0 or metadata.st_gid != 0
+                    or metadata.st_mode & 0o022
+                    or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+                raise SystemdBackendError("untrusted fresh scratch parent")
         directories = []
         for name in ('tmp', 'vartmp', 'run'):
             candidate = job / name
             candidate.mkdir(mode=0o700, exist_ok=True)
-            if (candidate.is_symlink() or candidate.stat().st_dev != output.stat().st_dev
+            if (candidate.is_symlink()
+                    or candidate.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
                     or candidate.resolve() != candidate):
                 raise SystemdBackendError('fresh scratch was redirected')
             os.chown(candidate, info['request']['execution_user_id'],
