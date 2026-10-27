@@ -447,7 +447,7 @@ def test_exact_state_and_registration_mount_inode_and_nested_guards(tmp_path, mo
                                    st_dev=value.st_dev, st_ino=value.st_ino)
         if self == resources:
             base = original_stat(work_resources)
-            return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0,
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0,
                                    st_dev=value.st_dev,
                                    st_ino=base.st_ino if same_inodes else value.st_ino)
         if self == state:
