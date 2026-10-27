@@ -7,6 +7,8 @@ are required before enabling it. No daemon RPC or generic shell entry point.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -114,14 +116,15 @@ def _client_binding(project):
               "installation_id", "state_volume_id", "host_fingerprint",
               "registry_id", "assignment_id", "assignment_revision",
               "receipt_sha256", "ssh_host", "ssh_port", "ssh_user",
-              "ssh_identity", "ssh_known_hosts", "ssh_known_hosts_sha256"}
+              "ssh_identity", "ssh_known_hosts", "ssh_known_hosts_sha256",
+              "owner_authority_sha256", "station_signer_pin_sha256"}
     if (type(value) is not dict or set(value) != fields or value["schema"] != CLIENT_SCHEMA
             or value["project"] != str(project.path)
             or any(type(value[k]) is not str or not _UUID.fullmatch(value[k])
                    for k in ("host_id", "installation_id", "state_volume_id", "assignment_id"))
             or any(type(value[k]) is not str or not _HEX64.fullmatch(value[k])
                    for k in ("authorization_id", "host_fingerprint", "receipt_sha256",
-                             "ssh_known_hosts_sha256"))
+                             "ssh_known_hosts_sha256", "owner_authority_sha256", "station_signer_pin_sha256"))
             or not isinstance(value["registry_id"], str)
             or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value["registry_id"])
             or type(value["assignment_revision"]) is not int or value["assignment_revision"] < 1
@@ -131,13 +134,36 @@ def _client_binding(project):
             or type(value["ssh_user"]) is not str or not _USER.fullmatch(value["ssh_user"])
             or type(value["ssh_port"]) is not int or not 1 <= value["ssh_port"] <= 65535):
         _deny()
+    # Pin the current Host's independently established authority and signer.
+    owner = _root_regular("/state/host-install/certificate-owner-authority/authority.json")
+    signer = _root_regular("/etc/zog/host-install/certificate-assignment-authority.json", mode=0o444)
+    if (hashlib.sha256(owner).hexdigest() != value["owner_authority_sha256"]
+            or hashlib.sha256(signer).hexdigest() != value["station_signer_pin_sha256"]):
+        _deny()
     for key in ("ssh_identity", "ssh_known_hosts"):
         candidate = value[key]
         if type(candidate) is not str or not candidate.startswith("/etc/zog/"):
             _deny()
         raw = _root_regular(candidate)
-        if key == "ssh_known_hosts" and hashlib.sha256(raw).hexdigest() != value["ssh_known_hosts_sha256"]:
-            _deny()
+        if key == "ssh_known_hosts":
+            if hashlib.sha256(raw).hexdigest() != value["ssh_known_hosts_sha256"]:
+                _deny()
+            # Exactly one host and one ed25519 key; reject fallback CAs/keys.
+            name = value["ssh_host"] if value["ssh_port"] == 22 else (
+                "[" + value["ssh_host"] + "]:" + str(value["ssh_port"]))
+            try:
+                entries = raw.decode("ascii").splitlines()
+                if len(entries) != 1:
+                    _deny()
+                host, kind, encoded = entries[0].split()
+                raw_key = base64.b64decode(encoded, validate=True)
+                if (host != name or kind != "ssh-ed25519"
+                        or len(raw_key) != 51
+                        or raw_key[:15] != b"\x00\x00\x00\x0bssh-ed25519"
+                        or raw_key[15:19] != b"\x00\x00\x00\x20"):
+                    _deny()
+            except (UnicodeError, ValueError, binascii.Error):
+                _deny()
     return value
 
 def _client_approved(project, binding):
@@ -388,10 +414,25 @@ def bridge_main():
         _deny()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
+        credentials._check_root_directory(_BROKER.parent)
+        location = _BROKER.lstat()
+        if (not stat.S_ISSOCK(location.st_mode) or location.st_uid != 0
+                or location.st_gid != os.getgid()
+                or stat.S_IMODE(location.st_mode) != 0o660):
+            _deny()
         connection.settimeout(5)
         connection.connect(str(_BROKER))
+        if not hasattr(socket, "SO_PEERCRED"):
+            _deny()
+        pid, uid, _gid = struct.unpack("3i",
+            connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if pid <= 0 or uid != 0:
+            _deny()
         wire = bytearray()
         while len(wire) <= 1024:
+            import select
+            if not select.select([0], [], [], 5)[0]:
+                _deny()
             chunk = os.read(0, 1025 - len(wire))
             if not chunk:
                 break
@@ -407,7 +448,12 @@ def bridge_main():
             payload.extend(part)
         if not credentials._TOKEN.fullmatch(bytes(payload)):
             _deny()
-        os.write(1, payload)
+        rest = memoryview(payload)
+        while rest:
+            sent = os.write(1, rest)
+            if sent <= 0:
+                _deny()
+            rest = rest[sent:]
     finally:
         connection.close()
 
