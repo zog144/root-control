@@ -128,3 +128,38 @@ def test_serialized_byte_budget(tmp_path,monkeypatch):
     result=p._scan('/unit',100,time.monotonic()+2,cgroup_root=root)
     assert result['truncated'] and 0<len(result['processes'])<100
     assert len(json.dumps(result).encode())<270000
+
+
+def test_fresh_worker_descendant_inspection_rejects_wrong_cgroup(tmp_path, monkeypatch):
+    from zog.root_control.build import FRESH_COMPILER_PARENT_SLICE, FRESH_COMPILER_PROJECT
+    project = tmp_path / FRESH_COMPILER_PROJECT
+    Project(project)
+    records = project / 'state/build-job'
+    records.mkdir(parents=True)
+    jid = 'c' * 32
+    service = 'zog-' + FRESH_COMPILER_PROJECT + '-build' + jid + '.service'
+    (records / (jid + '.json')).write_text(json.dumps({
+        'schema': 1, 'entity': 'job:' + jid,
+        'request': {'command': ['make']},
+        'boot_id': 'b' * 32, 'invocation_id': 'a' * 32,
+        'unit_name': service,
+    }))
+    expected = '/' + FRESH_COMPILER_PARENT_SLICE + '/' + (
+        FRESH_COMPILER_PARENT_SLICE[:-6] + '-build' + jid + '.slice') + '/' + service
+    monkeypatch.setattr(p, 'current_boot_id', lambda: 'b' * 32)
+    groups = iter([('a' * 32, expected), ('a' * 32, expected)])
+    monkeypatch.setattr(p, '_unit', lambda *args: next(groups))
+    monkeypatch.setattr(p, '_scan', lambda *args: {
+        'processes': [{'pid': 21}], 'truncated': False, 'skipped_processes': 0,
+    })
+    result = p.inspect(project_root=str(project), job_id=jid,
+                       required_parent_slice=FRESH_COMPILER_PARENT_SLICE)
+    assert result['status'] == 'observed'
+    monkeypatch.setattr(p, '_unit', lambda *args: ('a' * 32, '/system.slice/' + service))
+    monkeypatch.setattr(p, '_scan', lambda *args: pytest.fail('foreign cgroup scanned'))
+    result = p.inspect(project_root=str(project), job_id=jid,
+                       required_parent_slice=FRESH_COMPILER_PARENT_SLICE)
+    assert result['status'] == 'integrity-fault' and not result['processes']
+    with pytest.raises(ValueError, match='invalid privileged build process scope'):
+        p.inspect(project_root=str(project), job_id=jid,
+                  required_parent_slice='system.slice')
