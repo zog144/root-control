@@ -1336,7 +1336,7 @@ def test_start_service_reports_bounded_preparation_vs_job_phases(tmp_path, monke
     backend.start_service(project_root=project.path, generation=generation, definition=raw)
     assert [name for name, _ in emitted] == [
         "systemd-start-service-validated",
-        "systemd-start-service-job-submitted",
+        "systemd-start-service-job-dispatch-attempt",
         "systemd-start-service-job-completed",
     ]
     assert all(fields["unit_name"] == raw["unit_name"] for _, fields in emitted)
