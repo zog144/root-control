@@ -538,6 +538,8 @@ class BuildBackend:
             values['ProtectControlGroups'] = ('b', True)
             values['Delegate'] = ('b', False)
             values['ProtectKernelTunables'] = ('b', True)
+            values['RestrictNamespaces'] = ('t', 0)
+            values['LimitCORE'] = ('t', 0)
         if self.log_namespace is not None:
             # Fixed trusted worker log routing; caller may not supply any
             # journal namespace or output-path override in canonical_request.
@@ -605,6 +607,8 @@ class BuildBackend:
             expected['ProtectControlGroups'] = True
             expected['Delegate'] = False
             expected['ProtectKernelTunables'] = True
+            expected['RestrictNamespaces'] = 0
+            expected['LimitCORE'] = 0
         return expected
 
     def observe(self, *, project_root, job_id, build_root_id):
@@ -622,7 +626,8 @@ class BuildBackend:
                 properties = dict(raw['properties'])
                 for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec',
                              *(['LogNamespace', 'PrivateTmp', 'PrivateMounts', 'ProtectControlGroups',
-                                'Delegate', 'ProtectKernelTunables'] if self.log_namespace is not None else [])):
+                                'Delegate', 'ProtectKernelTunables', 'RestrictNamespaces',
+                                'LimitCORE'] if self.log_namespace is not None else [])):
                     properties[name]=self.systemd._get_property(obj,'org.freedesktop.systemd1.Service',name)
                 for name,value in expected.items():
                     observed = properties.get(name)
