@@ -141,7 +141,7 @@ def test_stacked_mounts_choose_kernel_top_and_reject_unaccounted_layers():
             "\n".join(lines + ["24 10 7:5 / /tmp rw - ext4 image rw"]))
     with pytest.raises(RuntimeError, match="disconnected"):
         witness._mount_inventory(
-            "\n".join(lines + ["24 23 7:5 / /tmp rw - ext4 image rw"]))
+            "\n".join(lines + ["24 24 7:5 / /tmp rw - ext4 image rw"]))
 
 
 @pytest.mark.parametrize("target,fstype", [
