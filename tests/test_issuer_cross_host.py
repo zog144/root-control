@@ -284,3 +284,61 @@ def test_station_binding_rejects_stale_or_untrusted_service_principal(monkeypatc
     monkeypatch.setattr(cross, "_load_json", lambda path: config)
     with pytest.raises(cross.CrossHostDenied):
         cross._station_binding()
+
+
+def test_kernel_socket_fd_and_protected_broker_path_are_separately_verified(tmp_path):
+    import stat
+
+    path = tmp_path / "broker.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        path.chmod(0o660)
+        listener.listen(2)
+        descriptor = os.fstat(listener.fileno())
+        pathname = path.lstat()
+        assert stat.S_ISSOCK(descriptor.st_mode)
+        assert stat.S_ISSOCK(pathname.st_mode)
+        # Linux sockfs and filesystem socket dentries are different inodes.
+        assert (descriptor.st_dev, descriptor.st_ino) != (pathname.st_dev, pathname.st_ino)
+        assert cross._verify_broker_listener(
+            listener, path, owner_uid=os.getuid(), bridge_gid=os.getgid()) is listener
+
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                listener, tmp_path / "other.sock",
+                owner_uid=os.getuid(), bridge_gid=os.getgid())
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                listener, path, owner_uid=os.getuid() + 1,
+                bridge_gid=os.getgid())
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                listener, path, owner_uid=os.getuid(),
+                bridge_gid=os.getgid() + 1)
+        path.chmod(0o666)
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                listener, path, owner_uid=os.getuid(), bridge_gid=os.getgid())
+        path.chmod(0o660)
+
+        # An unlinked and redirected name cannot be trusted even if fd3
+        # still reports the originally bound pathname.
+        path.unlink()
+        path.symlink_to(tmp_path / "replacement")
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                listener, path, owner_uid=os.getuid(), bridge_gid=os.getgid())
+
+
+def test_broker_listener_requires_a_listening_unix_stream(tmp_path):
+    path = tmp_path / "not-listening.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unlistened:
+        unlistened.bind(str(path))
+        path.chmod(0o660)
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                unlistened, path, owner_uid=os.getuid(), bridge_gid=os.getgid())
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+        with pytest.raises(cross.CrossHostDenied):
+            cross._verify_broker_listener(
+                tcp, path, owner_uid=os.getuid(), bridge_gid=os.getgid())
