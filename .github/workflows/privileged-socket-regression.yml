@@ -80,6 +80,16 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest -q -ra --strict-markers --junitxml=security-results.xml             tests/test_daemon_socket_access.py             tests/test_build_only_project_role.py             tests/test_daemon_admission.py             tests/test_selected_program_authority.py             tests/test_execution_identities.py             tests/test_private_persistent_storage.py             tests/test_root_control_systemd.py             tests/test_mounts.py             tests/test_issuer_observation.py             tests/test_issuer_inspection_result.py             tests/test_journal_attribution.py             tests/test_systemd_jobs.py             tests/test_build_backend.py             tests/test_build_worker_containment.py             tests/test_processes.py             tests/test_journal_barrier.py             | tee security-pytest.txt
+      - name: Exercise real root-owned immutable import (not a mocked chown)
+        run: |
+          set -euo pipefail
+          PYTHON_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+          # This separate controlled test performs real chown, chmod, copytree,
+          # restrictive directory fsync and transient-property construction.
+          sudo env PYTHONPATH="$PYTHONPATH" "$PYTHON_EXECUTABLE" -m pytest -q -ra \
+            --strict-markers tests/test_build_import_restrictive.py \
+            | tee privileged-root-import.txt
+          ! grep -Eq '(skipped|failed|error)' privileged-root-import.txt
       - name: Explicit test totals and native hold
         if: always()
         run: |
