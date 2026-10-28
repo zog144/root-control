@@ -53,8 +53,13 @@ def _native(monkeypatch, *, wrong_root=False, foreign=False, bad_swap=False):
     def fake_stat(self, *args, **kwargs):
         if str(self) == str(witness.FRESH_COMPILER_BUILD_MOUNT):
             return SimpleNamespace(st_dev=dev)
+        if str(self) == str(expected):
+            return SimpleNamespace(st_dev=dev, st_ino=1400,
+                                   st_mode=stat.S_IFDIR | 0o700)
         if str(self).startswith("/proc/411/root"):
-            return SimpleNamespace(st_dev=dev, st_mode=stat.S_IFDIR | 0o700)
+            return SimpleNamespace(st_dev=dev,
+                                   st_ino=1401 if wrong_root else 1400,
+                                   st_mode=stat.S_IFDIR | 0o700)
         return original_stat(self, *args, **kwargs)
     monkeypatch.setattr(Path, "stat", fake_stat)
     monkeypatch.setattr(witness.os, "readlink", lambda p:
@@ -66,8 +71,8 @@ def _native(monkeypatch, *, wrong_root=False, foreign=False, bad_swap=False):
     if foreign:
         entries["/foreign"] = ("8:1", "rw", "ext4")
     mountinfo = "\n".join(
-        f"10 1 {d} / {path} {flags},relatime - {fstype} source rw"
-        for path,(d,flags,fstype) in entries.items())+"\n"
+        f"{10 + index} 1 {d} / {target} {flags},relatime - {fstype} source rw"
+        for index, (target,(d,flags,fstype)) in enumerate(entries.items()))+"\n"
     def fake_read(p, limit=262144):
         p = str(p)
         if p.endswith("/cgroup"):
@@ -112,3 +117,54 @@ def test_build_backend_exposes_only_observed_durable_worker():
     assert "self.observe(project_root=project_root" in code
     assert "from .fresh_native_worker_witness import inspect" in code
     assert ".start(" not in code
+
+
+def test_stacked_mounts_choose_kernel_top_and_reject_unaccounted_layers():
+    lines = [
+        "10 1 7:5 / / ro - ext4 image ro",
+        "20 10 7:5 / /tmp rw - ext4 image rw",
+        "22 20 7:5 / /tmp rw - ext4 image rw",
+        "23 10 0:12 / /dev rw - tmpfs tmpfs rw",
+    ]
+    visible, all_entries = witness._mount_inventory("\n".join(reversed(lines)))
+    assert visible["/tmp"]["id"] == 22
+    assert len(all_entries) == 4
+    assert sum(m["point"] == "/tmp" for m in all_entries) == 2
+    # A hidden foreign writable backing must NOT disappear from the review.
+    foreign = list(lines)
+    foreign[1] = "20 10 8:1 / /tmp rw - ext4 host rw"
+    visible, rows = witness._mount_inventory("\n".join(foreign))
+    assert visible["/tmp"]["device"] == "7:5"
+    assert any(m["device"] == "8:1" and witness._writable(m) for m in rows)
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        witness._mount_inventory(
+            "\n".join(lines + ["24 10 7:5 / /tmp rw - ext4 image rw"]))
+    with pytest.raises(RuntimeError, match="disconnected"):
+        witness._mount_inventory(
+            "\n".join(lines + ["24 23 7:5 / /tmp rw - ext4 image rw"]))
+
+
+@pytest.mark.parametrize("target,fstype", [
+    ("/dev/hugepages", "hugetlbfs"),
+    ("/dev/hugepages/hugepages-2MB", "hugetlbfs"),
+    ("/foreign-pseudomount", "tmpfs"),
+])
+def test_unaccounted_pseudo_writes_fail_closed(monkeypatch, target, fstype):
+    b, project, path, info, observed = _native(monkeypatch)
+    base = witness._read
+    def extra(path, limit=262144):
+        text = base(path, limit)
+        if str(path).endswith("/mountinfo"):
+            return text + f"199 10 0:45 / {target} rw - {fstype} none rw\n"
+        return text
+    monkeypatch.setattr(witness, "_read", extra)
+    with pytest.raises(RuntimeError, match="writable|foreign"):
+        witness.inspect(backend=b, project_root=project, path=path,
+                        info=info, observed=observed)
+
+
+def test_same_device_different_inode_never_proves_worker_root(monkeypatch):
+    b, project, path, info, observed = _native(monkeypatch, wrong_root=True)
+    with pytest.raises(RuntimeError, match="inode"):
+        witness.inspect(backend=b, project_root=project, path=path,
+                        info=info, observed=observed)
