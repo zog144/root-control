@@ -766,6 +766,27 @@ class BuildBackend:
             raw['journal_barrier'] = {'status':'not-enabled'}
         return raw
 
+    def inspect_fresh_worker_native(self, *, project_root, job_id, build_root_id):
+        """Read-only independently checked, exact running worker witness.
+
+        Not an admission grant: root-owned host-deploy still decides whether
+        the live observation belongs to its frozen host/boot/Project/slice
+        and must reject any missing descendant. No public control API,
+        start, mount, or persistent state mutation is introduced here.
+        """
+        if self.parent_slice != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("native worker witness not allowed outside fresh role")
+        path, _ = self.load(project_root, build_root_id)
+        info_file = path / 'jobs' / (identity(job_id) + '.json')
+        if not info_file.is_file() or info_file.is_symlink():
+            raise SystemdBackendError("native worker has no durable job record")
+        info = json.loads(info_file.read_text())
+        observed = self.observe(project_root=project_root, job_id=job_id,
+                                build_root_id=build_root_id)
+        from .fresh_native_worker_witness import inspect
+        return inspect(backend=self, project_root=project_root, path=path,
+                       info=info, observed=observed)
+
     @staticmethod
     def cgroup_empty(group):
         if not group: return False
