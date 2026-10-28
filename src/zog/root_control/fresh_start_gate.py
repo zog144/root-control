@@ -36,6 +36,10 @@ MAX_SECONDS = 21600
 _HEX = re.compile(r"[0-9a-f]{32}\Z")
 
 
+def _boot():
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+
 def _canonical(x):
     return json.dumps(x, sort_keys=True, separators=(",", ":"),
                       allow_nan=False).encode("ascii")
@@ -46,6 +50,8 @@ def digest_request(request):
 
 
 def _protected_dir(path):
+    if not os.path.ismount(FRESH_COMPILER_EXTERNAL_MOUNT):
+        raise SystemdBackendError("fresh protected accounting image not mounted")
     # No symlink following through owner-state or its quota-backed ancestors.
     cursor = Path("/")
     for component in path.parts[1:]:
@@ -159,7 +165,7 @@ def claim(*, backend, project_root, job_id, request):
             or grant["budget_scope"] != SCOPE
             or not _HEX.fullmatch(grant["request_id"])):
         raise SystemdBackendError("fresh worker lacks exact reviewed start grant")
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    boot = _boot()
     if grant["boot_id"] != boot:
         raise SystemdBackendError("fresh worker grant belongs to another boot")
     record = _read(BUDGET / (grant["request_id"] + ".json"))
@@ -187,10 +193,20 @@ def claim(*, backend, project_root, job_id, request):
     if grant["kind"] == "canary":
         if grant["canary_receipt_sha256"] is not None:
             raise SystemdBackendError("fresh canary cannot reuse acceptance")
-    elif (not isinstance(grant["canary_receipt_sha256"], str)
-          or not re.fullmatch(r"sha256:[0-9a-f]{64}",
-                              grant["canary_receipt_sha256"])):
-        raise SystemdBackendError("compiler start lacks accepted canary")
+    else:
+        expected = grant["canary_receipt_sha256"]
+        if not isinstance(expected, str) or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", expected):
+            raise SystemdBackendError("compiler start lacks accepted canary")
+        accepted = _read(STATE / "canary-accepted.json")
+        if (accepted.get("schema") != "host-deploy-fresh-canary-accepted-v1"
+                or accepted.get("status") != "native-canary-accepted"
+                or any(accepted.get(k) != grant[k] for k in (
+                    "host_id", "boot_id", "request_id", "project_root",
+                    "plan_sha256"))
+                or "sha256:" + hashlib.sha256(_canonical(accepted)).hexdigest()
+                   != expected):
+            raise SystemdBackendError("compiler canary receipt changed")
     path = STATE / ("fresh-" + grant["kind"] + "-claim.json")
     intent = {k: grant[k] for k in (
         "kind","host_id","boot_id","project_root","request_id",
