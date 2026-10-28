@@ -567,6 +567,21 @@ class BuildBackend:
         return observed == expected or observed == reloaded
 
     def start(self, *, project_root, job_id, request):
+        if self.parent_slice is not None:
+            # Sidecar privilege is not launch authority. Consume the single
+            # native host-owned grant/active six-hour budget BEFORE any
+            # prepare/start side effect. The same lock spans the PID1 reply,
+            # preventing concurrent claims for the empty lane.
+            from . import fresh_start_gate as start_gate
+            with start_gate.locked():
+                start_gate.claim(backend=self, project_root=project_root,
+                                 job_id=job_id, request=request)
+                return self._start_after_protected_claim(
+                    project_root=project_root, job_id=job_id, request=request)
+        return self._start_after_protected_claim(
+            project_root=project_root, job_id=job_id, request=request)
+
+    def _start_after_protected_claim(self, *, project_root, job_id, request):
         info = self.prepare(project_root=project_root, job_id=job_id, request=request)
         path, registration = self.load(project_root, request['build_root_id'])
         job_path = path/'jobs'/(job_id+'.json')
