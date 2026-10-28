@@ -387,23 +387,39 @@ def serve_once(listener):
     with connection:
         return _serve_broker_connection(connection, binding)
 
+def _verify_broker_listener(listener, path, *, owner_uid, bridge_gid):
+    """Independently verify kernel listener and protected pathname metadata.
+
+    Linux socketfs fstat(fd) and filesystem lstat(path) refer to different
+    objects. Their dev/ino values must NOT be compared. The fixed, root-owned
+    parent is validated separately by the privileged caller.
+    """
+    try:
+        if (listener.family != socket.AF_UNIX
+                or listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+                or listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1
+                or listener.getsockname() != str(path)):
+            _deny()
+        descriptor = os.fstat(listener.fileno())
+        pathname = path.lstat()
+        if (not stat.S_ISSOCK(descriptor.st_mode)
+                or not stat.S_ISSOCK(pathname.st_mode)
+                or pathname.st_uid != owner_uid or pathname.st_gid != bridge_gid
+                or stat.S_IMODE(pathname.st_mode) != 0o660):
+            _deny()
+    except (OSError, ValueError, TypeError):
+        _deny()
+    return listener
+
+
 def broker_main():
     # Fixed systemd socket fd3; sshd must not execute this privileged broker.
     credentials._require_root()
     binding = _station_binding()
     listener = socket.socket(fileno=3)
-    if (listener.family != socket.AF_UNIX
-            or listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
-            or listener.getsockname() != str(_BROKER)):
-        _deny()
     credentials._check_root_directory(_BROKER.parent)
-    info = _BROKER.lstat()
-    live = os.fstat(listener.fileno())
-    if (not stat.S_ISSOCK(info.st_mode)
-            or (info.st_dev, info.st_ino) != (live.st_dev, live.st_ino)
-            or info.st_uid != 0 or info.st_gid != binding["peer_gid"]
-            or stat.S_IMODE(info.st_mode) != 0o660):
-        _deny()
+    _verify_broker_listener(listener, _BROKER, owner_uid=0,
+                            bridge_gid=binding["peer_gid"])
     while True:
         serve_once(listener)
 
