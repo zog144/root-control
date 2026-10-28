@@ -787,6 +787,18 @@ class BuildBackend:
         return inspect(backend=self, project_root=project_root, path=path,
                        info=info, observed=observed)
 
+    def inspect_fresh_idle_native(self, *, project_root):
+        """Observe a genuinely empty fresh slice without authorizing start.
+
+        This does not replace the running worker witness or the host-deploy
+        six-hour budget. Production admission still requires a separately
+        reviewed protected launch gate and canary transition.
+        """
+        if self.parent_slice != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("fresh idle witness not available to historical role")
+        from .fresh_native_idle_witness import inspect
+        return inspect(backend=self, project_root=project_root)
+
     @staticmethod
     def cgroup_empty(group):
         if not group: return False
