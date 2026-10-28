@@ -130,8 +130,9 @@ def test_registration_import_preserves_security_modes_ownership_durability_and_e
     assert properties["BindPaths"].value is not None
     # The private resident mountpoints are not overridden by writable binds.
     bindpaths = properties["BindPaths"].value
-    flat = str(bindpaths)
-    assert "/state" not in flat and "/applications" not in flat
+    destinations = {entry[1] for entry in bindpaths}
+    assert destinations == {"/image-build/source", "/image-build/output"}
+    assert "/state" not in destinations and "/applications" not in destinations
     assert properties["ExecStart"].value is not None
     for name, mode in expected.items():
         assert stat.S_IMODE((imported / name).stat().st_mode) == mode
