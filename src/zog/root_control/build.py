@@ -274,7 +274,13 @@ class BuildBackend:
                 os.chown(item, uid, gid, follow_symlinks=False)
                 permissions = stat.S_IMODE(mode) & 0o777
                 if immutable:
-                    permissions = (permissions & ~0o222) | (0o555 if stat.S_ISDIR(mode) else 0o444)
+                    # Imported rootfs metadata is a security boundary, not a
+                    # request to make everything readable/traversable. Strip
+                    # write bits only: /state and /applications mode 0000
+                    # must remain closed, and private 0700/0600 objects must
+                    # not become world-readable. The privileged importer can
+                    # still traverse and fsync restrictive directories.
+                    permissions &= ~0o222
                 else:
                     permissions |= 0o770 if stat.S_ISDIR(mode) else 0o660
                 os.chmod(item, permissions, follow_symlinks=False)
