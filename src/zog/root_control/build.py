@@ -688,6 +688,13 @@ class BuildBackend:
                 self.systemd._property('ExecStopPost', 'a(sasb)', 1,
                     '/run/zog-journal/wait', 2, '/run/zog-journal/wait',
                     info['journal_barrier_token'], 'true')]
+        if self.parent_slice is not None:
+            # The protected lock remains held by start(). Preparation may
+            # consume time; recheck live budget and PID1 timer at the FINAL
+            # irreversible submission boundary.
+            from . import fresh_start_gate
+            fresh_start_gate.revalidate_before_pid1(
+                backend=self, job_id=job_id)
         self.systemd._job('StartTransientUnit','ssa(sv)a(sa(sv))',[info['unit_name'],'fail',props,[]])
         return info
 
