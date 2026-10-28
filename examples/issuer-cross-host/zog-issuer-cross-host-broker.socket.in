@@ -1,0 +1,18 @@
+# INERT SOURCE TEMPLATE — NOT AN ACTIVATED LISTENER.
+# Installation owner must replace the reviewed group, attest the service
+# interpreter and match this socket to the signed station bridge binding.
+[Unit]
+Description=Zog station issuer-only root broker socket
+ConditionPathExists=/etc/zog/issuer-credentials/cross-host-station.json
+
+[Socket]
+ListenStream=/run/zog/issuer-cross-host-broker.sock
+SocketUser=root
+SocketGroup=@REVIEWED_BRIDGE_GID_OR_GROUP@
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+Service=zog-issuer-cross-host-broker.service
+RemoveOnStop=no
+
+# No [Install] in this review artifact; native owner must approve activation.
