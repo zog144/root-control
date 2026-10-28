@@ -112,6 +112,14 @@ def bound(tmp_path, monkeypatch):
         parent_slice=FRESH_COMPILER_PARENT_SLICE,
         authorized_project_root=str(project),
     )
+    # Existing PID1 property tests are unit-level, not native admission.
+    # Gate approval is tested independently against protected budget/timer
+    # evidence; fixture stubs may not be used in installed production.
+    from contextlib import nullcontext
+    from zog.root_control import fresh_start_gate
+    monkeypatch.setattr(fresh_start_gate, "locked", nullcontext)
+    monkeypatch.setattr(fresh_start_gate, "claim", lambda **kw: {
+        "schema": fresh_start_gate.CLAIM_SCHEMA})
     # The independent mount/identity cases exercise the real native guard;
     # this PID1 mock focuses only on typed worker properties.
     backend.directory = tmp_path / "privileged"
