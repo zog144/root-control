@@ -120,6 +120,8 @@ def bound(tmp_path, monkeypatch):
     monkeypatch.setattr(fresh_start_gate, "locked", nullcontext)
     monkeypatch.setattr(fresh_start_gate, "claim", lambda **kw: {
         "schema": fresh_start_gate.CLAIM_SCHEMA})
+    monkeypatch.setattr(fresh_start_gate, "revalidate_before_pid1",
+                        lambda **kw: True)
     # The independent mount/identity cases exercise the real native guard;
     # this PID1 mock focuses only on typed worker properties.
     backend.directory = tmp_path / "privileged"
