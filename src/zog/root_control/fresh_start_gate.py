@@ -218,3 +218,39 @@ def claim(*, backend, project_root, job_id, request):
         "pending_job": intent, "last_worker_job_id": job_id,
     })
     return intent
+
+
+def revalidate_before_pid1(*, backend, job_id):
+    """Repeat hard deadline and budget test immediately before PID1 submission.
+
+    MUST execute while the same exclusive start lock is still held.
+    Failure leaves the durable attempted worker claim for review; it never
+    authorizes a second job or retries an ambiguous D-Bus call.
+    """
+    if type(job_id) is not str or not _HEX.fullmatch(job_id):
+        raise SystemdBackendError("unreviewed protected worker job")
+    grant = _read(GRANT)
+    phase = _read(PHASE)
+    kind = grant.get("kind")
+    if kind not in ("canary", "compiler") or grant.get("job_id") != job_id:
+        raise SystemdBackendError("protected worker claim identity drift")
+    original = _read(STATE / ("fresh-" + kind + "-claim.json"))
+    if (phase.get("phase") != kind + "-start-attempted"
+            or phase.get("pending_job") != original
+            or original.get("job_id") != job_id
+            or original.get("boot_id") != _boot()):
+        raise SystemdBackendError("worker was not durably claimed")
+    state = _read(BUDGET / (grant["request_id"] + ".json"))
+    now = time.monotonic_ns() // 1_000_000_000
+    if (state.get("status") != "active"
+            or state.get("schema") != BUDGET_SCHEMA
+            or state.get("boot_id") != _boot()
+            or state.get("request_id") != grant["request_id"]
+            or state.get("sidecar_plan_sha256") != grant["plan_sha256"]
+            or now >= state.get("started_monotonic_seconds", 0) +
+                MAX_SECONDS - 30
+            or now < state.get("last_monotonic_seconds", 0)
+            or now - state.get("last_monotonic_seconds", 0) > 60):
+        raise SystemdBackendError("budget expired during protected worker preparation")
+    _timer_active(backend.systemd, time.monotonic_ns() // 1000)
+    return True
