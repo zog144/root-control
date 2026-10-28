@@ -16,7 +16,7 @@ import stat
 import time
 from contextlib import contextmanager
 
-from .build import (FRESH_COMPILER_EXTERNAL_MOUNT, FRESH_COMPILER_PARENT_SLICE,
+from .build import (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT, FRESH_COMPILER_PARENT_SLICE,
                     FRESH_COMPILER_PROJECT, canonical_request)
 from .systemd import SystemdBackendError, _UNIT_IFACE
 
@@ -126,7 +126,7 @@ def _timer_active(systemd, now_us):
     if obj is None:
         raise SystemdBackendError("fresh deadline timer absent")
     state = systemd._get_property(obj, _UNIT_IFACE, "ActiveState")
-    from .systemd import _TIMER_IFACE
+    _TIMER_IFACE = 'org.freedesktop.systemd1.Timer'
     target = systemd._get_property(obj, _TIMER_IFACE, "Unit")
     expiry = systemd._get_property(obj, _TIMER_IFACE, "NextElapseUSecMonotonic")
     if (state != "active" or target != STOP_UNIT
