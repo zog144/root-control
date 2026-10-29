@@ -19,7 +19,7 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13"]
     env:
-      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/companions/host-identify/src:${{ github.workspace }}/.ci-deps
     steps:
       - name: Checkout root-control
         uses: actions/checkout@v4
@@ -31,6 +31,13 @@ jobs:
           repository: zog144/box-control
           ref: a3e939b7a22ef6277ae9712961ffbd5a18ccac39
           path: companions/box-control
+          persist-credentials: false
+      - name: Checkout exact credential-delivery host-identify v0.3.5 source
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/host-identify
+          ref: 4a176373ff4cb47a66a8ab1b5fd3d6ff01ff2a3b
+          path: companions/host-identify
           persist-credentials: false
       - name: Checkout public Zog aggregate for image-build
         uses: actions/checkout@v4
@@ -76,6 +83,8 @@ jobs:
       - name: Install test dependencies and root-control
         run: |
           python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10' 'cryptography>=42,<47'
+          test "$(git -C companions/host-identify rev-parse HEAD)" = "4a176373ff4cb47a66a8ab1b5fd3d6ff01ff2a3b"
+          python -m pip install ./companions/host-identify
           python -m pip install --no-deps .
       - name: Verify namespace and compile
         run: |
