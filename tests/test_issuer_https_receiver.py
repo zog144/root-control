@@ -29,8 +29,8 @@ def profile(project="/approved/project"):
         assignment_revision=8, receipt_sha256="f"*64, purpose=receiver.PURPOSE,
         credential_id="73c77e1f-53b8-4a73-92a1-e610814db525",
         credential_revision=5,
-        grant_id="73c77e1f-53b8-4a73-92a1-e610814db526",
-        storage_id="73c77e1f-53b8-4a73-92a1-e610814db527",
+        grant_id="a"*32,
+        storage_id="b"*32,
         policy_sha256="1"*64, consumer_uid=24321)
 
 
@@ -48,6 +48,12 @@ def signed_reply(p, request, wire, key, *, token=b"private-token-placeholder-ABC
     signed["signature"]=base64.b64encode(
         key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(signed))).decode()
     return receiver.canonical(signed)
+
+
+def test_profile_preserves_retained_opaque_grant_and_storage_ids():
+    p=profile()
+    assert p["grant_id"] == "a"*32
+    assert p["storage_id"] == "b"*32
 
 
 def test_https_request_carries_exact_authority_purpose_and_one_nonce():
