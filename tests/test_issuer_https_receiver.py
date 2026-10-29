@@ -262,3 +262,66 @@ def test_verified_secret_only_enters_anonymous_fd_and_receipt_post(monkeypatch):
     assert events == ["verified", "claimed", "request", "delivery-durable",
                       "verified","installed-fd","bytes-verified","verified",
                       "installed-durable", "receipt"]
+
+
+def test_explicit_cancel_after_delivery_is_host_signed_and_rotation_held(monkeypatch):
+    from contextlib import contextmanager
+    v, host, ca = fixture()
+    now = int(time.time())
+    a = dict(v["authorization"], approved_at=now-5, expires_at=now+3600)
+    p = profile(v)
+    request = receiver._new_request(a, cd.new_ledger(a), now=now)
+    delivery = dict(v["delivery"], request_id=request["request_id"],
+                    issued_at=now, expires_at=now+60)
+    state = cd.record_delivery(cd.admit_request(cd.new_ledger(a), request),
+                               delivery)
+    state["rotation_required"] = True
+    installed = []
+    monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
+    monkeypatch.setattr(receiver, "LIVE_NETWORK_ACTIVATION", True)
+    monkeypatch.setattr(receiver, "_profile", lambda proj: {
+        k:x for k,x in p.items() if k not in ("credential_id","policy_sha256")})
+    monkeypatch.setattr(receiver, "_approval", lambda proj, prof: (
+        p["authorization_id"], {"credential_id":p["credential_id"],
+                                "policy_sha256":p["policy_sha256"]}))
+    monkeypatch.setattr(receiver, "_authority_key", lambda prof: ca.public_key())
+    monkeypatch.setattr(receiver, "_authorization", lambda *args, **kw: a1)
+    a1 = a
+    monkeypatch.setattr(receiver, "_current", lambda *args: None)
+    @contextmanager
+    def guarded(project):
+        yield ()
+    monkeypatch.setattr(receiver.credentials, "_locked", guarded)
+    monkeypatch.setattr(receiver, "_load_state", lambda project, auth: state)
+    monkeypatch.setattr(receiver, "_operation", lambda project: {
+        "request":request, "delivery_metadata": {
+            k:x for k,x in delivery.items() if k!="secret"}, "phase":"delivered"})
+    monkeypatch.setattr(receiver, "_persist_state",
+                        lambda project, value: installed.append(value))
+    monkeypatch.setattr(receiver, "_save_operation", lambda *args: None)
+    def post(profile, prepared, *, expected_status, transport):
+        assert expected_status == 204 and prepared.url == v["origin"] + v["cancel_path"]
+        cancel, nonce, expiry = cd.verify_cancel_http(
+            prepared.url, "POST", dict(prepared.headers), prepared.body,
+            host.public_key(), request, now=now)
+        assert cancel["schema"] == cd.CANCEL_SCHEMA and nonce
+        assert b"secret" not in prepared.body
+        return b""
+    monkeypatch.setattr(receiver, "_post", post)
+    result = receiver.cancel_pending(
+        p["project"], private_identity=host,
+        admission={"status":"protected-source-preflight-only",
+                   "native_https_accepted":True,"owner":{"status":"retained"}})
+    assert result["status"] == "cancelled"
+    assert installed[0]["rotation_required"] is True
+    assert installed[0]["requests"][-1]["status"] == "cancelled-after-delivery"
+
+
+def test_source_default_blocks_even_pretend_native_acceptance(monkeypatch):
+    assert receiver.LIVE_NETWORK_ACTIVATION is False
+    monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install("/safe/project", private_identity=None,
+            admission={"status":"protected-source-preflight-only",
+                       "native_https_accepted":True,
+                       "owner":{"status":"retained"}})
