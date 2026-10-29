@@ -144,6 +144,12 @@ def _pin_key(profile):
     return key
 
 
+def _station_key_bytes(key):
+    from cryptography.hazmat.primitives import serialization
+    return key.public_bytes(serialization.Encoding.Raw,
+                            serialization.PublicFormat.Raw)
+
+
 def _request(profile):
     fields = ("host_id", "installation_id", "state_volume_id", "host_fingerprint",
               "registry_id", "authorization_id", "assignment_id",
@@ -284,12 +290,7 @@ def receive_and_install(project_root, *, private_identity, admission,
     token = _signed_response(raw, request=request, request_bytes=request_bytes,
                              profile=initial, authority_key=key)
     if (_profile(project) != initial or _approval(project, initial) != identifier
-            or _pin_key(initial).public_bytes(
-                __import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.Raw,
-                __import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.Raw
-            ) != key.public_bytes(
-                __import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.Raw,
-                __import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.Raw)):
+            or _station_key_bytes(_pin_key(initial)) != _station_key_bytes(key)):
         _deny()
     reader, writer = os.pipe()
     try:
