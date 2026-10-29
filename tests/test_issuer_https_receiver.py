@@ -13,7 +13,7 @@ import pytest
 
 from zog.box_control.project import Project
 from zog.root_control import issuer_https_receiver as receiver
-from zog.root_control.issuer_cross_host import CrossHostDenied
+from zog.root_control.issuer_receipt_common import CredentialReceiptDenied
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -79,7 +79,7 @@ def test_station_signed_response_rejects_cross_identity_and_revision_substitutio
     signature=response.pop("signature")
     response["signature"]=base64.b64encode(
         key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(response))).decode()
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver._signed_response(receiver.canonical(response),request=req,
             request_bytes=wire,profile=p,authority_key=key.public_key())
 
@@ -92,11 +92,11 @@ def test_accepted_response_and_wrong_signer_expiry_partial_trailing_and_dup_fiel
     assert receiver._signed_response(signed,request=req,request_bytes=wire,
            profile=p,authority_key=key.public_key()).startswith(b"private-token")
     other=Ed25519PrivateKey.generate()
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver._signed_response(signed,request=req,request_bytes=wire,
             profile=p,authority_key=other.public_key())
     for bad in (signed[:-2], signed+b"extra", b"{}", b" "*8193):
-        with pytest.raises(CrossHostDenied):
+        with pytest.raises(CredentialReceiptDenied):
             receiver._signed_response(bad,request=req,request_bytes=wire,
                 profile=p,authority_key=key.public_key())
     response=json.loads(signed)
@@ -104,7 +104,7 @@ def test_accepted_response_and_wrong_signer_expiry_partial_trailing_and_dup_fiel
     response.pop("signature")
     response["signature"]=base64.b64encode(
         key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(response))).decode()
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver._signed_response(receiver.canonical(response),request=req,
             request_bytes=wire,profile=p,authority_key=key.public_key())
 
@@ -136,13 +136,13 @@ def test_installed_profile_refuses_changed_tls_ca_owner_and_signer(monkeypatch):
                  "/etc/zog/host-install/certificate-assignment-authority.json"):
         previous=sources[name]
         sources[name]=previous+b"modified"
-        with pytest.raises(CrossHostDenied):
+        with pytest.raises(CredentialReceiptDenied):
             receiver._profile(project)
         sources[name]=previous
     p["https_origin"]="https://command.example.org:8443"
     sources["profile"]=receiver.canonical({k:v for k,v in p.items()
                                             if k not in ("credential_id","policy_sha256")})
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver._profile(project)
 
 
@@ -153,7 +153,7 @@ def test_root_operation_denies_without_native_authorization_before_remote(monkey
     monkeypatch.setattr(receiver,"_profile",lambda project:p)
     monkeypatch.setattr(receiver,"_approval",lambda *a:seen.append("approval"))
     monkeypatch.setattr(receiver,"_https_post",lambda *a,**kw:seen.append("network"))
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver.receive_and_install(p["project"],private_identity=None,
             admission={"status":"protected-source-preflight-only"})
     assert seen==[]
@@ -169,7 +169,7 @@ def test_one_time_request_is_fsynced_before_network_and_never_reused(tmp_path, m
     receiver._consume_request(project,"f"*32,profile=p)
     saved=list(directory.iterdir())
     assert len(saved)==1 and saved[0].read_bytes()==b"consumed\n"
-    with pytest.raises(CrossHostDenied):
+    with pytest.raises(CredentialReceiptDenied):
         receiver._consume_request(project,"f"*32,profile=p)
 
 
