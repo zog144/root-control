@@ -72,8 +72,11 @@ def _profile(project):
         if value["project"] != str(project.path):
             _deny()
         for name in ("host_id", "installation_id", "state_volume_id",
-                     "assignment_id", "grant_id", "storage_id"):
+                     "assignment_id"):
             if type(value[name]) is not str or not _UUID.fullmatch(value[name]):
+                _deny()
+        for name in ("grant_id", "storage_id"):
+            if type(value[name]) is not str or not credentials._HEX32.fullmatch(value[name]):
                 _deny()
         for name in ("host_fingerprint", "authorization_id", "receipt_sha256",
                      "tls_authority_pin_sha256", "station_signer_pin_sha256",
@@ -110,26 +113,54 @@ def _profile(project):
         _deny()
 
 
+def _projection(project, approved):
+    """Read the retained nonsecret station projection without local vault peer state."""
+    path, _peer_path = credentials._projection_paths(project)
+    try:
+        credentials._check_root_directory(path.parent)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) not in (0o440, 0o600)
+                    or info.st_nlink != 1 or info.st_size > 8192):
+                _deny()
+            raw = os.read(fd, 8193)
+            if len(raw) != info.st_size or len(raw) > 8192:
+                _deny()
+        finally:
+            os.close(fd)
+        projection = json.loads(raw, object_pairs_hook=_pairs)
+        if local._validated(projection, approved) != credentials._authorization_id(approved):
+            _deny()
+        return projection
+    except (OSError, ValueError, UnicodeError, TypeError):
+        _deny()
+
+
 def _approval(project, profile):
-    aid, peer = local._checked_current(project)
-    path, _ = credentials._projection_paths(project)
-    projection = local._private_file(path, gid=peer["reader_gid"], mode=0o440)
-    approved = projection.get("authorization")
+    approval_path, ledger_path, pending_path, _lock_path = credentials._paths(project)
+    if pending_path.exists() or pending_path.is_symlink():
+        _deny()
+    approved, grant = credentials._authorization(project, approval_path)
+    ledger = credentials._read_protected(ledger_path, missing_ok=True)
+    credentials._check_revision(ledger, approved)
+    credentials._quiet(project)
+    aid = credentials._authorization_id(approved)
+    projection = _projection(project, approved)
     if (projection.get("origin") != "managed"
             or projection.get("host_id") != profile["host_id"]
             or projection.get("installation_id") != profile["installation_id"]
-            or not isinstance(approved, dict)
             or aid != profile["authorization_id"]):
         _deny()
-    for k in ("assignment_id", "assignment_revision", "receipt_sha256",
-              "credential_revision", "grant_id", "storage_id"):
-        if approved.get(k) != profile[k]:
+    for key in ("assignment_id", "assignment_revision", "receipt_sha256",
+                "credential_revision", "grant_id", "storage_id"):
+        if approved.get(key) != profile[key]:
             _deny()
     if (not credentials._UUID.fullmatch(approved.get("credential_id", ""))
-            or not credentials._HEX64.fullmatch(approved.get("policy_sha256", ""))):
-        _deny()
-    grant = credentials._authorization(project, credentials._paths(project)[0])[1]
-    if grant.get("uid") != profile["consumer_uid"]:
+            or not credentials._HEX64.fullmatch(approved.get("policy_sha256", ""))
+            or grant.get("grant_id") != profile["grant_id"]
+            or grant.get("uid") != profile["consumer_uid"]):
         _deny()
     return aid, {"credential_id": approved["credential_id"],
                  "policy_sha256": approved["policy_sha256"]}
