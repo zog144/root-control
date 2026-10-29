@@ -210,6 +210,8 @@ def test_verified_secret_only_enters_anonymous_fd_and_receipt_post(monkeypatch):
     request = receiver._new_request(a, cd.new_ledger(a), now=now)
     events = []
     monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
+    # Synthetic FD test only. Production activation is always disabled.
+    monkeypatch.setattr(receiver, "LIVE_NETWORK_ACTIVATION", True)
     monkeypatch.setattr(receiver, "_profile", lambda proj: {k:x for k,x in p.items()
         if k not in ("credential_id", "policy_sha256")})
     monkeypatch.setattr(receiver, "_approval", lambda proj, prof:
