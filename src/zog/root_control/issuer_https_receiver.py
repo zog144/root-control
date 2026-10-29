@@ -32,6 +32,9 @@ from .issuer_receipt_common import (
 
 # The only wire schemas are defined by pinned host-identify 0.3.5.
 PROTOCOL_SOURCE = "4a176373ff4cb47a66a8ab1b5fd3d6ff01ff2a3b"
+# A separate native owner acceptance/release is mandatory. Source review is
+# intentionally incapable of contacting a real Station or installing a token.
+LIVE_NETWORK_ACTIVATION = False
 PURPOSE = "issuer-cloudflare-dns01"
 CONSUMER = "certify-manage"
 PROFILE_SCHEMA = "zog-issuer-https-credential-client-v1"
@@ -416,6 +419,8 @@ def _current(project, profile, authority_key, authorization):
 
 
 def _native(admission):
+    if not LIVE_NETWORK_ACTIVATION:
+        _deny()
     if (type(admission) is not dict
             or admission.get("status") != "protected-source-preflight-only"
             or admission.get("native_https_accepted") is not True
