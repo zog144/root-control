@@ -398,9 +398,11 @@ def _identity(private_identity, profile):
 
 def _current(project, profile, authority_key, authorization):
     """Fresh live local authority, issuer grant, owner and signer check."""
-    if _profile(project) != profile:
+    latest = _profile(project)
+    if latest != {key: value for key, value in profile.items()
+                  if key not in ("credential_id", "policy_sha256")}:
         _deny()
-    local_id, selected = _approval(project, profile)
+    local_id, selected = _approval(project, latest)
     if (local_id != profile["authorization_id"]
             or selected["credential_id"] != profile["credential_id"]
             or selected["policy_sha256"] != profile["policy_sha256"]):
@@ -575,7 +577,10 @@ def cancel_pending(project_root, *, private_identity, admission,
             _deny()
         request = operation["request"]
         try:
-            cd.validate_request(request, auth)
+            if (request["authorization_id"] != auth["authorization_id"]
+                    or cd.binding(request) != cd.binding(auth)
+                    or request["credential_revision"] != auth["credential_revision"]):
+                _deny()
             now = int(time.time())
             cancel = {
                 "schema": cd.CANCEL_SCHEMA,
