@@ -658,6 +658,13 @@ class BuildBackend:
             values['LimitSTACK'] = ('t', stack)
             values['LimitSTACKSoft'] = ('t', stack)
         props = [self.systemd._property(k, sig, value) for k,(sig,value) in values.items()]
+        if self.parent_slice is not None:
+            # Explicitly mask inherited HugeTLB mountpoints. A separate
+            # parent cgroup hugetlb.*.max=0 native gate is also mandatory.
+            # Missing paths are harmless; existing paths are inaccessible.
+            props.append(self.systemd._property(
+                'InaccessiblePaths', 'as', 2,
+                '-/dev/hugepages', '-/dev/hugepages-1GB'))
         environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
         binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
         if scratch is not None:
