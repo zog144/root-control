@@ -252,12 +252,12 @@ def test_verified_secret_only_enters_anonymous_fd_and_receipt_post(monkeypatch):
         events.append("installed-fd")
         return {"status":"installed","credential_revision":p["credential_revision"]}
     monkeypatch.setattr(receiver.credentials, "install_from_fd", installer)
-    monkeypatch.setattr(receiver.credentials, "inspect", lambda proj: {
-        "status":"installed", "credential_revision":p["credential_revision"]})
+    monkeypatch.setattr(receiver, "_assert_installed_bytes",
+                        lambda proj, binding: events.append("bytes-verified"))
     result = receiver.receive_and_install(p["project"], private_identity=host,
         admission={"status":"protected-source-preflight-only",
                    "native_https_accepted":True,"owner":{"status":"retained"}})
     assert result["schema"] == cd.RECEIPT_SCHEMA
     assert events == ["verified", "claimed", "request", "delivery-durable",
-                      "verified","installed-fd","verified",
+                      "verified","installed-fd","bytes-verified","verified",
                       "installed-durable", "receipt"]
