@@ -68,23 +68,53 @@ def _mount_inventory(raw):
             raise RuntimeError("worker mount inventory exceeds limit")
     if "/" not in by_point:
         raise RuntimeError("worker root mount missing")
+    # mountinfo may include lower ancestor mounts and their children.  A
+    # child bound to a hidden ancestor is NOT reachable just because it is
+    # the only row with its own pathname (e.g. old /dev/hugepages under a
+    # later /dev tmpfs). Resolve from the visible root outward.
+    for row in entries.values():
+        parent = entries.get(row["parent"])
+        if row["parent"] == row["id"] or (parent and
+                parent["point"] != row["point"] and
+                not (row["point"].startswith(parent["point"].rstrip("/") + "/")
+                     or parent["point"] == "/")):
+            raise RuntimeError("corrupt native mount parent graph")
     visible = {}
-    for point, layers in by_point.items():
-        ids = {x["id"] for x in layers}
-        parents = {x["parent"] for x in layers if x["parent"] in ids}
-        top = [x for x in layers if x["id"] not in parents]
-        if len(top) != 1:
+    for point in sorted(by_point, key=lambda x: (x.count("/"), len(x), x)):
+        layers = by_point[point]
+        if point == "/":
+            eligible = {x["id"] for x in layers}
+        else:
+            ancestors = [x for x in visible
+                         if point.startswith(x.rstrip("/") + "/")]
+            if not ancestors:
+                continue
+            anchor = visible[max(ancestors, key=len)]["id"]
+            eligible = set()
+            for _ in range(len(layers) + 1):
+                old = len(eligible)
+                eligible.update(x["id"] for x in layers
+                                if x["parent"] == anchor or x["parent"] in eligible)
+                if len(eligible) == old:
+                    break
+            if not eligible:
+                # This subtree is masked by an ancestor overmount.
+                continue
+        parents = {entries[i]["parent"] for i in eligible
+                   if entries[i]["parent"] in eligible}
+        tops = [entries[i] for i in eligible if i not in parents]
+        if len(tops) != 1:
             raise RuntimeError("ambiguous native mount stack: " + point)
         visited = set()
-        cursor = top[0]
+        cursor = tops[0]
         while cursor["id"] not in visited:
             visited.add(cursor["id"])
-            if cursor["parent"] not in ids:
+            if cursor["parent"] not in eligible:
                 break
             cursor = entries[cursor["parent"]]
-        if visited != ids:
+        if visited != eligible:
             raise RuntimeError("disconnected native mount stack: " + point)
-        visible[point] = top[0]
+        visible[point] = tops[0]
     return visible, tuple(entries.values())
 
 
@@ -140,9 +170,10 @@ def inspect(*, backend, project_root, path, info, observed):
         st = (root / target.lstrip("/")).stat()
         if not stat.S_ISDIR(st.st_mode) or st.st_dev != dev:
             raise RuntimeError("worker writable mount redirected: " + target)
-    # Consider every mount layer, not just the visible mount at a duplicate
-    # point. A hidden writable non-quota mount is not evidence of containment.
-    for m in all_mounts:
+    # Audit kernel-reachable mounts. Hidden children of an overmounted
+    # ancestor cannot be opened by pathname; host-deploy separately rejects
+    # inherited writable file descriptors into those hidden layers.
+    for m in mounts.values():
         if not _writable(m):
             continue
         target = m["point"]
