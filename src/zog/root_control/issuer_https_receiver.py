@@ -40,7 +40,7 @@ RECEIPT_PATH = PATH + "/receipt"
 CANCEL_PATH = PATH + "/cancel"
 _TLS_CA = Path("/etc/zog/issuer-credentials/station-ca.pem")
 _AUTHORITY_PIN = credentials.AUTH_ROOT / "credential-authority.json"
-_HEX = re.compile(r"[0-9a-f]{64}\\Z")
+_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _UUID = credentials._UUID
 
 
