@@ -139,7 +139,7 @@ def test_stacked_mounts_choose_kernel_top_and_reject_unaccounted_layers():
     with pytest.raises(RuntimeError, match="ambiguous"):
         witness._mount_inventory(
             "\n".join(lines + ["24 10 7:5 / /tmp rw - ext4 image rw"]))
-    with pytest.raises(RuntimeError, match="disconnected"):
+    with pytest.raises(RuntimeError, match="corrupt"):
         witness._mount_inventory(
             "\n".join(lines + ["24 24 7:5 / /tmp rw - ext4 image rw"]))
 
@@ -168,3 +168,28 @@ def test_same_device_different_inode_never_proves_worker_root(monkeypatch):
     with pytest.raises(RuntimeError, match="inode"):
         witness.inspect(backend=b, project_root=project, path=path,
                         info=info, observed=observed)
+
+def test_ancestor_overmount_excludes_hidden_hugetlb_and_old_devpts():
+    rows = "\n".join([
+        "10 1 7:5 / / ro - ext4 image ro",
+        "20 10 0:3 / /dev rw - devtmpfs old rw",
+        "21 20 0:8 / /dev/hugepages rw - hugetlbfs huge rw",
+        "22 20 0:9 / /dev/pts rw - devpts old rw",
+        "30 20 0:12 / /dev rw - tmpfs new rw",
+        "31 30 0:13 / /dev/shm rw - tmpfs shm rw",
+    ])
+    visible, all_rows = witness._mount_inventory(rows)
+    assert visible["/dev"]["id"] == 30
+    assert visible["/dev/shm"]["id"] == 31
+    assert "/dev/hugepages" not in visible
+    assert "/dev/pts" not in visible
+    assert any(row["fstype"] == "hugetlbfs" for row in all_rows)
+
+
+def test_fresh_unit_masks_hugetlb_without_weakening_other_workers():
+    import inspect
+    from zog.root_control.build import BuildBackend
+    source = inspect.getsource(BuildBackend._start_after_protected_claim)
+    assert "'InaccessiblePaths', 'as', 2" in source
+    assert "-/dev/hugepages" in source
+    assert "if self.parent_slice is not None:" in source
