@@ -20,14 +20,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 def profile(project="/approved/project"):
     return dict(schema=receiver.PROFILE_SCHEMA, project=project,
         https_origin="https://command.example.org",
-        tls_ca_path="/etc/zog/issuer-credentials/station-ca.pem",
-        tls_ca_sha256="a"*64, signer_pin_sha256="b"*64,
+        tls_authority_pin_sha256="a"*64, station_signer_pin_sha256="b"*64,
         owner_authority_sha256="c"*64, host_id="73c77e1f-53b8-4a73-92a1-e610814db521",
         installation_id="73c77e1f-53b8-4a73-92a1-e610814db522",
         state_volume_id="73c77e1f-53b8-4a73-92a1-e610814db523",
         host_fingerprint="d"*64, registry_id="command-center",
         authorization_id="e"*64, assignment_id="73c77e1f-53b8-4a73-92a1-e610814db524",
-        assignment_revision=8, receipt_sha256="f"*64,
+        assignment_revision=8, receipt_sha256="f"*64, purpose=receiver.PURPOSE,
         credential_id="73c77e1f-53b8-4a73-92a1-e610814db525",
         credential_revision=5,
         grant_id="73c77e1f-53b8-4a73-92a1-e610814db526",
@@ -54,7 +53,7 @@ def signed_reply(p, request, wire, key, *, token=b"private-token-placeholder-ABC
 def test_https_request_carries_exact_authority_purpose_and_one_nonce():
     p=profile()
     request, wire=receiver._request(p)
-    assert request["purpose"]=="managed-dns01"
+    assert request["purpose"]=="issuer-cloudflare-dns01"
     assert request["consumer"]=="certify-manage"
     assert request["consumer_uid"]==24321
     assert len(wire)<=receiver._MAX_REQUEST
@@ -117,21 +116,22 @@ def test_installed_profile_refuses_changed_tls_ca_owner_and_signer(monkeypatch):
     signer=b'{"registry_id":"command-center","authority_public_key":"AQ=="}'
     ca=b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----"
     p["owner_authority_sha256"]=hashlib.sha256(owner).hexdigest()
-    p["signer_pin_sha256"]=hashlib.sha256(signer).hexdigest()
-    p["tls_ca_sha256"]=hashlib.sha256(ca).hexdigest()
+    p["station_signer_pin_sha256"]=hashlib.sha256(signer).hexdigest()
+    p["tls_authority_pin_sha256"]=hashlib.sha256(ca).hexdigest()
     sources={
       "/state/host-install/certificate-owner-authority/authority.json":owner,
       "/etc/zog/host-install/certificate-assignment-authority.json":signer,
-      p["tls_ca_path"]:ca,
+      str(receiver._TLS_CA):ca,
     }
     monkeypatch.setattr(receiver,"_root_regular",lambda path,**kwargs:sources[str(path)])
     monkeypatch.setattr(receiver,"_profile_path",lambda project:"profile")
     monkeypatch.setattr(receiver,"_pairs",lambda pairs:dict(pairs))
     # This local test injects the parsed protected profile; real production
     # path still opens checked root:root file and rejects duplicate fields.
-    sources["profile"]=receiver.canonical(p)
-    assert receiver._profile(project)==p
-    for name in (p["tls_ca_path"],
+    pinned = {k:v for k,v in p.items() if k not in ("credential_id","policy_sha256")}
+    sources["profile"]=receiver.canonical(pinned)
+    assert receiver._profile(project)==pinned
+    for name in (str(receiver._TLS_CA),
                  "/state/host-install/certificate-owner-authority/authority.json",
                  "/etc/zog/host-install/certificate-assignment-authority.json"):
         previous=sources[name]
@@ -140,7 +140,8 @@ def test_installed_profile_refuses_changed_tls_ca_owner_and_signer(monkeypatch):
             receiver._profile(project)
         sources[name]=previous
     p["https_origin"]="https://command.example.org:8443"
-    sources["profile"]=receiver.canonical(p)
+    sources["profile"]=receiver.canonical({k:v for k,v in p.items()
+                                            if k not in ("credential_id","policy_sha256")})
     with pytest.raises(CrossHostDenied):
         receiver._profile(project)
 
@@ -178,7 +179,7 @@ def test_verified_token_uses_only_fd_installer_and_second_authority_check(monkey
     seen=[]
     monkeypatch.setattr(receiver.credentials,"_require_root",lambda:None)
     monkeypatch.setattr(receiver,"_profile",lambda project:p)
-    monkeypatch.setattr(receiver,"_approval",lambda *a:seen.append("approved") or p["authorization_id"])
+    monkeypatch.setattr(receiver,"_approval",lambda *a:seen.append("approved") or (p["authorization_id"], {"credential_id":p["credential_id"],"policy_sha256":p["policy_sha256"]}))
     monkeypatch.setattr(receiver,"_pin_key",lambda profile:key.public_key())
     monkeypatch.setattr(receiver,"_consume_request",lambda *a,**kw:seen.append("nonce"))
     def fake_transport(pr,request,identity,*,transport):
