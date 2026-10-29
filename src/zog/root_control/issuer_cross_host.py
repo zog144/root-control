@@ -474,6 +474,10 @@ def bridge_main():
         connection.close()
 
 def main(argv=None):
+    # User-approved HTTPS replaces the SSH transport. Historical source is
+    # retained for audit/tests, but its remote command entrypoint must never
+    # be an installed selectable production operation.
+    raise CrossHostDenied("SSH issuer credential transport retired")
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("client-transfer", "station-broker", "ssh-bridge"))
