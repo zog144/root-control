@@ -42,7 +42,7 @@ _RESPONSE_FIELDS = frozenset({
     "host_fingerprint", "authorization_id", "assignment_id",
     "assignment_revision", "receipt_sha256", "credential_id",
     "credential_revision", "storage_id", "grant_id", "policy_sha256",
-    "token_base64", "signature"
+    "token_base64", "consumer_uid", "signature"
 })
 
 
@@ -181,7 +181,8 @@ def _signed_response(raw, *, request, request_bytes, profile, authority_key, now
         for field in ("host_id", "installation_id", "state_volume_id", "registry_id",
                       "host_fingerprint", "authorization_id", "assignment_id",
                       "assignment_revision", "receipt_sha256", "credential_id",
-                      "credential_revision", "storage_id", "grant_id", "policy_sha256"):
+                      "credential_revision", "storage_id", "grant_id", "policy_sha256",
+                      "consumer_uid"):
             if type(signed[field]) is not type(profile[field]) or signed[field] != profile[field]:
                 _deny()
         current = int(time.time()) if now is None else now
@@ -283,7 +284,12 @@ def receive_and_install(project_root, *, private_identity, admission,
     token = _signed_response(raw, request=request, request_bytes=request_bytes,
                              profile=initial, authority_key=key)
     if (_profile(project) != initial or _approval(project, initial) != identifier
-            or _pin_key(initial).public_bytes_raw() != key.public_bytes_raw()):
+            or _pin_key(initial).public_bytes(
+                __import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.Raw,
+                __import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.Raw
+            ) != key.public_bytes(
+                __import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.Raw,
+                __import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.Raw)):
         _deny()
     reader, writer = os.pipe()
     try:
