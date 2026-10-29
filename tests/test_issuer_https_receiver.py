@@ -1,6 +1,6 @@
-"""No-secret tests for the selected HTTPS credential receiver.
+"""Canonical HTTPS credential receiver contract: pinned public cross-owner vector.
 
-No network, active certificate authority, retained Host, or issuer execution.
+Synthetic keys and fake FD installer ONLY; never a real protected credential.
 """
 import base64
 import hashlib
@@ -10,196 +10,251 @@ import time
 from pathlib import Path
 
 import pytest
-
-from zog.box_control.project import Project
-from zog.root_control import issuer_https_receiver as receiver
-from zog.root_control.issuer_receipt_common import CredentialReceiptDenied
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from zog.host_identify import credential_delivery as cd
+from zog.host_identify import signatures
+from zog.root_control import issuer_https_receiver as receiver
+from zog.root_control.issuer_receipt_common import CredentialReceiptDenied
 
-def profile(project="/approved/project"):
-    return dict(schema=receiver.PROFILE_SCHEMA, project=project,
-        https_origin="https://command.example.org",
-        tls_authority_pin_sha256="a"*64, station_signer_pin_sha256="b"*64,
-        owner_authority_sha256="c"*64, host_id="73c77e1f-53b8-4a73-92a1-e610814db521",
-        installation_id="73c77e1f-53b8-4a73-92a1-e610814db522",
-        state_volume_id="73c77e1f-53b8-4a73-92a1-e610814db523",
-        host_fingerprint="d"*64, registry_id="command-center",
-        authorization_id="e"*64, assignment_id="73c77e1f-53b8-4a73-92a1-e610814db524",
-        assignment_revision=8, receipt_sha256="f"*64, purpose=receiver.PURPOSE,
-        credential_id="73c77e1f-53b8-4a73-92a1-e610814db525",
-        credential_revision=5,
-        grant_id="a"*32,
-        storage_id="b"*32,
-        policy_sha256="1"*64, consumer_uid=24321)
+VECTOR = Path(__file__).parent / "fixtures" / "credential-delivery-v1-vector.json"
 
 
-def signed_reply(p, request, wire, key, *, token=b"private-token-placeholder-ABCDEFGHIJKLMNOP"):
-    names=("host_id", "installation_id", "state_volume_id", "registry_id",
-           "host_fingerprint", "authorization_id", "assignment_id",
-           "assignment_revision", "receipt_sha256", "credential_id",
-           "credential_revision", "storage_id", "grant_id", "policy_sha256", "consumer_uid")
-    signed={n:p[n] for n in names}
-    now=int(time.time())
-    signed.update(schema=receiver.RESPONSE_SCHEMA, purpose=receiver.PURPOSE,
-        consumer=receiver.CONSUMER, request_sha256=hashlib.sha256(wire).hexdigest(),
-        nonce=request["nonce"], issued_at=now, expires_at=now+30,
-        token_base64=base64.b64encode(token).decode())
-    signed["signature"]=base64.b64encode(
-        key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(signed))).decode()
-    return receiver.canonical(signed)
+def fixture():
+    v = json.loads(VECTOR.read_text())
+    host = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(v["host_seed_hex"]))
+    ca = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(v["authority_seed_hex"]))
+    return v, host, ca
 
 
-def test_profile_preserves_retained_opaque_grant_and_storage_ids():
-    p=profile()
-    assert p["grant_id"] == "a"*32
-    assert p["storage_id"] == "b"*32
-
-
-def test_https_request_carries_exact_authority_purpose_and_one_nonce():
-    p=profile()
-    request, wire=receiver._request(p)
-    assert request["purpose"]=="issuer-cloudflare-dns01"
-    assert request["consumer"]=="certify-manage"
-    assert request["consumer_uid"]==24321
-    assert len(wire)<=receiver._MAX_REQUEST
-    assert json.loads(wire)==request
-    assert request["credential_revision"]==5
-
-
-@pytest.mark.parametrize("changed", [
-    "host_id", "installation_id", "state_volume_id", "registry_id",
-    "host_fingerprint", "authorization_id", "assignment_id",
-    "assignment_revision", "receipt_sha256", "credential_id",
-    "credential_revision", "storage_id", "grant_id", "policy_sha256",
-    "consumer_uid", "purpose", "consumer", "nonce", "request_sha256",
-])
-def test_station_signed_response_rejects_cross_identity_and_revision_substitution(changed):
-    p=profile()
-    req,wire=receiver._request(p)
-    key=Ed25519PrivateKey.generate()
-    response=json.loads(signed_reply(p,req,wire,key))
-    response[changed] = response[changed]+1 if type(response[changed]) is int else "other"
-    # Even an independently valid station signature cannot authorize a
-    # different Host/consumer/revision/request.
-    signature=response.pop("signature")
-    response["signature"]=base64.b64encode(
-        key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(response))).decode()
-    with pytest.raises(CredentialReceiptDenied):
-        receiver._signed_response(receiver.canonical(response),request=req,
-            request_bytes=wire,profile=p,authority_key=key.public_key())
-
-
-def test_accepted_response_and_wrong_signer_expiry_partial_trailing_and_dup_fields():
-    p=profile()
-    req,wire=receiver._request(p)
-    key=Ed25519PrivateKey.generate()
-    signed=signed_reply(p,req,wire,key)
-    assert receiver._signed_response(signed,request=req,request_bytes=wire,
-           profile=p,authority_key=key.public_key()).startswith(b"private-token")
-    other=Ed25519PrivateKey.generate()
-    with pytest.raises(CredentialReceiptDenied):
-        receiver._signed_response(signed,request=req,request_bytes=wire,
-            profile=p,authority_key=other.public_key())
-    for bad in (signed[:-2], signed+b"extra", b"{}", b" "*8193):
-        with pytest.raises(CredentialReceiptDenied):
-            receiver._signed_response(bad,request=req,request_bytes=wire,
-                profile=p,authority_key=key.public_key())
-    response=json.loads(signed)
-    response["expires_at"]=int(time.time())-1
-    response.pop("signature")
-    response["signature"]=base64.b64encode(
-        key.sign(receiver._SIGNING_DOMAIN+receiver.canonical(response))).decode()
-    with pytest.raises(CredentialReceiptDenied):
-        receiver._signed_response(receiver.canonical(response),request=req,
-            request_bytes=wire,profile=p,authority_key=key.public_key())
-
-
-def test_installed_profile_refuses_changed_tls_ca_owner_and_signer(monkeypatch):
-    p=profile()
-    project=Project(Path(p["project"]))
-    owner=b"approved owner"
-    signer=b'{"registry_id":"command-center","authority_public_key":"AQ=="}'
-    ca=b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----"
-    p["owner_authority_sha256"]=hashlib.sha256(owner).hexdigest()
-    p["station_signer_pin_sha256"]=hashlib.sha256(signer).hexdigest()
-    p["tls_authority_pin_sha256"]=hashlib.sha256(ca).hexdigest()
-    sources={
-      "/state/host-install/certificate-owner-authority/authority.json":owner,
-      "/etc/zog/host-install/certificate-assignment-authority.json":signer,
-      str(receiver._TLS_CA):ca,
+def profile(v):
+    a = v["authorization"]
+    return {
+        "schema": receiver.PROFILE_SCHEMA,
+        "project": "/approved/project",
+        "https_origin": v["origin"],
+        "tls_authority_pin_sha256": "a"*64,
+        "station_signer_pin_sha256": "b"*64,
+        "credential_authority_pin_sha256": "c"*64,
+        "owner_authority_sha256": "d"*64,
+        **{name:a[name] for name in (
+            "host_id", "host_fingerprint", "installation_id",
+            "state_volume_id", "registry_id", "credential_revision")},
+        "authorization_id": "e"*64,  # distinct local issuer authorization digest
+        "assignment_id": "00000000-0000-4000-8000-000000000011",
+        "assignment_revision": 3,
+        "receipt_sha256": "f"*64,
+        "purpose": receiver.PURPOSE,
+        "delivery_credential_id": a["credential_id"],
+        "credential_authorization_id": a["authorization_id"],
+        "credential_authorization_revision": a["revision"],
+        "grant_id": "1"*32,
+        "storage_id": "2"*32,
+        "consumer_uid": 24321,
+        "credential_id": "00000000-0000-4000-8000-000000000012",
+        "policy_sha256": "3"*64,
     }
-    monkeypatch.setattr(receiver,"_root_regular",lambda path,**kwargs:sources[str(path)])
-    monkeypatch.setattr(receiver,"_profile_path",lambda project:"profile")
-    monkeypatch.setattr(receiver,"_pairs",lambda pairs:dict(pairs))
-    # This local test injects the parsed protected profile; real production
-    # path still opens checked root:root file and rejects duplicate fields.
-    pinned = {k:v for k,v in p.items() if k not in ("credential_id","policy_sha256")}
-    sources["profile"]=receiver.canonical(pinned)
-    assert receiver._profile(project)==pinned
-    for name in (str(receiver._TLS_CA),
-                 "/state/host-install/certificate-owner-authority/authority.json",
-                 "/etc/zog/host-install/certificate-assignment-authority.json"):
-        previous=sources[name]
-        sources[name]=previous+b"modified"
+
+
+def test_exact_station_public_vectors_and_authority_key_separation():
+    v, host, ca = fixture()
+    a, r, d = v["authorization"], v["request"], v["delivery"]
+    assert receiver.PROTOCOL_SOURCE == "4a176373ff4cb47a66a8ab1b5fd3d6ff01ff2a3b"
+    assert receiver.PATH == v["request_path"]
+    assert receiver.RECEIPT_PATH == v["receipt_path"]
+    assert receiver.CANCEL_PATH == v["cancel_path"]
+    assert hashlib.sha256(cd.canonical(a)).hexdigest() == v["authorization_sha256"]
+    assert hashlib.sha256(cd.canonical(r)).hexdigest() == v["request_sha256"]
+    assert hashlib.sha256(cd.canonical(d)).hexdigest() == v["delivery_sha256"]
+    assert cd.sign_authorization(a, ca)["signature"] == v["authorization_signature_base64"]
+    assert cd.sign_delivery(d, ca)["signature"] == v["delivery_signature_base64"]
+    assert cd.verify_authorization(
+        cd.sign_authorization(a, ca), ca.public_key(),
+        expected_issuer=v["origin"], expected_binding=cd.binding(a),
+        now=v["time"]) == a
+    with pytest.raises(cd.CredentialProtocolError):
+        cd.verify_authorization(cd.sign_authorization(a, host),
+            ca.public_key(), expected_issuer=v["origin"],
+            expected_binding=cd.binding(a), now=v["time"])
+
+
+def test_signed_authorization_is_not_local_sha_digest(monkeypatch):
+    v, host, ca = fixture()
+    p = profile(v)
+    raw = cd.canonical(cd.sign_authorization(v["authorization"], ca))
+    monkeypatch.setattr(receiver, "_signed_authorization_path", lambda _: "authority")
+    monkeypatch.setattr(receiver, "_root_regular", lambda path, **kw: raw)
+    assert receiver._authorization(None, p, ca.public_key(), now=v["time"]) == v["authorization"]
+    with pytest.raises(CredentialReceiptDenied):
+        receiver._authorization(None, dict(p, state_volume_id=
+            "00000000-0000-4000-8000-000000000099"),
+            ca.public_key(), now=v["time"])
+    with pytest.raises(CredentialReceiptDenied):
+        receiver._authorization(None, p, host.public_key(), now=v["time"])
+    with pytest.raises(CredentialReceiptDenied):
+        receiver._authorization(None, dict(p, credential_authorization_revision=3),
+                                ca.public_key(), now=v["time"])
+
+
+def test_delivery_signing_and_decode_requires_canonical_envelope():
+    v, host, ca = fixture()
+    a, r, d = v["authorization"], v["request"], v["delivery"]
+    signed = cd.sign_delivery(d, ca)
+    raw = cd.canonical(signed)
+    token, public = receiver._delivery(raw, r, a, ca.public_key(), now=v["time"])
+    assert token == base64.b64decode(d["secret"])
+    assert "secret" not in public and "token" not in repr(public).lower()
+    assert public["delivery_id"] == d["delivery_id"]
+    for tamper in (
+        cd.canonical(cd.sign_delivery(dict(d, request_id="00000000-0000-4000-8000-000000000099"), ca)),
+        cd.canonical(cd.sign_delivery(d, host)),
+        raw + b" ",
+        cd.canonical(dict(signed, signature="invalid")),
+        b"not-json",
+    ):
         with pytest.raises(CredentialReceiptDenied):
-            receiver._profile(project)
-        sources[name]=previous
-    p["https_origin"]="https://command.example.org:8443"
-    sources["profile"]=receiver.canonical({k:v for k,v in p.items()
-                                            if k not in ("credential_id","policy_sha256")})
+            receiver._delivery(tamper, r, a, ca.public_key(), now=v["time"])
+
+
+def test_exact_rfc9421_request_and_secret_free_install_receipt():
+    v, host, ca = fixture()
+    now = int(time.time())
+    a = dict(v["authorization"], approved_at=now-10, expires_at=now+3600)
+    state = cd.new_ledger(a)
+    req = receiver._new_request(a, state, now=now)
+    assert set(req) == set(v["request"]) and req["schema"] == cd.REQUEST_SCHEMA
+    prepared = cd.prepare_request(v["origin"]+receiver.PATH, req, a, host,
+                                  nonce="A"*24)
+    assert prepared.url == v["origin"]+v["request_path"]
+    decoded, nonce, expiry = cd.verify_request_http(
+        prepared.url, "POST", dict(prepared.headers), prepared.body,
+        host.public_key(), a, now=now)
+    assert decoded == req and nonce == "A"*24
+    assert prepared.body == cd.canonical(req)
+    with pytest.raises(ValueError):
+        cd.verify_request_http(v["origin"]+"/api/hosts/credential-delivery/v1/receive/",
+                               "POST", dict(prepared.headers), prepared.body,
+                               host.public_key(), a, now=now)
+    delivery = dict(v["delivery"], request_id=req["request_id"],
+                    issued_at=now, expires_at=now+60)
+    receipt = {
+        "schema": cd.RECEIPT_SCHEMA,
+        **cd.binding(req),
+        **{name:req[name] for name in (
+            "credential_revision","authorization_id",
+            "authorization_revision","request_id")},
+        "delivery_id": delivery["delivery_id"],
+        "receipt_id": "00000000-0000-4000-8000-000000000007",
+        "outcome": "installed", "installed_at": now,
+    }
+    posted = cd.prepare_receipt(v["origin"]+receiver.RECEIPT_PATH, receipt,
+                                req, delivery, host, nonce="B"*24)
+    observed, nonce, expiry = cd.verify_receipt_http(
+        posted.url, "POST", dict(posted.headers), posted.body,
+        host.public_key(), req, delivery, now=now)
+    assert observed == receipt and nonce == "B"*24
+    assert b"secret" not in posted.body and b"token" not in posted.body
+
+
+def test_durable_pending_unknown_and_explicit_rotation(tmp_path, monkeypatch):
+    v, _, _ = fixture()
+    project = type("ProjectStub", (), {"path": Path("/approved/project")})()
+    root = tmp_path/"https-receipts"
+    root.mkdir()
+    monkeypatch.setattr(receiver.credentials, "AUTH_ROOT", tmp_path)
+    monkeypatch.setattr(receiver.credentials, "_check_root_directory", lambda *_: None)
+    monkeypatch.setattr(receiver, "_root_regular", lambda path, **kwargs: Path(path).read_bytes())
+    auth = v["authorization"]
+    req = v["request"]
+    state = cd.admit_request(cd.new_ledger(auth), req)
+    state["rotation_required"] = True  # outbound may have reached issuer
+    receiver._save_operation(project, req, None, "pending")
+    receiver._persist_state(project, state)
+    assert receiver._load_state(project, auth) == state
+    assert receiver._operation(project)["phase"] == "pending"
+    with pytest.raises(cd.CredentialProtocolError, match="in-progress"):
+        cd.admit_request(state, dict(req, request_id=
+            "00000000-0000-4000-8000-000000000099"))
+    cancel = {
+        "schema": cd.CANCEL_SCHEMA, **cd.binding(req),
+        **{name:req[name] for name in (
+            "credential_revision", "authorization_id",
+            "authorization_revision", "request_id")},
+        "cancel_id": "00000000-0000-4000-8000-000000000008",
+        "reason": "interruption-recovery",
+        "created_at": v["time"], "expires_at": v["time"]+60,
+    }
+    cancelled = cd.record_cancel(state, cancel)
+    assert cancelled["requests"][-1]["status"] == "cancelled"
+    assert cancelled["rotation_required"] is True
+    # Rotation cannot reuse the same authorization revision.
+    with pytest.raises(cd.CredentialProtocolError):
+        cd.admit_request(cancelled, dict(req, request_id=
+            "00000000-0000-4000-8000-000000000099"))
+    assert b"secret" not in (root/receiver._state_paths(project)[1]).read_bytes()
+
+
+def test_purpose_scoped_root_admission_blocks_network(monkeypatch):
+    monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
     with pytest.raises(CredentialReceiptDenied):
-        receiver._profile(project)
+        receiver.receive_and_install("/safe/project", private_identity=None,
+            admission={"status": "protected-source-preflight-only",
+                       "native_https_accepted": False, "owner": {"status": "retained"}})
 
 
-def test_root_operation_denies_without_native_authorization_before_remote(monkeypatch):
-    p=profile("/safe/project")
-    seen=[]
-    monkeypatch.setattr(receiver.credentials,"_require_root",lambda:None)
-    monkeypatch.setattr(receiver,"_profile",lambda project:p)
-    monkeypatch.setattr(receiver,"_approval",lambda *a:seen.append("approval"))
-    monkeypatch.setattr(receiver,"_https_post",lambda *a,**kw:seen.append("network"))
-    with pytest.raises(CredentialReceiptDenied):
-        receiver.receive_and_install(p["project"],private_identity=None,
-            admission={"status":"protected-source-preflight-only"})
-    assert seen==[]
-
-
-def test_one_time_request_is_fsynced_before_network_and_never_reused(tmp_path, monkeypatch):
-    p=profile("/safe/project")
-    project=Project(Path(p["project"]))
-    directory=tmp_path/"https-receipts"
-    directory.mkdir()
-    monkeypatch.setattr(receiver.credentials,"AUTH_ROOT",tmp_path)
-    monkeypatch.setattr(receiver.credentials,"_check_root_directory",lambda path:None)
-    receiver._consume_request(project,"f"*32,profile=p)
-    saved=list(directory.iterdir())
-    assert len(saved)==1 and saved[0].read_bytes()==b"consumed\n"
-    with pytest.raises(CredentialReceiptDenied):
-        receiver._consume_request(project,"f"*32,profile=p)
-
-
-def test_verified_token_uses_only_fd_installer_and_second_authority_check(monkeypatch):
-    p=profile("/safe/project")
-    key=Ed25519PrivateKey.generate()
-    seen=[]
-    monkeypatch.setattr(receiver.credentials,"_require_root",lambda:None)
-    monkeypatch.setattr(receiver,"_profile",lambda project:p)
-    monkeypatch.setattr(receiver,"_approval",lambda *a:seen.append("approved") or (p["authorization_id"], {"credential_id":p["credential_id"],"policy_sha256":p["policy_sha256"]}))
-    monkeypatch.setattr(receiver,"_pin_key",lambda profile:key.public_key())
-    monkeypatch.setattr(receiver,"_consume_request",lambda *a,**kw:seen.append("nonce"))
-    def fake_transport(pr,request,identity,*,transport):
-        seen.append("network")
-        return signed_reply(p,request,receiver.canonical(request),key)
-    monkeypatch.setattr(receiver,"_https_post",fake_transport)
-    def fake_installer(project,fd,*,expected_authorization_id):
-        seen.append("installed")
-        assert expected_authorization_id==p["authorization_id"]
-        assert os.read(fd,4096).startswith(b"private-token")
-        return {"status":"installed"}
-    monkeypatch.setattr(receiver.credentials,"install_from_fd",fake_installer)
-    result=receiver.receive_and_install(p["project"],private_identity=object(),
-         admission={"status":"protected-source-preflight-only",
-                    "native_https_accepted":True,"owner":{"status":"retained"}})
-    assert result["status"]=="installed"
-    assert seen==["approved","nonce","network","approved","installed"]
+def test_verified_secret_only_enters_anonymous_fd_and_receipt_post(monkeypatch):
+    v, host, ca = fixture()
+    now = int(time.time())
+    a = dict(v["authorization"], approved_at=now-10, expires_at=now+3600)
+    p = profile(v)
+    request = receiver._new_request(a, cd.new_ledger(a), now=now)
+    events = []
+    monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
+    monkeypatch.setattr(receiver, "_profile", lambda proj: {k:x for k,x in p.items()
+        if k not in ("credential_id", "policy_sha256")})
+    monkeypatch.setattr(receiver, "_approval", lambda proj, prof:
+        (p["authorization_id"], {"credential_id":p["credential_id"],
+                                 "policy_sha256":p["policy_sha256"]}))
+    monkeypatch.setattr(receiver, "_authority_key", lambda prof:ca.public_key())
+    monkeypatch.setattr(receiver, "_authorization", lambda *args,**kw:a)
+    monkeypatch.setattr(receiver, "_current", lambda *args:events.append("verified"))
+    monkeypatch.setattr(receiver, "_claim", lambda *args:events.append("claimed") or request)
+    monkeypatch.setattr(receiver, "_save_delivered",
+                        lambda *args:events.append("delivery-durable"))
+    monkeypatch.setattr(receiver, "_installed",
+                        lambda *args:events.append("installed-durable"))
+    from zog.box_control.project import Project
+    def fake_post(profile, prepared, *, expected_status, transport):
+        if expected_status == 200:
+            assert prepared.url == v["origin"] + v["request_path"]
+            seen, _, _ = cd.verify_request_http(
+                prepared.url, "POST", dict(prepared.headers), prepared.body,
+                host.public_key(), a, now=now)
+            assert seen == request
+            events.append("request")
+            d = dict(v["delivery"], request_id=request["request_id"],
+                     issued_at=now, expires_at=now+60)
+            return cd.canonical(cd.sign_delivery(d, ca))
+        assert expected_status == 204
+        assert prepared.url == v["origin"] + v["receipt_path"]
+        assert b"secret" not in prepared.body
+        receipt = json.loads(prepared.body)
+        assert receipt["schema"] == cd.RECEIPT_SCHEMA
+        events.append("receipt")
+        return b""
+    monkeypatch.setattr(receiver, "_post", fake_post)
+    def installer(project, fd, *, expected_authorization_id):
+        assert expected_authorization_id == p["authorization_id"]
+        assert os.read(fd,4096) == base64.b64decode(v["delivery"]["secret"])
+        events.append("installed-fd")
+        return {"status":"installed","credential_revision":p["credential_revision"]}
+    monkeypatch.setattr(receiver.credentials, "install_from_fd", installer)
+    monkeypatch.setattr(receiver.credentials, "inspect", lambda proj: {
+        "status":"installed", "credential_revision":p["credential_revision"]})
+    result = receiver.receive_and_install(p["project"], private_identity=host,
+        admission={"status":"protected-source-preflight-only",
+                   "native_https_accepted":True,"owner":{"status":"retained"}})
+    assert result["schema"] == cd.RECEIPT_SCHEMA
+    assert events == ["verified", "claimed", "request", "delivery-durable",
+                      "verified","installed-fd","verified",
+                      "installed-durable", "receipt"]
