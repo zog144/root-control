@@ -26,11 +26,12 @@ from . import issuer_cross_host as legacy  # authority checks only; never SSH
 from .issuer_cross_host import CrossHostDenied, _deny, _root_regular, _pairs
 
 SCHEMA = "zog-protected-credential-delivery-v1"
-PURPOSE = "managed-dns01"
+PURPOSE = "issuer-cloudflare-dns01"
 CONSUMER = "certify-manage"
-PROFILE_SCHEMA = "zog-issuer-https-credential-receiver-v1"
+PROFILE_SCHEMA = "zog-issuer-https-credential-client-v1"
 RESPONSE_SCHEMA = "zog-protected-credential-response-v1"
 PATH = "/api/hosts/credential-delivery/v1/receive/"
+_TLS_CA = Path("/etc/zog/issuer-credentials/station-ca.pem")
 _SIGNING_DOMAIN = b"zog-protected-credential-delivery-response-v1\n"
 _MAX_REQUEST = 2048
 _MAX_RESPONSE = 8192
@@ -58,23 +59,22 @@ def _profile_path(project):
 def _profile(project):
     try:
         value = json.loads(_root_regular(_profile_path(project)), object_pairs_hook=_pairs)
-        fields = {"schema", "project", "https_origin", "tls_ca_path", "tls_ca_sha256",
-            "signer_pin_sha256", "owner_authority_sha256", "host_id",
+        fields = {"schema", "project", "https_origin", "tls_authority_pin_sha256",
+            "station_signer_pin_sha256", "owner_authority_sha256", "host_id",
             "installation_id", "state_volume_id", "host_fingerprint",
             "registry_id", "authorization_id", "assignment_id",
-            "assignment_revision", "receipt_sha256", "credential_id",
-            "credential_revision", "grant_id", "storage_id", "policy_sha256",
-            "consumer_uid"}
+            "assignment_revision", "receipt_sha256", "purpose",
+            "credential_revision", "grant_id", "storage_id", "consumer_uid"}
         if type(value) is not dict or set(value) != fields or value["schema"] != PROFILE_SCHEMA:
             _deny()
         if value["project"] != str(project.path):
             _deny()
         for name in ("host_id", "installation_id", "state_volume_id",
-                     "assignment_id", "credential_id", "grant_id", "storage_id"):
+                     "assignment_id", "grant_id", "storage_id"):
             if type(value[name]) is not str or not _UUID.fullmatch(value[name]):
                 _deny()
         for name in ("host_fingerprint", "authorization_id", "receipt_sha256",
-                     "policy_sha256", "tls_ca_sha256", "signer_pin_sha256",
+                     "tls_authority_pin_sha256", "station_signer_pin_sha256",
                      "owner_authority_sha256"):
             if type(value[name]) is not str or not _HEX.fullmatch(value[name]):
                 _deny()
@@ -93,14 +93,14 @@ def _profile(project):
                 or not re.fullmatch(r"[a-z0-9.-]{1,253}", origin.hostname)):
             _deny()
         if (value["https_origin"] != "https://" + origin.hostname
-                or not value["tls_ca_path"].startswith("/etc/zog/")):
+                or value["purpose"] != PURPOSE):
             _deny()
         authority = _root_regular("/state/host-install/certificate-owner-authority/authority.json")
         pin = _root_regular("/etc/zog/host-install/certificate-assignment-authority.json", mode=0o444)
-        ca = _root_regular(value["tls_ca_path"], max_bytes=16384)
+        ca = _root_regular(_TLS_CA, max_bytes=16384)
         if (hashlib.sha256(authority).hexdigest() != value["owner_authority_sha256"]
-                or hashlib.sha256(pin).hexdigest() != value["signer_pin_sha256"]
-                or hashlib.sha256(ca).hexdigest() != value["tls_ca_sha256"]
+                or hashlib.sha256(pin).hexdigest() != value["station_signer_pin_sha256"]
+                or hashlib.sha256(ca).hexdigest() != value["tls_authority_pin_sha256"]
                 or b"BEGIN CERTIFICATE" not in ca):
             _deny()
         return value
@@ -120,14 +120,17 @@ def _approval(project, profile):
             or aid != profile["authorization_id"]):
         _deny()
     for k in ("assignment_id", "assignment_revision", "receipt_sha256",
-              "credential_id", "credential_revision", "grant_id", "storage_id",
-              "policy_sha256"):
+              "credential_revision", "grant_id", "storage_id"):
         if approved.get(k) != profile[k]:
             _deny()
+    if (not credentials._UUID.fullmatch(approved.get("credential_id", ""))
+            or not credentials._HEX64.fullmatch(approved.get("policy_sha256", ""))):
+        _deny()
     grant = credentials._authorization(project, credentials._paths(project)[0])[1]
     if grant.get("uid") != profile["consumer_uid"]:
         _deny()
-    return aid
+    return aid, {"credential_id": approved["credential_id"],
+                 "policy_sha256": approved["policy_sha256"]}
 
 
 def _pin_key(profile):
@@ -224,7 +227,7 @@ def _https_post(profile, request, private_identity, *, transport=None):
     session.trust_env = False
     try:
         resp = session.send(signed, timeout=(5, 10), allow_redirects=False,
-                            verify=profile["tls_ca_path"], stream=True)
+                            verify=str(_TLS_CA), stream=True)
         try:
             if (resp.status_code != 200
                     or resp.headers.get("Content-Type", "").split(";")[0] != "application/json"
@@ -281,15 +284,16 @@ def receive_and_install(project_root, *, private_identity, admission,
             or admission.get("native_https_accepted") is not True
             or admission.get("owner", {}).get("status") != "retained"):
         _deny()
-    identifier = _approval(project, initial)
+    identifier, selected = _approval(project, initial)
+    binding = {**initial, **selected}
     key = _pin_key(initial)
-    request, request_bytes = _request(initial)
+    request, request_bytes = _request(binding)
     # Persist before any outbound bytes: an interrupted request is not replayed.
     _consume_request(project, request["nonce"], profile=initial)
     raw = _https_post(initial, request, private_identity, transport=transport)
     token = _signed_response(raw, request=request, request_bytes=request_bytes,
-                             profile=initial, authority_key=key)
-    if (_profile(project) != initial or _approval(project, initial) != identifier
+                             profile=binding, authority_key=key)
+    if (_profile(project) != initial or _approval(project, initial) != (identifier, selected)
             or _station_key_bytes(_pin_key(initial)) != _station_key_bytes(key)):
         _deny()
     reader, writer = os.pipe()
