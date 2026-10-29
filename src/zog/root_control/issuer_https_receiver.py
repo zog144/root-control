@@ -22,8 +22,10 @@ from urllib.parse import urlsplit
 from zog.box_control.project import Project
 from . import issuer_credentials as credentials
 from . import issuer_station_transfer as local
-from . import issuer_cross_host as legacy  # authority checks only; never SSH
-from .issuer_cross_host import CrossHostDenied, _deny, _root_regular, _pairs
+from .issuer_receipt_common import (
+    CredentialReceiptDenied, deny as _deny, root_regular as _root_regular,
+    pairs as _pairs,
+)
 
 SCHEMA = "zog-protected-credential-delivery-v1"
 PURPOSE = "issuer-cloudflare-dns01"
