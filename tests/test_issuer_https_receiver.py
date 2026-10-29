@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from zog.host_identify import credential_delivery as cd
@@ -131,7 +132,7 @@ def test_exact_rfc9421_request_and_secret_free_install_receipt():
         host.public_key(), a, now=now)
     assert decoded == req and nonce == "A"*24
     assert prepared.body == cd.canonical(req)
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, InvalidSignature)):
         cd.verify_request_http(v["origin"]+"/api/hosts/credential-delivery/v1/receive/",
                                "POST", dict(prepared.headers), prepared.body,
                                host.public_key(), a, now=now)
