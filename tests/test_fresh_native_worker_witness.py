@@ -71,7 +71,7 @@ def _native(monkeypatch, *, wrong_root=False, foreign=False, bad_swap=False):
     if foreign:
         entries["/foreign"] = ("8:1", "rw", "ext4")
     mountinfo = "\n".join(
-        f"{10 + index} 1 {d} / {target} {flags},relatime - {fstype} source rw"
+        f"{10 + index} {1 if target == '/' else 10} {d} / {target} {flags},relatime - {fstype} source rw"
         for index, (target,(d,flags,fstype)) in enumerate(entries.items()))+"\n"
     def fake_read(p, limit=262144):
         p = str(p)
