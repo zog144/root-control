@@ -541,6 +541,7 @@ def receive_and_install(project_root, *, private_identity, admission,
         finally:
             os.close(reader)
         if (type(installed) is not dict or installed.get("status") != "installed"
+                or installed.get("replayed") is not False
                 or installed.get("credential_revision") !=
                    profile["credential_revision"]):
             _deny()
