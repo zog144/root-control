@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
-from cryptography.exceptions import InvalidSignature
+from http_message_signatures.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from zog.host_identify import credential_delivery as cd
