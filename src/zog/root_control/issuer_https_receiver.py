@@ -472,6 +472,32 @@ def _installed(project, authorization, request, metadata, receipt):
             _deny()
 
 
+def _assert_installed_bytes(project, profile):
+    """Read back protected installed result AND approved private issuer target.
+
+    The private-file mode/owner/inode and exact selected execution grant are
+    independently checked by issuer_credentials.require_installed; inspecting
+    a JSON audit alone would not establish installed-byte durability.
+    """
+    approval_path, _, _, _ = credentials._paths(project)
+    approved, grant = credentials._authorization(project, approval_path)
+    if (approved.get("storage_id") != profile["storage_id"]
+            or approved.get("grant_id") != profile["grant_id"]
+            or grant.get("uid") != profile["consumer_uid"]):
+        _deny()
+    credentials.require_installed(project.path, {
+        "application_name": CONSUMER,
+        "selected_program": "renew",  # read-only protected admission check only
+        "persistent_storage_id": approved["storage_id"],
+        "execution_binding": grant,
+    })
+    record = credentials.inspect(project.path)
+    if (record.get("status") != "installed"
+            or record.get("credential_revision") !=
+               profile["credential_revision"]):
+        _deny()
+
+
 def receive_and_install(project_root, *, private_identity, admission,
                         transport=None):
     """Explicit root-selected operation, not a controller RPC or a retry loop.
@@ -518,12 +544,9 @@ def receive_and_install(project_root, *, private_identity, admission,
                 or installed.get("credential_revision") !=
                    profile["credential_revision"]):
             _deny()
-        # Independently read back durable issuer installed audit and FD target.
-        inspected = credentials.inspect(project.path)
-        if (inspected.get("status") != "installed"
-                or inspected.get("credential_revision") !=
-                   profile["credential_revision"]):
-            _deny()
+        # Independently re-open the actual private 0600 target and compare
+        # the current approved storage/grant. No issuer process is launched.
+        _assert_installed_bytes(project, binding)
         _current(project, binding, key, auth)
         moment = int(time.time())
         receipt = {
