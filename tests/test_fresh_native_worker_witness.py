@@ -155,7 +155,7 @@ def test_unaccounted_pseudo_writes_fail_closed(monkeypatch, target, fstype):
     def extra(path, limit=262144):
         text = base(path, limit)
         if str(path).endswith("/mountinfo"):
-            return text + f"199 10 0:45 / {target} rw - {fstype} none rw\n"
+            return text + f"199 {16 if target.startswith('/dev/') else 10} 0:45 / {target} rw - {fstype} none rw\n"
         return text
     monkeypatch.setattr(witness, "_read", extra)
     with pytest.raises(RuntimeError, match="writable|foreign"):
