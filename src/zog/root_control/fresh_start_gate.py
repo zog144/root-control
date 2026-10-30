@@ -140,6 +140,9 @@ def _timer_active(systemd, now_us):
         raise SystemdBackendError("fresh PID1 deadline not active or expired")
 
 
+HUGETLB_ROOT = Path("/sys/fs/cgroup")
+
+
 def hugetlb_ready():
     """Independent read-only kernel prerequisite immediately before PID1.
 
@@ -147,7 +150,7 @@ def hugetlb_ready():
     caller-supplied empty-writer receipt. There is no root-control permission
     to activate any PID1-owned ancestor controller.
     """
-    root = Path("/sys/fs/cgroup")
+    root = HUGETLB_ROOT
     slice_root = root / FRESH_COMPILER_PARENT_SLICE
     a, b = root.lstat(), slice_root.lstat()
     if (not stat.S_ISDIR(a.st_mode) or not stat.S_ISDIR(b.st_mode)
