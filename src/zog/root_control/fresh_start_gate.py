@@ -155,8 +155,10 @@ def _hugetlb_host_mount(root):
     '/', in the same cgroup namespace as PID1. Do not activate controllers.
     """
     try:
-        if (Path("/proc/self/ns/cgroup").stat().st_ino !=
-                Path("/proc/1/ns/cgroup").stat().st_ino):
+        local_ns = Path("/proc/self/ns/cgroup").stat()
+        pid1_ns = Path("/proc/1/ns/cgroup").stat()
+        if ((local_ns.st_dev, local_ns.st_ino) !=
+                (pid1_ns.st_dev, pid1_ns.st_ino)):
             raise SystemdBackendError("fresh HugeTLB reader not in PID1 cgroup namespace")
         rows = []
         for line in _hugetlb_mountinfo().splitlines():
