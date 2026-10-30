@@ -170,12 +170,12 @@ def test_hugetlb_prestart_is_checked_before_and_after_one_time_claim(monkeypatch
         gate.SystemdBackendError("HugeTLB not ready")))
     with pytest.raises(gate.SystemdBackendError, match="HugeTLB"):
         gate.claim(backend=backend, project_root=BIND["project_root"],
-                   job_id=JOB_ID, request=REQUEST)
+                   job_id=JOB, request=REQUEST)
     assert writes == []
     monkeypatch.setattr(gate, "hugetlb_ready", lambda: True)
     gate.claim(backend=backend, project_root=BIND["project_root"],
-               job_id=JOB_ID, request=REQUEST)
+               job_id=JOB, request=REQUEST)
     monkeypatch.setattr(gate, "hugetlb_ready", lambda: (_ for _ in ()).throw(
         gate.SystemdBackendError("HugeTLB lost before PID1")))
     with pytest.raises(gate.SystemdBackendError, match="HugeTLB"):
-        gate.revalidate_before_pid1(backend=backend, job_id=JOB_ID)
+        gate.revalidate_before_pid1(backend=backend, job_id=JOB)
