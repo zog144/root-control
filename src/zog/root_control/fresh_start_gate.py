@@ -143,6 +143,36 @@ def _timer_active(systemd, now_us):
 HUGETLB_ROOT = Path("/sys/fs/cgroup")
 
 
+def _hugetlb_mountinfo():
+    return Path("/proc/self/mountinfo").read_text()
+
+
+def _hugetlb_host_mount(root):
+    """The observed controller must be the real host-root cgroup2 mount.
+
+    Checking inode/device alone also accepts a substituted tmpfs directory.
+    Require a unique cgroup2 mount at the exact mount point with mount root
+    '/', in the same cgroup namespace as PID1. Do not activate controllers.
+    """
+    try:
+        if (Path("/proc/self/ns/cgroup").stat().st_ino !=
+                Path("/proc/1/ns/cgroup").stat().st_ino):
+            raise SystemdBackendError("fresh HugeTLB reader not in PID1 cgroup namespace")
+        rows = []
+        for line in _hugetlb_mountinfo().splitlines():
+            fields = line.split(" - ", 1)
+            if len(fields) == 2:
+                left, right = fields
+                l = left.split()
+                r = right.split()
+                if len(l) > 5 and l[4] == str(root):
+                    rows.append((l[3], r[0] if r else None))
+        if rows != [("/", "cgroup2")]:
+            raise SystemdBackendError("fresh HugeTLB mount is not the host-root cgroup2")
+    except (OSError, IndexError, UnicodeError, ValueError) as exc:
+        raise SystemdBackendError("fresh HugeTLB cgroup mount inspection failed") from exc
+
+
 def hugetlb_ready():
     """Independent read-only kernel prerequisite immediately before PID1.
 
@@ -154,9 +184,13 @@ def hugetlb_ready():
     slice_root = root / FRESH_COMPILER_PARENT_SLICE
     a, b = root.lstat(), slice_root.lstat()
     if (not stat.S_ISDIR(a.st_mode) or not stat.S_ISDIR(b.st_mode)
-            or a.st_uid != 0 or b.st_uid != 0 or a.st_dev != b.st_dev
+            or a.st_uid != 0 or b.st_uid != 0
+            or a.st_gid != 0 or b.st_gid != 0
+            or (a.st_mode | b.st_mode) & 0o022
+            or a.st_dev != b.st_dev or root.is_symlink()
             or slice_root.is_symlink()):
         raise SystemdBackendError("untrusted HugeTLB parent cgroup")
+    _hugetlb_host_mount(root)
     def tokens(path):
         if path.is_symlink():
             raise SystemdBackendError("symlinked HugeTLB cgroup control")
@@ -167,7 +201,8 @@ def hugetlb_ready():
         if len(raw) > 4096:
             raise SystemdBackendError("oversized HugeTLB controller state")
         return frozenset(raw.decode("ascii").split())
-    if ("hugetlb" not in tokens(root / "cgroup.subtree_control")
+    if ("hugetlb" not in tokens(root / "cgroup.controllers")
+            or "hugetlb" not in tokens(root / "cgroup.subtree_control")
             or "hugetlb" not in tokens(slice_root / "cgroup.controllers")):
         raise SystemdBackendError("HugeTLB ancestor controller not activated")
     paths = sorted(slice_root.glob("hugetlb.*.max"))
