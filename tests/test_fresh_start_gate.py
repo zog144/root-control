@@ -151,6 +151,17 @@ def test_hugetlb_prestart_requires_zero_limits_and_live_root_controller(tmp_path
     (target / "hugetlb.2MB.max").write_text("0")
     (target / "hugetlb.2MB.rsvd.max").write_text("0")
     monkeypatch.setattr(gate, "HUGETLB_ROOT", base)
+    # Simulate exact native root ownership; GitHub runners are nonroot.
+    from pathlib import Path
+    from types import SimpleNamespace
+    original_lstat = Path.lstat
+    def root_owned(path, *args, **kwargs):
+        st = original_lstat(path, *args, **kwargs)
+        if path in (base, target):
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=0,
+                                   st_gid=0, st_dev=st.st_dev)
+        return st
+    monkeypatch.setattr(Path, "lstat", root_owned)
     assert gate.hugetlb_ready() is True
     (base / "cgroup.subtree_control").write_text("cpu")
     with pytest.raises(gate.SystemdBackendError, match="ancestor"):
