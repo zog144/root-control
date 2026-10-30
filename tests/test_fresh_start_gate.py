@@ -147,6 +147,7 @@ def test_hugetlb_prestart_requires_zero_limits_and_live_root_controller(tmp_path
     target = base / gate.FRESH_COMPILER_PARENT_SLICE
     target.mkdir(parents=True)
     (base / "cgroup.subtree_control").write_text("cpu hugetlb")
+    (base / "cgroup.controllers").write_text("cpu hugetlb memory")
     (target / "cgroup.controllers").write_text("hugetlb memory")
     (target / "hugetlb.2MB.max").write_text("0")
     (target / "hugetlb.2MB.rsvd.max").write_text("0")
@@ -162,6 +163,35 @@ def test_hugetlb_prestart_requires_zero_limits_and_live_root_controller(tmp_path
                                    st_gid=0, st_dev=st.st_dev)
         return st
     monkeypatch.setattr(Path, "lstat", root_owned)
+    # The normal test tree is not the host's real cgroup2 mount.
+    monkeypatch.setattr(gate, "_hugetlb_mountinfo", lambda:
+        f"30 1 0:40 / {base} rw - cgroup2 cgroup rw")
+    real_stat = Path.stat
+    def pid1_namespace(path, *args, **kwargs):
+        if str(path) in ("/proc/self/ns/cgroup", "/proc/1/ns/cgroup"):
+            return SimpleNamespace(st_dev=42, st_ino=31415)
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", pid1_namespace)
+    assert gate.hugetlb_ready() is True
+    monkeypatch.setattr(gate, "_hugetlb_mountinfo", lambda:
+        f"30 1 0:40 /foreign {base} rw - cgroup2 cgroup rw")
+    with pytest.raises(gate.SystemdBackendError, match="host-root cgroup2"):
+        gate.hugetlb_ready()
+    monkeypatch.setattr(gate, "_hugetlb_mountinfo", lambda:
+        f"30 1 0:40 / {base} rw - tmpfs none rw")
+    with pytest.raises(gate.SystemdBackendError, match="host-root cgroup2"):
+        gate.hugetlb_ready()
+    monkeypatch.setattr(gate, "_hugetlb_mountinfo", lambda:
+        f"30 1 0:40 / {base} rw - cgroup2 cgroup rw")
+    def foreign_namespace(path, *args, **kwargs):
+        if str(path) in ("/proc/self/ns/cgroup", "/proc/1/ns/cgroup"):
+            return SimpleNamespace(st_dev=42, st_ino=(
+                31416 if str(path).startswith("/proc/self/") else 31415))
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", foreign_namespace)
+    with pytest.raises(gate.SystemdBackendError, match="PID1 cgroup namespace"):
+        gate.hugetlb_ready()
+    monkeypatch.setattr(Path, "stat", pid1_namespace)
     assert gate.hugetlb_ready() is True
     (base / "cgroup.subtree_control").write_text("cpu")
     with pytest.raises(gate.SystemdBackendError, match="ancestor"):
