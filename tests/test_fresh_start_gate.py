@@ -193,6 +193,11 @@ def test_hugetlb_prestart_requires_zero_limits_and_live_root_controller(tmp_path
         gate.hugetlb_ready()
     monkeypatch.setattr(Path, "stat", pid1_namespace)
     assert gate.hugetlb_ready() is True
+    target.chmod(0o777)
+    with pytest.raises(gate.SystemdBackendError, match="untrusted HugeTLB"):
+        gate.hugetlb_ready()
+    target.chmod(0o755)
+    assert gate.hugetlb_ready() is True
     (base / "cgroup.subtree_control").write_text("cpu")
     with pytest.raises(gate.SystemdBackendError, match="ancestor"):
         gate.hugetlb_ready()
