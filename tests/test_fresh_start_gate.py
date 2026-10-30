@@ -70,6 +70,7 @@ def fixture(monkeypatch, *, kind="canary"):
     monkeypatch.setattr(gate, "_update_phase", lambda obj: state.__setitem__(
         gate.PHASE, obj))
     monkeypatch.setattr(gate, "_timer_active", lambda *_: None)
+    monkeypatch.setattr(gate, "hugetlb_ready", lambda: True)
     monkeypatch.setattr(gate, "_boot", lambda: "boot-1")
     monkeypatch.setattr(gate.os, "geteuid", lambda: 0)
     backend = SimpleNamespace(parent_slice=FRESH_COMPILER_PARENT_SLICE,
@@ -139,3 +140,42 @@ def test_build_start_checks_gate_before_prepare_or_pid1(monkeypatch):
     assert "with start_gate.locked()" in code
     assert "start_attempted" in inspect.getsource(
         BuildBackend._start_after_protected_claim)
+
+
+def test_hugetlb_prestart_requires_zero_limits_and_live_root_controller(tmp_path, monkeypatch):
+    base = tmp_path / "cgroup"
+    target = base / gate.FRESH_COMPILER_PARENT_SLICE
+    target.mkdir(parents=True)
+    (base / "cgroup.subtree_control").write_text("cpu hugetlb")
+    (target / "cgroup.controllers").write_text("hugetlb memory")
+    (target / "hugetlb.2MB.max").write_text("0")
+    (target / "hugetlb.2MB.rsvd.max").write_text("0")
+    monkeypatch.setattr(gate, "HUGETLB_ROOT", base)
+    assert gate.hugetlb_ready() is True
+    (base / "cgroup.subtree_control").write_text("cpu")
+    with pytest.raises(gate.SystemdBackendError, match="ancestor"):
+        gate.hugetlb_ready()
+    (base / "cgroup.subtree_control").write_text("cpu hugetlb")
+    (target / "hugetlb.2MB.rsvd.max").write_text("max")
+    with pytest.raises(gate.SystemdBackendError, match="not zero"):
+        gate.hugetlb_ready()
+    (target / "hugetlb.2MB.rsvd.max").unlink()
+    with pytest.raises(gate.SystemdBackendError, match="reservation"):
+        gate.hugetlb_ready()
+
+
+def test_hugetlb_prestart_is_checked_before_and_after_one_time_claim(monkeypatch):
+    backend, state, writes = fixture(monkeypatch)
+    monkeypatch.setattr(gate, "hugetlb_ready", lambda: (_ for _ in ()).throw(
+        gate.SystemdBackendError("HugeTLB not ready")))
+    with pytest.raises(gate.SystemdBackendError, match="HugeTLB"):
+        gate.claim(backend=backend, project_root=BIND["project_root"],
+                   job_id=JOB_ID, request=REQUEST)
+    assert writes == []
+    monkeypatch.setattr(gate, "hugetlb_ready", lambda: True)
+    gate.claim(backend=backend, project_root=BIND["project_root"],
+               job_id=JOB_ID, request=REQUEST)
+    monkeypatch.setattr(gate, "hugetlb_ready", lambda: (_ for _ in ()).throw(
+        gate.SystemdBackendError("HugeTLB lost before PID1")))
+    with pytest.raises(gate.SystemdBackendError, match="HugeTLB"):
+        gate.revalidate_before_pid1(backend=backend, job_id=JOB_ID)
