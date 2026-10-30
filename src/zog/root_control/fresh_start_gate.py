@@ -140,6 +140,47 @@ def _timer_active(systemd, now_us):
         raise SystemdBackendError("fresh PID1 deadline not active or expired")
 
 
+def hugetlb_ready():
+    """Independent read-only kernel prerequisite immediately before PID1.
+
+    Cannot trust an earlier host-deploy approval, transient slice ID or a
+    caller-supplied empty-writer receipt. There is no root-control permission
+    to activate any PID1-owned ancestor controller.
+    """
+    root = Path("/sys/fs/cgroup")
+    slice_root = root / FRESH_COMPILER_PARENT_SLICE
+    a, b = root.lstat(), slice_root.lstat()
+    if (not stat.S_ISDIR(a.st_mode) or not stat.S_ISDIR(b.st_mode)
+            or a.st_uid != 0 or b.st_uid != 0 or a.st_dev != b.st_dev
+            or slice_root.is_symlink()):
+        raise SystemdBackendError("untrusted HugeTLB parent cgroup")
+    def tokens(path):
+        if path.is_symlink():
+            raise SystemdBackendError("symlinked HugeTLB cgroup control")
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise SystemdBackendError("missing HugeTLB kernel control") from exc
+        if len(raw) > 4096:
+            raise SystemdBackendError("oversized HugeTLB controller state")
+        return frozenset(raw.decode("ascii").split())
+    if ("hugetlb" not in tokens(root / "cgroup.subtree_control")
+            or "hugetlb" not in tokens(slice_root / "cgroup.controllers")):
+        raise SystemdBackendError("HugeTLB ancestor controller not activated")
+    paths = sorted(slice_root.glob("hugetlb.*.max"))
+    regular = [p for p in paths if not p.name.endswith(".rsvd.max")]
+    if not regular or len(paths) > 64 or len(paths) != 2 * len(regular):
+        raise SystemdBackendError("HugeTLB size or reservation limit unavailable")
+    for p in regular:
+        reserved = p.with_name(p.name[:-4] + ".rsvd.max")
+        if reserved not in paths:
+            raise SystemdBackendError("HugeTLB reserved size limit missing")
+    for path in paths:
+        if path.is_symlink() or path.read_text().strip() != "0":
+            raise SystemdBackendError("HugeTLB worker allocation not zero bounded")
+    return True
+
+
 def claim(*, backend, project_root, job_id, request):
     """Atomic exact grant consumption. Caller MUST hold locked() until PID1.
 
@@ -181,6 +222,7 @@ def claim(*, backend, project_root, job_id, request):
             or now_sec >= record["started_monotonic_seconds"] + MAX_SECONDS - 30
             or now_sec - record.get("last_monotonic_seconds", 0) > 60):
         raise SystemdBackendError("fresh worker start passed deadline/heartbeat")
+    hugetlb_ready()
     _timer_active(backend.systemd, now // 1000)
     expected_phase = ("armed-idle" if grant["kind"] == "canary"
                       else "canary-clean-idle")
@@ -252,5 +294,6 @@ def revalidate_before_pid1(*, backend, job_id):
             or now < state.get("last_monotonic_seconds", 0)
             or now - state.get("last_monotonic_seconds", 0) > 60):
         raise SystemdBackendError("budget expired during protected worker preparation")
+    hugetlb_ready()
     _timer_active(backend.systemd, time.monotonic_ns() // 1000)
     return True
