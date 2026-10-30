@@ -118,9 +118,11 @@ def test_build_payload_mounts_unprivileged_hook_and_keeps_sandbox(registered,tmp
     request['environment']['LD_PRELOAD']='/image-build/source/hostile.so'
     backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
     props=backend.systemd.properties
-    executable,argv,flags=props['ExecStopPostEx'].value[0]
+    executable,argv,ignore_failure=props['ExecStopPost'].value[0]
+    assert props['ExecStopPost'].signature == 'a(sasb)'
     assert executable==argv[0]=='/run/zog-journal/wait' and argv[1]=='1'*64
-    assert flags==['no-env-expand','ignore-failure']
+    assert ignore_failure is True
+    assert 'ExecStopPostEx' not in props
     assert props['User'].value=='12345' and props['NoNewPrivileges'].value
     assert props['CapabilityBoundingSet'].value==0 and props['PrivateNetwork'].value
     assert props['BindReadOnlyPaths'].value==[

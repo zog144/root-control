@@ -6,6 +6,7 @@ import os
 import pwd
 import grp
 import re
+import stat
 import shutil
 import subprocess
 import time
@@ -134,8 +135,20 @@ class BusctlSystemdBackend:
 
     @classmethod
     def _validate_unit(cls, project_root: str | Path, unit_name: str) -> Path:
-        root, _identity, prefix = cls._project(project_root)
-        if not unit_name.startswith(prefix) or not unit_name.endswith((".service", ".slice")):
+        root, identity, prefix = cls._project(project_root)
+        # The *only* alternate slice prefix is the reviewed fresh compiler
+        # child of host-deploy's protected parent. PID1's hierarchical slice
+        # naming requires this prefix; the ordinary Project prefix cannot
+        # represent a descendant of zogfreshcrossbootstrapoct25.slice.
+        fresh_child = (
+            identity == "fresh-cross-bootstrap-oct25"
+            and re.fullmatch(
+                r"zogfreshcrossbootstrapoct25-build[0-9a-f]{32}\.slice", unit_name
+            ) is not None
+        )
+        if not fresh_child and (
+                not unit_name.startswith(prefix)
+                or not unit_name.endswith((".service", ".slice"))):
             raise SystemdBackendError(
                 f"unit does not belong to project {root.name!r}: {unit_name!r}"
             )
@@ -710,7 +723,120 @@ class BusctlSystemdBackend:
         synchronize_directory(parent)
 
     @classmethod
+    def _validate_program_selection(cls, project_root, definition):
+        """Privilege-bound confirmation of a single recorded program intent.
+
+        The caller may not select another unit/command by altering a service
+        dictionary. The authoritative operation and original request have
+        already been saved durably before root-control accepts a start.
+        """
+        selected = definition.get('selected_program')
+        application = str(definition.get('application_name', ''))
+        program = str(definition.get('program_name', ''))
+        # The certificate issuer is a fixed managed lifecycle, not a place
+        # to smuggle an ad-hoc long-running inspection service through an
+        # otherwise valid execution UID or software-view binding.  Preparation
+        # is a separate controller-owned workflow, not a selected action.
+        if application == 'certify-manage':
+            if program not in {'prepare', 'issue', 'renew', 'inspect', 'stage'}:
+                raise SystemdBackendError(
+                    'unsupported certificate lifecycle program'
+                )
+            if selected == 'prepare':
+                raise SystemdBackendError(
+                    'certificate preparation is not a selected runtime'
+                )
+            if selected is None and program != 'prepare':
+                raise SystemdBackendError(
+                    'certificate lifecycle command requires selected-program authority'
+                )
+        if selected is None:
+            return
+        if (not isinstance(selected, str) or selected != program
+                or not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', selected)):
+            raise SystemdBackendError('selected program does not match service identity')
+        if not definition.get('execution_binding') or not definition.get('persistent_storage_id'):
+            raise SystemdBackendError('selected program requires managed persistent credentials')
+        from zog.box_control.operations import OperationStore
+        from zog.box_control.project import Project
+        from zog.box_control.requests import ApplicationRequestStore
+        project = Project(Path(project_root))
+        try:
+            candidates = [
+                record for record in OperationStore(project).records()
+                if record['new_runtime_id'] == definition.get('runtime_id')
+            ]
+            if len(candidates) != 1:
+                raise ValueError('no unique selected-program launch record')
+            record = candidates[0]
+            snapshot = record['application']
+            programs = snapshot['programs']
+            if (record['operation'] != 'launch'
+                    or record['phase'] != 'launching'
+                    or not record['request_id']
+                    or record.get('selected_program') != selected
+                    or snapshot.get('selected_program') != selected
+                    or snapshot.get('name') != application
+                    or len(programs) != 1 or programs[0]['name'] != selected):
+                raise ValueError('selected-program operation intent changed')
+            saved = programs[0]
+            if (list(saved['command']) != list(definition.get('command', ()))
+                    or list(saved['environment']) != list(definition.get('environment', ()))
+                    or (saved.get('working_directory') or '/') != definition.get('working_directory')
+                    or saved.get('user') != definition.get('user')
+                    or saved.get('group') != definition.get('group')
+                    or saved.get('execution_timeout_seconds') != definition.get('execution_timeout_seconds')):
+                raise ValueError('selected command differs from prepared operation')
+            if (snapshot.get('execution_binding') != definition['execution_binding']
+                    or snapshot.get('storage_id') != definition['persistent_storage_id']):
+                raise ValueError('selected-program grant or storage identity changed')
+            if (definition['unit_name'] not in record['attempted_units']
+                    or len(record['attempted_units']) != 1):
+                raise ValueError('selected-program start intent not recorded exactly once')
+            from zog.box_control.runtime.reference import RuntimeReferenceStore
+            references = RuntimeReferenceStore.decode(record['references'])
+            ref = references.get(definition['runtime_id'])
+            if (ref is None or ref.request_id != record['request_id']
+                    or ref.application != application
+                    or ref.execution_binding != definition['execution_binding']
+                    or len(ref.programs) != 1
+                    or ref.programs[0].program != selected
+                    or ref.programs[0].unit_name != definition['unit_name']
+                    or list(ref.programs[0].command) != list(definition['command'])):
+                raise ValueError('selected-program runtime reference disagrees with intent')
+            requests = ApplicationRequestStore(
+                project.application_request_dir, project.application_request_result_dir
+            )
+            path = requests.request_dir / (record['request_id'] + '.json')
+            queued = requests.load(path)
+            if (queued.operation.value != 'launch'
+                    or queued.application != application
+                    or queued.program_name != selected):
+                raise ValueError('saved request selector differs from operation intent')
+        except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError) as exc:
+            raise SystemdBackendError('selected-program authority is unavailable or disagrees') from exc
+
+    @staticmethod
+    def _validate_local_login_manager(definition):
+        """Reserved privilege boundary: no greetd/PAM seat role exists in v1.
+
+        This is a fail-closed gate for known login-manager declarations, not
+        an authorization system for differently named privileged programs.
+        An eventual role must validate an exact grant, PAM/seat/VT/logind,
+        software view, command, identity and controller operation here.
+        """
+        app = str(definition.get("application_name", ""))
+        program = str(definition.get("program_name", ""))
+        reserved = {"greetd", "seatd", "login-manager", "display-manager",
+                    "local-login-manager", "greetd-daemon"}
+        if app in reserved or program in reserved:
+            raise SystemdBackendError(
+                "local seat login-manager authority is not implemented"
+            )
+
+    @classmethod
     def _validate_service_definition(cls, project_root, generation, definition):
+        cls._validate_local_login_manager(definition)
         root = cls._validate_unit(project_root, str(definition["unit_name"]))
         cls._validate_unit(project_root, str(definition["slice_name"]))
         generation = str(generation)
@@ -760,6 +886,19 @@ class BusctlSystemdBackend:
             if not str(target).startswith("/") or ".." in Path(str(target)).parts:
                 raise SystemdBackendError(f"invalid writable bind target: {target!r}")
         cls._validate_execution_binding(project_root, definition)
+        cls._validate_program_selection(project_root, definition)
+        # DNS-01 requires a separate host-owner installed, issuer-private
+        # Cloudflare token with a current protected authorization revision.
+        # No daemon caller can select its source, token or destination.
+        if (definition.get("application_name") == "certify-manage"
+                and definition.get("selected_program") in ("issue", "renew")):
+            from .issuer_credentials import require_installed, IssuerCredentialError
+            try:
+                require_installed(project_root, definition)
+            except (IssuerCredentialError, OSError, ValueError) as exc:
+                raise SystemdBackendError(
+                    "issuer-only DNS credential installation is unavailable or revoked"
+                ) from exc
         cls._validate_host_bindings(project_root, definition)
         cls._validate_software_binding(project_root, definition)
         from zog.box_control.mounts import validate, inventory
@@ -986,11 +1125,26 @@ class BusctlSystemdBackend:
             try:
                 path.mkdir(mode=0o700)
             except FileExistsError:
-                info = path.stat()
-                if not path.is_dir() or (info.st_uid, info.st_gid) != (uid, gid):
-                    raise SystemdBackendError('existing persistent directory ownership disagrees; explicit repair required')
+                info = path.lstat()
+                if (not stat.S_ISDIR(info.st_mode)
+                        or (info.st_uid, info.st_gid) != (uid, gid)):
+                    raise SystemdBackendError(
+                        'existing persistent directory ownership disagrees; explicit repair required'
+                    )
+                if grant is not None and stat.S_IMODE(info.st_mode) != 0o700:
+                    # Never auto-repair the permissions of an existing
+                    # certificate/account/key storage directory on launch.
+                    raise SystemdBackendError(
+                        'managed persistent directory mode drift; explicit owner review required'
+                    )
             else:
                 os.chown(path, uid, gid)
+                if grant is not None:
+                    # Creation respects arbitrary root-control UMask. Newly
+                    # issued grant storage must have exact private DAC mode.
+                    os.chmod(path, 0o700)
+            if grant is not None and stat.S_IMODE(path.lstat().st_mode) != 0o700:
+                raise SystemdBackendError('managed persistent directory is not private 0700')
             synchronize_directory(path)
             synchronize_directory(base)
 

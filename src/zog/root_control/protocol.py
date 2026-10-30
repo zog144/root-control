@@ -23,8 +23,23 @@ def recv_exact(sock, size, *, deadline=None):
         size -= len(chunk)
     return b"".join(chunks)
 
+def _unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate request field")
+        result[key] = value
+    return result
+
+
 def decode(sock, *, deadline=None):
     length = struct.unpack("!I", recv_exact(sock, 4, deadline=deadline))[0]
-    if length > MAX_MESSAGE:
-        raise ValueError("message too large")
-    return json.loads(recv_exact(sock, length, deadline=deadline).decode())
+    if not 0 < length <= MAX_MESSAGE:
+        raise ValueError("invalid message length")
+    result = json.loads(recv_exact(sock, length, deadline=deadline).decode("utf-8"),
+                        object_pairs_hook=_unique_pairs,
+                        parse_constant=lambda _: (_ for _ in ()).throw(
+                            ValueError("invalid JSON constant")))
+    if type(result) is not dict:
+        raise ValueError("request must be an object")
+    return result

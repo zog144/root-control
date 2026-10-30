@@ -19,6 +19,21 @@ from .systemd import SystemdBackendError
 from dbus_next import Variant
 
 
+# The one approved host-deploy fresh compiler parent. This is selected by
+# root-control's protected build-only role, never an RPC payload or a
+# controller-generated per-job name.
+FRESH_COMPILER_PROJECT = "fresh-cross-bootstrap-oct25"
+FRESH_COMPILER_PARENT_SLICE = "zogfreshcrossbootstrapoct25.slice"
+FRESH_COMPILER_LOG_NAMESPACE = "zogfreshcrossbootstrapoct25"
+FRESH_COMPILER_BUILD_MOUNT = Path("/home/zog-cross-owner/fresh-cross-bootstrap-oct25/work")
+FRESH_COMPILER_EXTERNAL_MOUNT = Path("/var/lib/zog/host-deploy/fresh-cross-bootstrap-oct25/external")
+# This destination exists only in the fresh sidecar's private mount namespace.
+# host-deploy binds the source from the SAME 30-GiB volume before activation.
+FRESH_COMPILER_RESOURCES = Path("/var/lib/zog/build-resources")
+FRESH_COMPILER_RESOURCES_SOURCE = FRESH_COMPILER_BUILD_MOUNT / "controller-build-resources"
+FRESH_COMPILER_STATE_SOURCE = FRESH_COMPILER_BUILD_MOUNT / "state"
+
+
 def identity(value):
     if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
         raise SystemdBackendError('invalid build identity')
@@ -100,12 +115,136 @@ def root_path(root, source, output, virtual):
 
 
 class BuildBackend:
-    def __init__(self, systemd, directory=Path('/var/lib/zog/build-resources'), *, journal_barrier=None):
+    def __init__(self, systemd, directory=Path('/var/lib/zog/build-resources'), *, journal_barrier=None,
+                 parent_slice=None, authorized_project_root=None):
+        # Only the protected fresh compiler role may select this exact parent.
+        # Existing shared-controller deployments keep their original naming.
+        if parent_slice is not None:
+            if (parent_slice != FRESH_COMPILER_PARENT_SLICE
+                    or type(authorized_project_root) is not str
+                    or Path(authorized_project_root).name != FRESH_COMPILER_PROJECT
+                    or str(Path(authorized_project_root)) != authorized_project_root):
+                raise SystemdBackendError("invalid bound compiler parent slice and Project")
+        elif authorized_project_root is not None:
+            raise SystemdBackendError("unbound compiler parent Project")
         self.systemd = systemd
         self.journal_barrier = journal_barrier
-        self.directory = Path(directory)
+        self.directory = (FRESH_COMPILER_RESOURCES if parent_slice is not None else Path(directory))
+        self.parent_slice = parent_slice
+        self.authorized_project_root = authorized_project_root
+        self.log_namespace = (FRESH_COMPILER_LOG_NAMESPACE if parent_slice is not None else None)
+        # The legacy journal-barrier broker synchronizes only the default
+        # journal namespace. For this new isolated namespace we must not
+        # claim that a default-journal sync proves the build's logs durable.
+        if self.log_namespace and journal_barrier is not None:
+            raise SystemdBackendError("fresh build journal barrier lacks namespaced synchronization")
+
+    def _check_parent_binding(self, project_root, stored, logging=None):
+        if self.parent_slice is None:
+            if stored is not None or logging is not None:
+                raise SystemdBackendError("historical build parent/logging binding cannot change")
+            return
+        if (type(project_root) is not str
+                or project_root != self.authorized_project_root
+                or stored != self.parent_slice
+                or logging != self.log_namespace):
+            raise SystemdBackendError("build parent/logging binding differs from protected role")
+
+    def _verify_active_parent(self):
+        if self.parent_slice is None:
+            return
+        # No generic privileged parent-slice RPC is granted to the controller.
+        # Read exact manager properties directly from this pinned identifier.
+        obj = self.systemd._get_unit_path(self.parent_slice)
+        if obj is None:
+            raise SystemdBackendError("protected compiler parent slice missing")
+        from .systemd import _UNIT_IFACE, _SLICE_IFACE
+        load_state = self.systemd._get_property(obj, _UNIT_IFACE, "LoadState")
+        state = self.systemd._get_property(obj, _UNIT_IFACE, "ActiveState")
+        group = self.systemd._get_property(obj, _SLICE_IFACE, "ControlGroup")
+        if load_state != "loaded" or state != "active" or group != "/" + self.parent_slice:
+            raise SystemdBackendError("protected compiler parent slice not active or relocated")
+
+    @staticmethod
+    def _check_worker_cgroup(info, observed):
+        parent = info.get("parent_slice")
+        if parent is None or not observed.get("exists"):
+            return
+        if parent != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("invalid saved compiler parent slice")
+        child = info["slice_name"]
+        expected = "/" + parent + "/" + child + "/" + info["unit_name"]
+        group = observed.get("control_group")
+        if group:
+            if group != expected:
+                raise SystemdBackendError("compiler worker escaped protected parent cgroup")
+        elif observed.get("active_state") not in ("inactive", "failed"):
+            raise SystemdBackendError("active compiler worker lacks protected cgroup")
+
+
+    def _verify_fresh_storage(self, project_root, paths=()):
+        """Require real bounded mount backing before modifying fresh compiler state."""
+        if self.parent_slice is None:
+            return
+        project = Path(project_root)
+        state = project / "state"
+        attempts = state / "image-build/attempts"
+        if project != Path(self.authorized_project_root):
+            raise SystemdBackendError("fresh Project identity changed")
+        for mount in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
+            if mount.is_symlink() or not os.path.ismount(mount):
+                raise SystemdBackendError("fresh compiler quota mount is missing")
+        # Host-deploy binds <work>/state to <Project>/state and a second
+        # <work>/controller-build-resources into ONLY this sidecar namespace.
+        # Never infer these binds from a directory name or equal st_dev alone.
+        mountpoints = set()
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 10:
+                raise SystemdBackendError("invalid kernel mount inventory")
+            mountpoints.add(Path(re.sub(
+                r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
+        if state not in mountpoints or self.directory not in mountpoints:
+            raise SystemdBackendError("fresh state or privileged resource bind mount is missing")
+        for fixed in (FRESH_COMPILER_BUILD_MOUNT, FRESH_COMPILER_EXTERNAL_MOUNT):
+            meta = fixed.stat()
+            if (meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022):
+                raise SystemdBackendError("untrusted quota mount root ownership")
+        # Same (st_dev, st_ino) binds the *exact* host-deploy source directory
+        # in this mount namespace. Matching just the filesystem device would
+        # permit two unrelated directories on the same ext4 image.
+        for target, source in (
+            (state, FRESH_COMPILER_STATE_SOURCE),
+            (self.directory, FRESH_COMPILER_RESOURCES_SOURCE),
+        ):
+            if target.is_symlink() or source.is_symlink():
+                raise SystemdBackendError("fresh protected mount source is redirected")
+            t, b = target.stat(), source.stat()
+            if ((t.st_dev, t.st_ino) != (b.st_dev, b.st_ino)
+                    or t.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+                raise SystemdBackendError("fresh state or privileged registration backing differs")
+        owner = self.directory.stat()
+        if (owner.st_uid != 0 or owner.st_gid != 0
+                or owner.st_mode & 0o077):
+            raise SystemdBackendError("fresh privileged registration root not protected")
+        if not attempts.is_dir() or attempts.is_symlink():
+            raise SystemdBackendError("fresh attempts directory is untrusted")
+        for source in paths:
+            item = Path(source)
+            if (item.is_symlink()
+                    or not item.resolve().is_relative_to(attempts.resolve())
+                    or item.stat().st_dev != attempts.stat().st_dev):
+                raise SystemdBackendError("fresh worker input escapes quota")
+        if paths:
+            checked = [Path(p).resolve() for p in paths]
+            for mount in mountpoints:
+                if any(mount == p or mount.is_relative_to(p) for p in checked):
+                    raise SystemdBackendError("unreviewed nested worker mount")
 
     def area(self, project_root):
+        # Every API path, including status, cancellation, release and forget,
+        # must fail closed if either fixed backing mount disappeared.
+        self._verify_fresh_storage(project_root)
         root, _, _ = self.systemd._project(project_root)
         return self.directory / hashlib.sha256(str(root).encode()).hexdigest()
 
@@ -116,6 +255,10 @@ class BuildBackend:
         path = self.resource_path(project_root, resource_id)
         raw = json.loads((path / 'registration.json').read_text())
         if raw['state'] != 'ready': raise SystemdBackendError('build registration is not ready')
+        self._check_parent_binding(str(Path(project_root)), raw["intent"].get("parent_slice"), raw["intent"].get("log_namespace"))
+        self._verify_fresh_storage(project_root, (
+            raw['intent']['prepared_root'], raw['intent']['source_directory'],
+            raw['intent']['output_directory']))
         return path, raw
 
     @staticmethod
@@ -146,6 +289,7 @@ class BuildBackend:
             record = json.loads(path.read_text())
         except FileNotFoundError:
             return {'resource_id': resource_id, 'state': 'absent'}
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"), record["intent"].get("log_namespace"))
         return record
 
     def register(self, *, project_root, resource_id, prepared_root, source_directory, output_directory,
@@ -158,18 +302,30 @@ class BuildBackend:
             raise SystemdBackendError('build inputs must be directories beneath state/image-build/attempts')
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i+1:]):
             raise SystemdBackendError('build root/source/output paths must not overlap')
-        if type(execution_user_id) is not int or type(execution_group_id) is not int or min(execution_user_id, execution_group_id) <= 0:
-            raise SystemdBackendError('nonzero build UID/GID required')
-        if execution_user_id == root.stat().st_uid:
-            raise SystemdBackendError('build UID must differ from controller project owner')
+        if (type(execution_user_id) is not int or type(execution_group_id) is not int
+                or not 0 < execution_user_id < 2**31
+                or not 0 < execution_group_id < 2**31):
+            raise SystemdBackendError('separate nonzero numeric build UID/GID required')
+        project_owner = root.stat()
+        if (execution_user_id == project_owner.st_uid
+                or execution_group_id == project_owner.st_gid):
+            raise SystemdBackendError('build UID/GID must differ from controller project owner')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
+        self._check_parent_binding(str(root), self.parent_slice, self.log_namespace)
+        self._verify_fresh_storage(str(root), paths)
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
                       input_manifest_id=input_manifest_id, execution_user_id=execution_user_id, execution_group_id=execution_group_id)
+        if self.parent_slice is not None:
+            intent["parent_slice"] = self.parent_slice
+            intent["log_namespace"] = self.log_namespace
         path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
+        if self.parent_slice is not None and not self.directory.is_dir():
+            raise SystemdBackendError('fresh privileged resource root not installed')
         ensure_directory(self.directory)
-        os.chmod(self.directory, 0o755)
+        if self.parent_slice is None:
+            os.chmod(self.directory, 0o755)
         ensure_directory(path)
         if manifest.exists():
             previous = json.loads(manifest.read_text())
@@ -210,7 +366,7 @@ class BuildBackend:
         shutil.copytree(paths[0], imported, symlinks=True,
             ignore=lambda directory,names: set(names)&{'dev','proc','sys','run','tmp'} if Path(directory)==paths[0] else set())
         if (imported / 'image-build').is_symlink(): raise SystemdBackendError('reserved mount parent is a symlink')
-        for name in ('image-build/source', 'image-build/output', 'tmp', 'run', 'run/zog-journal', 'proc', 'sys', 'dev'):
+        for name in ('image-build/source', 'image-build/output', 'tmp', 'run', 'run/zog-journal', 'proc', 'sys', 'dev', *(['var/tmp'] if self.parent_slice else [])):
             dest = imported / name
             if dest.is_symlink(): raise SystemdBackendError('reserved build mount target is a symlink')
             dest.mkdir(parents=True, exist_ok=True)
@@ -228,9 +384,19 @@ class BuildBackend:
         identity(job_id)
         path, registration = self.load(project_root, request['build_root_id'])
         binding = registration['intent']
+        self._check_parent_binding(str(Path(project_root)), binding.get("parent_slice"), binding.get("log_namespace"))
         if any(request[k] != binding[k] for k in ('execution_user_id', 'execution_group_id')):
             raise SystemdBackendError('execution identity differs from registration')
+        # The registration remains immutable, but host-install ownership can
+        # change between register and prepare. Never promote a previously
+        # separate build principal into the controller project's owner/group.
+        controller_root, _, _ = self.systemd._project(project_root)
+        owner = controller_root.stat()
+        if (binding['execution_user_id'] == owner.st_uid
+                or binding['execution_group_id'] == owner.st_gid):
+            raise SystemdBackendError('build principal now overlaps controller project ownership')
         source, output = Path(binding['source_directory']), Path(binding['output_directory'])
+        self._verify_fresh_storage(project_root, (binding['prepared_root'], source, output))
         executable = request['command'][0]
         directory = request['working_directory']
         cwd, _ = root_path(path/'root', source, output, directory)
@@ -244,21 +410,65 @@ class BuildBackend:
                 break
         if resolved is None: raise SystemdBackendError('executable not found inside build root and explicit PATH')
         unit = f'zog-{Path(project_root).name}-build{job_id}.service'
-        slice_name = f'zog-{Path(project_root).name}-build{job_id}.slice'
+        slice_name = (f'{self.parent_slice[:-6]}-build{job_id}.slice' if self.parent_slice
+                      else f'zog-{Path(project_root).name}-build{job_id}.slice')
         result = dict(request=request, job_id=job_id, unit_name=unit, slice_name=slice_name,
                       resolved_executable=resolved, process_cleanup_complete=False)
+        if self.parent_slice is not None:
+            result["parent_slice"] = self.parent_slice
+            result["log_namespace"] = self.log_namespace
         jobs = path / 'jobs'
         ensure_directory(jobs)
         job_path = jobs / (job_id+'.json')
         if job_path.exists():
             prior = json.loads(job_path.read_text())
             if prior['request'] != request: raise SystemdBackendError('job identity already bound')
+            if (prior.get("parent_slice") != self.parent_slice
+                    or prior.get("slice_name") != slice_name):
+                raise SystemdBackendError("prepared job slice differs from protected parent")
+            if prior.get("log_namespace") != self.log_namespace:
+                raise SystemdBackendError("prepared job logging binding differs from protected role")
             return prior
         for other in jobs.glob('*.json'):
             if not json.loads(other.read_text())['process_cleanup_complete']:
                 raise SystemdBackendError('registered workspace has an unfinished writer')
         replace_json(job_path, result)
         return result
+
+    @staticmethod
+    def _pid1_resource_path(path, *, fresh):
+        """Translate a sidecar-private registration path to PID1 host view.
+
+        The 30-GiB host image appears at /var/lib/zog/build-resources only
+        inside the *controller's* BindPaths namespace. PID1's worker unit
+        properties, unlike controller I/O, are interpreted in the host view.
+        Never pass the private path to RootDirectory or device BindPaths.
+        """
+        target = Path(path)
+        if not fresh:
+            return target
+        try:
+            relative = target.relative_to(FRESH_COMPILER_RESOURCES)
+        except ValueError as exc:
+            raise SystemdBackendError("worker PID1 path is not a registered fresh resource") from exc
+        if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            raise SystemdBackendError("worker PID1 path does not select a resource")
+        return FRESH_COMPILER_RESOURCES_SOURCE.joinpath(*relative.parts)
+
+    def _verify_pid1_resource_visibility(self, path):
+        """Require identical source/sidecar inodes before PID1 StartTransientUnit."""
+        if self.parent_slice is None:
+            return
+        source = Path(path)
+        visible = self._pid1_resource_path(source, fresh=True)
+        for target, other in ((source, visible),):
+            if target.is_symlink() or other.is_symlink():
+                raise SystemdBackendError("worker rootfs PID1 path was redirected")
+            a, b = target.stat(), other.stat()
+            if (not stat.S_ISDIR(a.st_mode) or not stat.S_ISDIR(b.st_mode)
+                    or (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino)
+                    or a.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+                raise SystemdBackendError("worker rootfs is not PID1-visible on bounded build mount")
 
     @staticmethod
     def private_null(path):
@@ -279,13 +489,119 @@ class BuildBackend:
         synchronize_directory(path)
         return node
 
+    def _prepare_fresh_scratch(self, path, info, registration):
+        """Bind all mutable guest temporary paths to the 30-GiB worker mount.
+
+        No host /tmp or /var/tmp PrivateTmp directories are permitted on the
+        fresh compiler role. These are created before the no-replay marker.
+        """
+        # Source directories MUST be rooted in a privileged, non-worker-
+        # writable parent. Putting these beneath output (owned by the build
+        # UID) allows that UID to rename a parent after validation and before
+        # PID1 consumes the BindPaths transaction.
+        scratch_root = FRESH_COMPILER_BUILD_MOUNT / ".zog-runtime"
+        self._verify_fresh_storage(self.authorized_project_root, (
+            registration['intent']['output_directory'],))
+        scratch_root.mkdir(mode=0o755, exist_ok=True)
+        # Check the parent *before* creating anything beneath it. No path
+        # creation is allowed through an existing symlink or untrusted owner.
+        metadata = scratch_root.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or scratch_root.is_symlink()
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or metadata.st_mode & 0o022
+                or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+            raise SystemdBackendError("untrusted fresh scratch parent")
+        job = scratch_root / identity(info['job_id'])
+        job.mkdir(mode=0o755, exist_ok=True)
+        metadata = job.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or job.is_symlink()
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or metadata.st_mode & 0o022
+                or metadata.st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev):
+            raise SystemdBackendError("untrusted fresh scratch job")
+        directories = []
+        for name in ('tmp', 'vartmp', 'run'):
+            candidate = job / name
+            candidate.mkdir(mode=0o700, exist_ok=True)
+            if (candidate.is_symlink()
+                    or candidate.stat().st_dev != FRESH_COMPILER_BUILD_MOUNT.stat().st_dev
+                    or candidate.resolve() != candidate):
+                raise SystemdBackendError('fresh scratch was redirected')
+            os.chown(candidate, info['request']['execution_user_id'],
+                     info['request']['execution_group_id'], follow_symlinks=False)
+            directories.append(candidate)
+        return directories
+
+    @staticmethod
+    def _reload_safe_argv(command):
+        """Encode literal argv for portable systemd ExecStart D-Bus execution.
+
+        The observed systemd 252 expands dollars during launch, so an
+        argument's '$' must be passed as '$$'. In contrast, percent characters
+        supplied over D-Bus reach the process unchanged: doubling them
+        corrupts the original argv. No durable request bytes are rewritten.
+        """
+        if (not command or any(type(arg) is not str or "\x00" in arg for arg in command)
+                or "$" in command[0] or "%" in command[0]):
+            raise SystemdBackendError("unsupported literal build executable")
+        return [command[0], *(arg.replace("$", "$$") for arg in command[1:])]
+
+    @staticmethod
+    def _matches_exec_start(observed, expected):
+        """Match only the two exact systemd 252 D-Bus ExecStart representations.
+
+        The observed reload parser inserts literal backslashes before dollars
+        and semicolons. Compute the alternate array solely from the frozen
+        request-derived expected argv; never broadly unescape arbitrary
+        systemd properties or bypass an unrelated policy mismatch.
+        """
+        if (type(expected) is not list or not expected
+                or any(type(arg) is not str for arg in expected)
+                or type(observed) is not list
+                or any(type(arg) is not str for arg in observed)):
+            return False
+        reloaded = [expected[0], *(
+            arg.replace("$", "\\$").replace(";", "\\;")
+            for arg in expected[1:]
+        )]
+        return observed == expected or observed == reloaded
+
     def start(self, *, project_root, job_id, request):
+        if self.parent_slice is not None:
+            # Sidecar privilege is not launch authority. Consume the single
+            # native host-owned grant/active six-hour budget BEFORE any
+            # prepare/start side effect. The same lock spans the PID1 reply,
+            # preventing concurrent claims for the empty lane.
+            from . import fresh_start_gate as start_gate
+            with start_gate.locked():
+                start_gate.claim(backend=self, project_root=project_root,
+                                 job_id=job_id, request=request)
+                return self._start_after_protected_claim(
+                    project_root=project_root, job_id=job_id, request=request)
+        return self._start_after_protected_claim(
+            project_root=project_root, job_id=job_id, request=request)
+
+    def _start_after_protected_claim(self, *, project_root, job_id, request):
         info = self.prepare(project_root=project_root, job_id=job_id, request=request)
         path, registration = self.load(project_root, request['build_root_id'])
         job_path = path/'jobs'/(job_id+'.json')
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
+        if self.parent_slice is not None:
+            self._verify_fresh_storage(project_root, (registration['intent']['prepared_root'], registration['intent']['source_directory'], registration['intent']['output_directory']))
+            expected_slice = f'{self.parent_slice[:-6]}-build{identity(job_id)}.slice'
+            if info["slice_name"] != expected_slice:
+                raise SystemdBackendError("build job slice changed from protected parent")
+            # Do not persist start_attempted unless the host-owned parent is
+            # already active and has exactly the expected PID1 cgroup.
+            self._verify_active_parent()
         if self.systemd.version() < 250: raise SystemdBackendError('systemd 250 or later required')
+        # Verify the exact reload-safe representation BEFORE persisting the
+        # one-way start_attempted marker or touching systemd.
+        r = info['request']
+        command = [info['resolved_executable'], *r['command'][1:]]
+        literal_argv = self._reload_safe_argv(command)
         null_device = self.private_null(path) if info['request'].get('device_profile') == 'private-null-permission-test' else None
         if self.journal_barrier:
             if request['termination_grace_seconds'] < 3:
@@ -298,19 +614,22 @@ class BuildBackend:
                 replace_json(job_path, info)
         elif info.get('journal_barrier_token'):
             raise SystemdBackendError('prepared journal barrier requires enabled broker')
+        scratch = self._prepare_fresh_scratch(path, info, registration) if self.parent_slice else None
+        self._verify_pid1_resource_visibility(path / 'root')
         info['start_attempted'] = True
         replace_json(job_path, info)
         self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
-        r = info['request']; bind = registration['intent']; command = [info['resolved_executable'], *r['command'][1:]]
+        bind = registration['intent']
         # Fixed security policy; callers cannot weaken these properties.
         values = {
             'Description': ('s', 'Zog finite build job'), 'Slice': ('s', info['slice_name']),
             'Type': ('s', 'exec'), 'ExitType': ('s', 'cgroup'), 'Restart': ('s', 'no'),
             'KillMode': ('s', 'control-group'), 'RemainAfterExit': ('b', False), 'AddRef': ('b', True),
-            'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
+            'RootDirectory': ('s', str(self._pid1_resource_path(path/'root', fresh=self.parent_slice is not None))),
+            'WorkingDirectory': ('s', r['working_directory']),
             'User': ('s', str(r['execution_user_id'])), 'Group': ('s', str(r['execution_group_id'])),
             'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
-            'PrivateTmp': ('b', True), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
+            'PrivateTmp': ('b', self.parent_slice is None), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
             'CapabilityBoundingSet': ('t', 0), 'AmbientCapabilities': ('t', 0),
             'StandardOutput': ('s', 'journal'), 'StandardError': ('s', 'journal'),
             'TimeoutStartUSec': ('t', int(r['startup_timeout_seconds']*1000000)),
@@ -318,6 +637,20 @@ class BuildBackend:
             'TimeoutStopUSec': ('t', int(r['termination_grace_seconds']*1000000)),
             'SendSIGKILL': ('b', True), 'TasksMax': ('t', r['resource_limits']['thread-count-maximum']),
             'MemoryMax': ('t', r['resource_limits']['memory-maximum-bytes'])}
+        if self.parent_slice is not None:
+            values['PrivateMounts'] = ('b', True)
+            values['ProtectControlGroups'] = ('b', True)
+            values['Delegate'] = ('b', False)
+            values['ProtectKernelTunables'] = ('b', True)
+            values['RestrictNamespaces'] = ('t', 0)
+            values['LimitCORE'] = ('t', 0)
+            # PrivateDevices/MountAPIVFS may supply a tmpfs (/dev/shm).
+            # Prohibit spillover to unbudgeted host swap for fresh workers.
+            values['MemorySwapMax'] = ('t', 0)
+        if self.log_namespace is not None:
+            # Fixed trusted worker log routing; caller may not supply any
+            # journal namespace or output-path override in canonical_request.
+            values["LogNamespace"] = ("s", self.log_namespace)
         if 'cpu-weight' in r['resource_limits']:
             values['CPUWeight'] = ('t', r['resource_limits']['cpu-weight'])
         if 'stack-maximum-bytes' in r['resource_limits']:
@@ -325,11 +658,28 @@ class BuildBackend:
             values['LimitSTACK'] = ('t', stack)
             values['LimitSTACKSoft'] = ('t', stack)
         props = [self.systemd._property(k, sig, value) for k,(sig,value) in values.items()]
+        if self.parent_slice is not None:
+            # Explicitly mask inherited HugeTLB mountpoints. A separate
+            # parent cgroup hugetlb.*.max=0 native gate is also mandatory.
+            # Missing paths are harmless; existing paths are inaccessible.
+            props.append(self.systemd._property(
+                'InaccessiblePaths', 'as', 2,
+                '-/dev/hugepages', '-/dev/hugepages-1GB'))
         environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
         binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
-        if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
+        if scratch is not None:
+            for source, dest in zip(scratch, ('/tmp', '/var/tmp', '/run')):
+                binds += [str(source), dest, 'false', 0]
+        if null_device is not None:
+            binds += [str(self._pid1_resource_path(null_device, fresh=self.parent_slice is not None)),
+                      '/dev/null','false',0]
+        # Use the stable ExecStart property, not ExecStartEx. Older systemd
+        # releases accept ExecStartEx over D-Bus but serialize it as an
+        # unknown key on daemon-reload, destroying observation properties.
+        # Explicit encoding retains the frozen literal argv semantics.
         props += [self.systemd._property('Environment', 'as', len(environment), *environment),
-                  ['ExecStartEx',Variant('a(sasas)',[[command[0],command,['no-env-expand']]])],
+                  self.systemd._property('ExecStart', 'a(sasb)', 1,
+                      command[0], len(literal_argv), *literal_argv, 'false'),
                   self.systemd._property('BindPaths','a(ssbt)',len(binds)//4,*binds)]
         if self.journal_barrier:
             # All injected paths are under the controller-created /run directory.
@@ -340,38 +690,79 @@ class BuildBackend:
                 self.systemd._property('BindReadOnlyPaths','a(ssbt)',2,
                     str(self.journal_barrier.socket_path.parent),'/run/zog-journal','false',0,
                     str(self.journal_barrier.helper),'/run/zog-journal/wait','false',0),
-                ['ExecStopPostEx',Variant('a(sasas)',[[
-                    '/run/zog-journal/wait', ['/run/zog-journal/wait',info['journal_barrier_token']],
-                    ['no-env-expand','ignore-failure']]])]]
+                # ExecStopPostEx has the same reload-serialization defect.
+                # The last boolean preserves its ignore-failure policy.
+                self.systemd._property('ExecStopPost', 'a(sasb)', 1,
+                    '/run/zog-journal/wait', 2, '/run/zog-journal/wait',
+                    info['journal_barrier_token'], 'true')]
+        if self.parent_slice is not None:
+            # The protected lock remains held by start(). Preparation may
+            # consume time; recheck live budget and PID1 timer at the FINAL
+            # irreversible submission boundary.
+            from . import fresh_start_gate
+            fresh_start_gate.revalidate_before_pid1(
+                backend=self, job_id=job_id)
         self.systemd._job('StartTransientUnit','ssa(sv)a(sa(sv))',[info['unit_name'],'fail',props,[]])
         return info
 
     @staticmethod
     def expected_properties(path, info):
         r = info['request']
-        return {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
+        expected = {'RootDirectory':str(BuildBackend._pid1_resource_path(
+                    path/'root', fresh=info.get("parent_slice") is not None)),
+                    'User':str(r['execution_user_id']),
                 'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
-                'ExecStart':[info['resolved_executable'], *r['command'][1:]],
+                'ExecStart':BuildBackend._reload_safe_argv(
+                    [info['resolved_executable'], *r['command'][1:]]),
                 'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
                 'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
+        if info.get("parent_slice") is not None:
+            if info["parent_slice"] != FRESH_COMPILER_PARENT_SLICE:
+                raise SystemdBackendError("invalid prepared compiler parent")
+            if info.get("log_namespace") != FRESH_COMPILER_LOG_NAMESPACE:
+                raise SystemdBackendError("saved compiler log namespace differs from bound role")
+            expected["Slice"] = info["slice_name"]
+            expected["LogNamespace"] = info["log_namespace"]
+            expected["StandardOutput"] = "journal"
+            expected["StandardError"] = "journal"
+            expected['PrivateTmp'] = False
+            expected['PrivateMounts'] = True
+            expected['ProtectControlGroups'] = True
+            expected['Delegate'] = False
+            expected['ProtectKernelTunables'] = True
+            expected['RestrictNamespaces'] = 0
+            expected['LimitCORE'] = 0
+            expected['MemorySwapMax'] = 0
+            expected['MemoryMax'] = r['resource_limits']['memory-maximum-bytes']
+        return expected
 
     def observe(self, *, project_root, job_id, build_root_id):
         path, _ = self.load(project_root, build_root_id)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return {'exists':False}
         info = json.loads(job_path.read_text())
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         expected = self.expected_properties(path,info)
+        self._verify_pid1_resource_visibility(path / 'root')
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
+            self._check_worker_cgroup(info, raw)
             if raw['exists']:
                 obj = self.systemd._get_unit_path(info['unit_name'])
                 properties = dict(raw['properties'])
-                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec'):
+                for name in ('PrivateNetwork','NoNewPrivileges','CapabilityBoundingSet','RuntimeMaxUSec',
+                             *(['LogNamespace', 'PrivateTmp', 'PrivateMounts', 'ProtectControlGroups',
+                                'Delegate', 'ProtectKernelTunables', 'RestrictNamespaces',
+                                'LimitCORE', 'MemorySwapMax', 'MemoryMax'] if self.log_namespace is not None else [])):
                     properties[name]=self.systemd._get_property(obj,'org.freedesktop.systemd1.Service',name)
                 for name,value in expected.items():
-                    if properties.get(name) != value: raise SystemdBackendError(f'build property mismatch: {name}')
+                    observed = properties.get(name)
+                    matching = (self._matches_exec_start(observed, value)
+                                if name == 'ExecStart' else observed == value)
+                    if not matching:
+                        raise SystemdBackendError(f'build property mismatch: {name}')
                 for key in ('ExecMainCode', 'ExecMainStatus', 'ExecMainExitTimestampMonotonic'):
                     raw[key] = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', key)
                 raw['cgroup_empty'] = (self.cgroup_empty(raw.get('control_group')) if raw.get('control_group') else raw.get('active_state') in ('inactive','failed'))
@@ -392,13 +783,50 @@ class BuildBackend:
                     properties=dict(evidence['properties'])
                     properties['ExecStart']=self.systemd._normalize_exec_start(properties.get('ExecStart'))
                     for name,value in expected.items():
-                        if properties.get(name) != value: raise SystemdBackendError(f'exit evidence property mismatch: {name}')
+                        observed = properties.get(name)
+                        matching = (self._matches_exec_start(observed, value)
+                                    if name == 'ExecStart' else observed == value)
+                        if not matching:
+                            raise SystemdBackendError(f'exit evidence property mismatch: {name}')
                     raw['terminal_evidence']={k:v for k,v in evidence.items() if k!='properties'}
             if raw['journal_barrier']['status'] in ('pending','attempted') and (not raw.get('exists') or raw.get('active_state') in ('inactive','failed')):
                 raw['journal_barrier']['status'] = 'unconfirmed'
         else:
             raw['journal_barrier'] = {'status':'not-enabled'}
         return raw
+
+    def inspect_fresh_worker_native(self, *, project_root, job_id, build_root_id):
+        """Read-only independently checked, exact running worker witness.
+
+        Not an admission grant: root-owned host-deploy still decides whether
+        the live observation belongs to its frozen host/boot/Project/slice
+        and must reject any missing descendant. No public control API,
+        start, mount, or persistent state mutation is introduced here.
+        """
+        if self.parent_slice != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("native worker witness not allowed outside fresh role")
+        path, _ = self.load(project_root, build_root_id)
+        info_file = path / 'jobs' / (identity(job_id) + '.json')
+        if not info_file.is_file() or info_file.is_symlink():
+            raise SystemdBackendError("native worker has no durable job record")
+        info = json.loads(info_file.read_text())
+        observed = self.observe(project_root=project_root, job_id=job_id,
+                                build_root_id=build_root_id)
+        from .fresh_native_worker_witness import inspect
+        return inspect(backend=self, project_root=project_root, path=path,
+                       info=info, observed=observed)
+
+    def inspect_fresh_idle_native(self, *, project_root):
+        """Observe a genuinely empty fresh slice without authorizing start.
+
+        This does not replace the running worker witness or the host-deploy
+        six-hour budget. Production admission still requires a separately
+        reviewed protected launch gate and canary transition.
+        """
+        if self.parent_slice != FRESH_COMPILER_PARENT_SLICE:
+            raise SystemdBackendError("fresh idle witness not available to historical role")
+        from .fresh_native_idle_witness import inspect
+        return inspect(backend=self, project_root=project_root)
 
     @staticmethod
     def cgroup_empty(group):
@@ -415,8 +843,17 @@ class BuildBackend:
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return True  # No start is possible without its durable privileged record.
         info = json.loads(job_path.read_text())
+        self._check_parent_binding(str(Path(project_root)), info.get("parent_slice"), info.get("log_namespace"))
         for unit in (info['unit_name'], info['slice_name']):
             raw = self.systemd.observe(project_root=project_root, unit_name=unit)
+            if info.get("parent_slice") is not None:
+                parent = info["parent_slice"]
+                expected_group = ("/" + parent + "/" + info["slice_name"]
+                                  + ("/" + info["unit_name"] if unit.endswith(".service") else ""))
+                if raw["exists"] and raw.get("control_group") != expected_group:
+                    if (raw.get("control_group")
+                            or raw.get("active_state") not in ("inactive", "failed")):
+                        raise SystemdBackendError("cannot cleanup worker outside bound parent")
             if raw['exists']:
                 if raw.get('control_group'):
                     if not self.cgroup_empty(raw['control_group']): return False
@@ -489,6 +926,7 @@ class BuildBackend:
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
             return {'state': 'released'}
         record = json.loads(manifest.read_text())
+        self._check_parent_binding(str(Path(project_root)), record["intent"].get("parent_slice"), record["intent"].get("log_namespace"))
         if record['state'] == 'released': return record
         for job in (path/'jobs').glob('*.json'):
             if not json.loads(job.read_text())['process_cleanup_complete']:
