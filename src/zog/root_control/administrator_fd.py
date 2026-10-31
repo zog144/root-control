@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import array
 import fcntl
+import hashlib
 import hmac
 import json
 import os
@@ -144,6 +145,7 @@ def send_secret_fd(sock: socket.socket, fd: int, *, receiver: ExpectedPeer, fram
     _secret_fd(fd)
     peer_verified(sock, receiver)
     try:
+        sock.settimeout(2.0)
         count = sock.sendmsg([frame], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                                        array.array("i", [fd]).tobytes())])
         if count != len(frame):
@@ -168,6 +170,7 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
         # post-fork socket endpoints with a substituted sender process.
         if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
             _deny()
+        sock.settimeout(2.0)
         data, ancillary, flags, _ = sock.recvmsg(
             MAX_FRAME + 1,
             socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
@@ -210,7 +213,7 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
                 pass
 
 # Control-only recovery deliberately carries no descriptor or password.
-_RECOVER = b"zog-admin-recover-v1\\0"
+_RECOVER = b"zog-admin-recover-v1" + bytes([0])
 
 
 def send_recovery(sock: socket.socket, *, receiver: ExpectedPeer, frame: bytes):
@@ -218,6 +221,7 @@ def send_recovery(sock: socket.socket, *, receiver: ExpectedPeer, frame: bytes):
         _deny()
     peer_verified(sock, receiver)
     try:
+        sock.settimeout(2.0)
         payload = _RECOVER + frame
         if sock.sendmsg([payload]) != len(payload):
             _deny()
@@ -234,6 +238,7 @@ def receive_recovery(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes)
     try:
         if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
             _deny()
+        sock.settimeout(2.0)
         payload, ancillary, flags, _ = sock.recvmsg(
             len(_RECOVER) + MAX_FRAME + 1,
             socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
@@ -262,6 +267,115 @@ def receive_recovery(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes)
             _deny()
         peer_verified(sock, broker)
     except OSError:
+        _deny()
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+
+# Commit replies carry only the already-committed, secret-free Django receipt.
+_COMMIT = b"zog-admin-commit-v1" + bytes([0])
+_COMMIT_FIELDS = frozenset({"schema", "state", "request_id", "delivery_id",
+                            "authorization_id", "credential_revision",
+                            "account_id", "installed_at"})
+
+
+def _commit_payload(frame: bytes, commit: dict):
+    if type(commit) is not dict or set(commit) != _COMMIT_FIELDS:
+        _deny()
+    if (commit["schema"] != "zog-station-admin-password-protected-commit-v1"
+        or commit["state"] != "committed-awaiting-host-signed-receipt"
+        or type(commit["installed_at"]) is not int or commit["installed_at"] <= 0):
+        _deny()
+    try:
+        original = json.loads(frame)
+        if (set(original) != _FIELDS or original["schema"] != SCHEMA
+            or operation_frame(**{k: v for k, v in original.items() if k != "schema"}) != frame):
+            _deny()
+        for key in ("request_id", "delivery_id", "authorization_id",
+                    "credential_revision", "account_id"):
+            if type(commit[key]) is not type(original[key]) or commit[key] != original[key]:
+                _deny()
+    except (ValueError, TypeError, KeyError):
+        _deny()
+    body = {"schema": "zog-admin-fd-commit-reply-v1",
+            "operation_sha256": hashlib.sha256(frame).hexdigest(),
+            "commit": commit}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    if len(encoded) > MAX_FRAME:
+        _deny()
+    return _COMMIT + encoded
+
+
+def send_commit(sock: socket.socket, *, receiver: ExpectedPeer, frame: bytes, commit: dict):
+    """Reply only after Django has committed. A lost reply requires recovery."""
+    payload = _commit_payload(frame, commit)
+    peer_verified(sock, receiver)
+    try:
+        sock.settimeout(2.0)
+        if sock.sendmsg([payload]) != len(payload):
+            _deny()
+        peer_verified(sock, receiver)
+    except OSError:
+        _deny()
+
+
+def receive_commit(sock: socket.socket, *, station: ExpectedPeer, frame: bytes):
+    """Receive one peer-proven, secret-free commit. Never sign a Host receipt."""
+    peer_verified(sock, station)
+    descriptors = []
+    try:
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
+            _deny()
+        sock.settimeout(2.0)
+        payload, ancillary, flags, _ = sock.recvmsg(
+            len(_COMMIT) + MAX_FRAME + 1,
+            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
+            + socket.CMSG_SPACE(struct.calcsize("3i")),
+            socket.MSG_CMSG_CLOEXEC)
+        senders = []
+        unexpected = False
+        for level, kind, raw in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                if len(raw) != struct.calcsize("3i"):
+                    unexpected = True
+                else:
+                    senders.append(struct.unpack("3i", raw))
+            elif level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                part = array.array("i")
+                part.frombytes(raw[:len(raw) // part.itemsize * part.itemsize])
+                descriptors.extend(part)
+                unexpected = True
+            else:
+                unexpected = True
+        if (unexpected or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+            or senders != [(station.pid, station.uid, station.gid)]
+            or not payload.startswith(_COMMIT)):
+            _deny()
+        if process_identity(station.pid) != (station.start_ticks, station.cgroup):
+            _deny()
+        body = payload[len(_COMMIT):]
+        if len(body) > MAX_FRAME:
+            _deny()
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    _deny()
+                result[key] = value
+            return result
+        decoded = json.loads(body, object_pairs_hook=unique,
+                             parse_constant=lambda _: _deny())
+        if (type(decoded) is not dict
+            or set(decoded) != {"schema", "operation_sha256", "commit"}
+            or decoded["schema"] != "zog-admin-fd-commit-reply-v1"
+            or decoded["operation_sha256"] != hashlib.sha256(frame).hexdigest()
+            or json.dumps(decoded, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True).encode() != body):
+            _deny()
+        _commit_payload(frame, decoded["commit"])
+        peer_verified(sock, station)
+        return decoded["commit"]
+    except (OSError, ValueError, TypeError):
         _deny()
     finally:
         for fd in descriptors:
