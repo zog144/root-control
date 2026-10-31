@@ -120,3 +120,20 @@ def test_wrong_socket_type_and_operation_identity_refused():
         broker.operation_frame(
             request_id=str(uuid.uuid4()), delivery_id=str(uuid.uuid4()),
             authorization_id=str(uuid.uuid4()), credential_revision=True, account_id=3)
+
+
+def test_recovery_control_requires_exact_peer_and_no_fds():
+    operation = frame()
+    with sockets() as (left, right):
+        broker.send_recovery(left, receiver=peer(), frame=operation)
+        broker.receive_recovery(right, broker=peer(), frame=operation)
+    with sockets() as (left, right):
+        broker.send_recovery(left, receiver=peer(), frame=operation)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_recovery(right, broker=peer(), frame=frame())
+    with sockets() as (left, right), sealed() as fd:
+        left.sendmsg([broker._RECOVER + operation],
+                     [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                       array.array("i", [fd]).tobytes())])
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_recovery(right, broker=peer(), frame=operation)
