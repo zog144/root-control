@@ -11,6 +11,16 @@ import pytest
 from zog.root_control import administrator_fd as broker
 
 
+@contextmanager
+def sockets(kind=socket.SOCK_SEQPACKET):
+    left, right = socket.socketpair(socket.AF_UNIX, kind)
+    try:
+        yield left, right
+    finally:
+        left.close()
+        right.close()
+
+
 def peer():
     start, cgroup = broker.process_identity(os.getpid())
     return broker.ExpectedPeer(os.getpid(), os.getuid(), os.getgid(), start, cgroup)
@@ -61,8 +71,7 @@ def test_one_verified_sealed_readonly_fd_over_real_unix_seqpacket():
 
 @pytest.mark.parametrize("change", ["uid", "gid", "pid", "start_ticks", "cgroup"])
 def test_wrong_peer_identity_fails_before_fd_transfer(change):
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as pair:
-        left, right = pair
+    with sockets() as (left, right):
         value = peer()
         invalid = replace(value, **{change: getattr(value, change) + ("/wrong" if change == "cgroup" else 1)})
         with sealed() as fd, pytest.raises(broker.ProtectedFdDenied):
@@ -75,7 +84,7 @@ def test_wrong_peer_identity_fails_before_fd_transfer(change):
     (False, True, 32), (True, False, 32), (True, True, 0), (True, True, 1025),
 ])
 def test_wrong_descriptor_is_refused(readonly, do_seal, size):
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (left, right):
+    with sockets() as (left, right):
         with sealed(readonly=readonly, do_seal=do_seal, size=size) as fd:
             with pytest.raises(broker.ProtectedFdDenied):
                 broker.send_secret_fd(left, fd, receiver=peer(), frame=frame())
@@ -83,16 +92,16 @@ def test_wrong_descriptor_is_refused(readonly, do_seal, size):
 
 def test_missing_extra_and_mismatched_fd_and_frame_fail_closed():
     operation = frame()
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (left, right):
+    with sockets() as (left, right):
         left.sendmsg([operation])
         with pytest.raises(broker.ProtectedFdDenied):
             broker.receive_secret_fd(right, broker=peer(), frame=operation)
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (left, right):
+    with sockets() as (left, right):
         with sealed() as fd:
             left.sendmsg([operation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd, fd]))])
             with pytest.raises(broker.ProtectedFdDenied):
                 broker.receive_secret_fd(right, broker=peer(), frame=operation)
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (left, right):
+    with sockets() as (left, right):
         with sealed() as fd:
             broker.send_secret_fd(left, fd, receiver=peer(), frame=operation)
             with pytest.raises(broker.ProtectedFdDenied):
@@ -100,7 +109,7 @@ def test_missing_extra_and_mismatched_fd_and_frame_fail_closed():
 
 
 def test_wrong_socket_type_and_operation_identity_refused():
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM) as (left, right):
+    with sockets(socket.SOCK_STREAM) as (left, right):
         with sealed() as fd, pytest.raises(broker.ProtectedFdDenied):
             broker.send_secret_fd(left, fd, receiver=peer(), frame=frame())
     with pytest.raises(broker.ProtectedFdDenied):
