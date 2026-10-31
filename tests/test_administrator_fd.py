@@ -149,3 +149,47 @@ def test_socket_must_preinstall_passcred_before_receiving():
         broker.send_secret_fd(left, fd, receiver=peer(), frame=operation)
         with pytest.raises(broker.ProtectedFdDenied):
             broker.receive_secret_fd(right, broker=peer(), frame=operation)
+
+
+def committed(operation):
+    import json
+    values = json.loads(operation)
+    return {
+        "schema": "zog-station-admin-password-protected-commit-v1",
+        "state": "committed-awaiting-host-signed-receipt",
+        "request_id": values["request_id"],
+        "delivery_id": values["delivery_id"],
+        "authorization_id": values["authorization_id"],
+        "credential_revision": values["credential_revision"],
+        "account_id": values["account_id"],
+        "installed_at": 1793470000,
+    }
+
+
+def test_peer_verified_nonsecret_commit_reply_after_django_transaction():
+    operation = frame()
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        broker.send_commit(station, receiver=peer(), frame=operation,
+                           commit=committed(operation))
+        assert broker.receive_commit(host, station=peer(), frame=operation) == committed(operation)
+
+
+def test_commit_reply_rejects_wrong_operation_and_account_and_fd_smuggling():
+    operation = frame()
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        wrong = dict(committed(operation), account_id=100)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.send_commit(station, receiver=peer(), frame=operation, commit=wrong)
+        broker.send_commit(station, receiver=peer(), frame=operation,
+                           commit=committed(operation))
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit(host, station=peer(), frame=frame())
+    with sockets() as (host, station), sealed() as fd:
+        broker.prepare_receiver_socket(host)
+        payload = broker._commit_payload(operation, committed(operation))
+        station.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                     array.array("i", [fd]).tobytes())])
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit(host, station=peer(), frame=operation)
