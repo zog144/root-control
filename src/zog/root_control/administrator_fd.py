@@ -150,16 +150,18 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
         data, ancillary, flags, _ = sock.recvmsg(
             MAX_FRAME + 1, socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize),
             socket.MSG_CMSG_CLOEXEC)
+        unexpected = False
         for level, kind, raw in ancillary:
             if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                 if len(raw) % array.array("i").itemsize:
-                    _deny()
+                    unexpected = True
+                    continue
                 part = array.array("i")
                 part.frombytes(raw)
                 descriptors.extend(part)
             else:
-                _deny()
-        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+                unexpected = True
+        if (unexpected or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
             or not hmac.compare_digest(data, frame) or len(descriptors) != 1):
             _deny()
         peer_verified(sock, broker)
@@ -174,3 +176,45 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
                 os.close(fd)
             except OSError:
                 pass
+
+# Control-only recovery deliberately carries no descriptor or password.
+_RECOVER = b"zog-admin-recover-v1\\0"
+
+
+def send_recovery(sock: socket.socket, *, receiver: ExpectedPeer, frame: bytes):
+    if type(frame) is not bytes or not 0 < len(frame) <= MAX_FRAME:
+        _deny()
+    peer_verified(sock, receiver)
+    try:
+        payload = _RECOVER + frame
+        if sock.sendmsg([payload]) != len(payload):
+            _deny()
+        peer_verified(sock, receiver)
+    except OSError:
+        _deny()
+
+
+def receive_recovery(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes):
+    if type(frame) is not bytes or not 0 < len(frame) <= MAX_FRAME:
+        _deny()
+    peer_verified(sock, broker)
+    descriptors = []
+    try:
+        payload, ancillary, flags, _ = sock.recvmsg(
+            len(_RECOVER) + MAX_FRAME + 1,
+            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize),
+            socket.MSG_CMSG_CLOEXEC)
+        for level, kind, raw in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                part = array.array("i")
+                part.frombytes(raw[:len(raw) // part.itemsize * part.itemsize])
+                descriptors.extend(part)
+        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or ancillary
+            or not hmac.compare_digest(payload, _RECOVER + frame)):
+            _deny()
+        peer_verified(sock, broker)
+    except OSError:
+        _deny()
+    finally:
+        for fd in descriptors:
+            os.close(fd)
