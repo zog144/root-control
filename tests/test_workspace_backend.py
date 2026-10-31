@@ -110,12 +110,16 @@ def test_x11_protocol_fixture_requires_cookie_acceptance(tmp_path, monkeypatch, 
     sent = []
     class ProtocolSocket:
         def settimeout(self, value): pass
-        def connect(self, path): self.path = path
+        def connect(self, path): self.path = path; self.reads = 0
         def getsockopt(self, *args):
             import struct
             return struct.pack('3i',os.getpid(),os.getuid(),os.getgid())
         def sendall(self, payload): sent.append(payload)
-        def recv(self, length): return ((b'\x01' if accepted is True or accepted == 'malformed-rfb' else b'\x01' if accepted == 'truncated' else b'\x00') + (b'' if accepted == 'truncated' else b'\0'*7)) if self.path.endswith('X1') else (b'RFB 003.x08\n' if accepted == 'malformed-rfb' else b'RFB 003.008\n')
+        def recv(self, length):
+            self.reads += 1
+            if accepted == 'truncated' and self.path.endswith('X1') and self.reads > 1:
+                return b''
+            return ((b'\x01' if accepted is True or accepted == 'malformed-rfb' else b'\x01' if accepted == 'truncated' else b'\x00') + (b'' if accepted == 'truncated' else b'\0'*7)) if self.path.endswith('X1') else (b'RFB 003.x08\n' if accepted == 'malformed-rfb' else b'RFB 003.008\n')
         def close(self): pass
         def __enter__(self): return self
         def __exit__(self,*args): self.close()
