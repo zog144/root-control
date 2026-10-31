@@ -236,7 +236,8 @@ def test_duplicate_json_commit_keys_denied_on_receive():
     wrapper = json.loads(payload[len(broker._COMMIT):])
     content = json.dumps(wrapper, sort_keys=True, separators=(",", ":")).encode()
     assert content == payload[len(broker._COMMIT):]
-    corrupted = payload[:-2] + b',"account_id":999}}'
+    corrupted = payload.replace(b'"account_id":73,', b'"account_id":73,"account_id":999,', 1)
+    assert corrupted != payload
     with sockets() as (host, station):
         broker.prepare_receiver_socket(host)
         station.sendmsg([corrupted])
