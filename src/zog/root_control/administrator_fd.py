@@ -147,12 +147,24 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
     peer_verified(sock, broker)
     descriptors = []
     try:
+        # SO_PEERCRED alone reflects socket connection time. Require
+        # SCM_CREDENTIALS on the actual datagram too, rejecting inherited
+        # post-fork socket endpoints with a substituted sender process.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         data, ancillary, flags, _ = sock.recvmsg(
-            MAX_FRAME + 1, socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize),
+            MAX_FRAME + 1,
+            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
+            + socket.CMSG_SPACE(struct.calcsize("3i")),
             socket.MSG_CMSG_CLOEXEC)
         unexpected = False
+        senders = []
         for level, kind, raw in ancillary:
-            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                if len(raw) != struct.calcsize("3i"):
+                    unexpected = True
+                else:
+                    senders.append(struct.unpack("3i", raw))
+            elif level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                 if len(raw) % array.array("i").itemsize:
                     unexpected = True
                     continue
@@ -162,7 +174,10 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
             else:
                 unexpected = True
         if (unexpected or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
-            or not hmac.compare_digest(data, frame) or len(descriptors) != 1):
+            or not hmac.compare_digest(data, frame) or len(descriptors) != 1
+            or senders != [(broker.pid, broker.uid, broker.gid)]):
+            _deny()
+        if process_identity(senders[0][0]) != (broker.start_ticks, broker.cgroup):
             _deny()
         peer_verified(sock, broker)
         _secret_fd(descriptors[0])
@@ -200,17 +215,32 @@ def receive_recovery(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes)
     peer_verified(sock, broker)
     descriptors = []
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         payload, ancillary, flags, _ = sock.recvmsg(
             len(_RECOVER) + MAX_FRAME + 1,
-            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize),
+            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
+            + socket.CMSG_SPACE(struct.calcsize("3i")),
             socket.MSG_CMSG_CLOEXEC)
+        senders = []
+        unexpected = False
         for level, kind, raw in ancillary:
             if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                 part = array.array("i")
                 part.frombytes(raw[:len(raw) // part.itemsize * part.itemsize])
                 descriptors.extend(part)
-        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or ancillary
+                unexpected = True
+            elif level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                if len(raw) != struct.calcsize("3i"):
+                    unexpected = True
+                else:
+                    senders.append(struct.unpack("3i", raw))
+            else:
+                unexpected = True
+        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or unexpected
+            or senders != [(broker.pid, broker.uid, broker.gid)]
             or not hmac.compare_digest(payload, _RECOVER + frame)):
+            _deny()
+        if process_identity(senders[0][0]) != (broker.start_ticks, broker.cgroup):
             _deny()
         peer_verified(sock, broker)
     except OSError:
