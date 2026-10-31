@@ -121,6 +121,22 @@ def _secret_fd(fd: int):
         _deny()
 
 
+def prepare_receiver_socket(sock: socket.socket):
+    """Enable per-message credentials BEFORE a peer may queue any datagram.
+
+    Socket activation must apply this at creation, never opportunistically
+    after receiving a message. The peer cannot set this on our behalf.
+    """
+    try:
+        if sock.family != socket.AF_UNIX or sock.type & 0xf != socket.SOCK_SEQPACKET:
+            _deny()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
+            _deny()
+    except OSError:
+        _deny()
+
+
 def send_secret_fd(sock: socket.socket, fd: int, *, receiver: ExpectedPeer, frame: bytes):
     """One sealed read-only FD, one datagram; no secret bytes in control frame."""
     if type(frame) is not bytes or not 0 < len(frame) <= MAX_FRAME:
@@ -150,7 +166,8 @@ def receive_secret_fd(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes
         # SO_PEERCRED alone reflects socket connection time. Require
         # SCM_CREDENTIALS on the actual datagram too, rejecting inherited
         # post-fork socket endpoints with a substituted sender process.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
+            _deny()
         data, ancillary, flags, _ = sock.recvmsg(
             MAX_FRAME + 1,
             socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
@@ -215,7 +232,8 @@ def receive_recovery(sock: socket.socket, *, broker: ExpectedPeer, frame: bytes)
     peer_verified(sock, broker)
     descriptors = []
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
+            _deny()
         payload, ancillary, flags, _ = sock.recvmsg(
             len(_RECOVER) + MAX_FRAME + 1,
             socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
