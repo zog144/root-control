@@ -84,7 +84,7 @@ def test_owned_unix_endpoints_x11_cookie_and_namespace_identity(tmp_path, monkey
             backend.verify(project_root=project.path, binding=client_binding)
 
 
-@pytest.mark.parametrize('accepted', [True, False])
+@pytest.mark.parametrize('accepted', [True, False, 'truncated', 'malformed-rfb'])
 def test_x11_protocol_fixture_requires_cookie_acceptance(tmp_path, monkeypatch, accepted):
     import zog.root_control.workspace as module
     project = Project(tmp_path / 'project'); workspace = str(uuid4())
@@ -115,17 +115,17 @@ def test_x11_protocol_fixture_requires_cookie_acceptance(tmp_path, monkeypatch, 
             import struct
             return struct.pack('3i',os.getpid(),os.getuid(),os.getgid())
         def sendall(self, payload): sent.append(payload)
-        def recv(self, length): return (b'\x01' if accepted else b'\x00') + b'\0'*7 if self.path.endswith('X1') else b'RFB 003.008\n'
+        def recv(self, length): return ((b'\x01' if accepted is True or accepted == 'malformed-rfb' else b'\x01' if accepted == 'truncated' else b'\x00') + (b'' if accepted == 'truncated' else b'\0'*7)) if self.path.endswith('X1') else (b'RFB 003.x08\n' if accepted == 'malformed-rfb' else b'RFB 003.008\n')
         def close(self): pass
         def __enter__(self): return self
         def __exit__(self,*args): self.close()
     monkeypatch.setattr(socket,'socket',lambda *args:ProtocolSocket())
     monkeypatch.setattr(module.stat,'S_ISSOCK',lambda mode:True)
     backend = WorkspaceBackend(systemd)
-    if accepted:
+    if accepted is True:
         assert backend.verify(project_root=project.path,binding=binding)['ready']
     else:
-        with pytest.raises(WorkspaceError,match='rejected'):
+        with pytest.raises(WorkspaceError,match='rejected' if accepted is False or accepted == 'truncated' else 'RFB'):
             backend.verify(project_root=project.path,binding=binding)
     assert sent[0].endswith(bytes.fromhex('ab'*16))
     assert b'MIT-MAGIC-COOKIE-1' in sent[0]
