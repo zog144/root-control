@@ -144,7 +144,8 @@ class WorkspaceBackend:
                 name = b'MIT-MAGIC-COOKIE-1'
                 cookie = bytes.fromhex(raw['cookie_hex'])
                 client.sendall(struct.pack('<BBHHHHH', ord('l'), 0, 11, 0, len(name), len(cookie), 0) + name + b'\0' * (-len(name) % 4) + cookie)
-                if client.recv(8)[:1] != b'\x01':
+                response = client.recv(8)
+                if len(response) != 8 or response[0] != 1:
                     raise WorkspaceError('x11-authorization-failed', 'desktop rejected controller X11 authorization')
             with connect(runtime_base / 'run' / 'vnc.sock') as client:
                 banner = b''
@@ -153,7 +154,8 @@ class WorkspaceBackend:
                     if not part:
                         break
                     banner += part
-                if not banner.startswith(b'RFB ') or len(banner) != 12:
+                if (len(banner) != 12 or banner[:4] != b'RFB ' or banner[7:8] != b'.'
+                    or banner[11:12] != b'\n' or not banner[4:7].isdigit() or not banner[8:11].isdigit()):
                     raise WorkspaceError('vnc-not-ready', 'desktop has no valid RFB endpoint')
         except (OSError, ValueError) as exc:
             raise WorkspaceError('desktop-not-ready', str(exc)) from exc
