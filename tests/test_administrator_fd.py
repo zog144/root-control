@@ -195,103 +195,65 @@ def test_commit_reply_rejects_wrong_operation_and_account_and_fd_smuggling():
             broker.receive_commit(host, station=peer(), frame=operation)
 
 
-def commit(operation):
-    import json
-    selected = json.loads(operation)
-    return {
-        "schema": broker.COMMIT_SCHEMA,
-        "state": "committed-awaiting-host-signed-receipt",
-        "request_id": selected["request_id"],
-        "delivery_id": selected["delivery_id"],
-        "authorization_id": selected["authorization_id"],
-        "credential_revision": selected["credential_revision"],
-        "account_id": selected["account_id"],
-        "installed_at": 1793480000,
-    }
 
-
-def test_authenticated_commit_reply_on_original_recovery_channel():
-    original = frame()
-    expected = commit(original)
-    with sockets() as (installer, django):
-        # The protected owner enables response credentials BEFORE sending.
-        broker.prepare_receiver_socket(installer)
-        broker.send_recovery(installer, receiver=peer(), frame=original)
-        broker.receive_recovery(django, broker=peer(), frame=original)
-        broker.send_commit_result(django, broker=peer(),
-                                  frame=original, result=expected)
-        assert broker.receive_commit_result(
-            installer, receiver=peer(), frame=original) == expected
-
-
-@pytest.mark.parametrize("change,value", [
+@pytest.mark.parametrize("field,value", [
     ("request_id", "00000000-0000-0000-0000-000000000001"),
     ("delivery_id", "00000000-0000-0000-0000-000000000001"),
     ("authorization_id", "00000000-0000-0000-0000-000000000001"),
     ("credential_revision", 9), ("account_id", 999),
     ("state", "ready"), ("schema", "other"), ("installed_at", True),
 ])
-def test_commit_reply_rejects_foreign_identity_or_noncommit(change, value):
+def test_django_commit_reply_denies_foreign_request_revision_and_account(field, value):
     original = frame()
-    result = commit(original)
-    result[change] = value
-    with sockets() as (installer, django):
-        broker.prepare_receiver_socket(installer)
+    invalid = dict(committed(original), **{field: value})
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
         with pytest.raises(broker.ProtectedFdDenied):
-            broker.send_commit_result(django, broker=peer(),
-                                      frame=original, result=result)
+            broker.send_commit(station, receiver=peer(), frame=original, commit=invalid)
 
 
-def test_commit_reply_fails_closed_on_duplicate_keys_and_attached_fd():
+def test_recovery_reply_requires_original_operation_and_no_second_secret():
     original = frame()
-    data = broker._commit_payload(original, commit(original))
-    with sockets() as (installer, django):
-        broker.prepare_receiver_socket(installer)
-        # The exact original result is a map; duplicate JSON keys can never
-        # be used to redefine the selected account after transport checks.
-        duplicate = data[:-1] + b',"account_id":73}'
-        django.sendmsg([duplicate])
-        with pytest.raises(broker.ProtectedFdDenied):
-            broker.receive_commit_result(installer, receiver=peer(), frame=original)
-    with sockets() as (installer, django), sealed() as fd:
-        broker.prepare_receiver_socket(installer)
-        django.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                                array.array("i", [fd]).tobytes())])
-        with pytest.raises(broker.ProtectedFdDenied):
-            broker.receive_commit_result(installer, receiver=peer(), frame=original)
+    durable = committed(original)
+    # A lost first reply is not a license to send the FD or change password again.
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        broker.send_commit(station, receiver=peer(), frame=original, commit=durable)
+        # Deliberately lose the completed response by closing the channel.
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        broker.send_recovery(host, receiver=peer(), frame=original)
+        broker.receive_recovery(station, broker=peer(), frame=original)
+        broker.send_commit(station, receiver=peer(), frame=original, commit=durable)
+        assert broker.receive_commit(host, station=peer(), frame=original) == durable
 
 
-def test_lost_commit_response_requires_new_authenticated_inspection_not_redelivery():
+def test_duplicate_json_commit_keys_denied_on_receive():
     original = frame()
-    persisted = commit(original)
-    with sockets() as (installer, django):
-        # First send is lost before caller receives an acknowledgement; do
-        # not send another credential or repeat Django's password mutation.
-        broker.prepare_receiver_socket(installer)
-        broker.send_commit_result(django, broker=peer(), frame=original,
-                                  result=persisted)
-    with sockets() as (installer, django):
-        broker.prepare_receiver_socket(installer)
-        broker.send_recovery(installer, receiver=peer(), frame=original)
-        broker.receive_recovery(django, broker=peer(), frame=original)
-        broker.send_commit_result(django, broker=peer(), frame=original,
-                                  result=persisted)
-        assert broker.receive_commit_result(installer, receiver=peer(),
-                                            frame=original) == persisted
-
-
-def test_commit_reply_peer_and_response_credentials_are_mandatory():
-    original = frame()
-    value = commit(original)
-    with sockets() as (installer, django):
-        broker.send_commit_result(django, broker=peer(),
-                                  frame=original, result=value)
+    payload = broker._commit_payload(original, committed(original))
+    # Replay the same canonical outer frame with an extra duplicate inner key.
+    import json
+    wrapper = json.loads(payload[len(broker._COMMIT):])
+    content = json.dumps(wrapper, sort_keys=True, separators=(",", ":")).encode()
+    assert content == payload[len(broker._COMMIT):]
+    corrupted = payload[:-2] + b',"account_id":999}}'
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        station.sendmsg([corrupted])
         with pytest.raises(broker.ProtectedFdDenied):
-            broker.receive_commit_result(installer, receiver=peer(), frame=original)
-    with sockets() as (installer, django):
-        broker.prepare_receiver_socket(installer)
-        broker.send_commit_result(django, broker=peer(),
-                                  frame=original, result=value)
+            broker.receive_commit(host, station=peer(), frame=original)
+
+
+def test_commit_reply_rejects_missing_passcred_and_wrong_peer_epoch():
+    original = frame()
+    durable = committed(original)
+    with sockets() as (host, station):
+        broker.send_commit(station, receiver=peer(), frame=original, commit=durable)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit(host, station=peer(), frame=original)
+    with sockets() as (host, station):
+        broker.prepare_receiver_socket(host)
+        broker.send_commit(station, receiver=peer(), frame=original, commit=durable)
         wrong = replace(peer(), start_ticks=peer().start_ticks + 1)
         with pytest.raises(broker.ProtectedFdDenied):
-            broker.receive_commit_result(installer, receiver=wrong, frame=original)
+            broker.receive_commit(host, station=wrong, frame=original)
