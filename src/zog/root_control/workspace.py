@@ -144,7 +144,12 @@ class WorkspaceBackend:
                 name = b'MIT-MAGIC-COOKIE-1'
                 cookie = bytes.fromhex(raw['cookie_hex'])
                 client.sendall(struct.pack('<BBHHHHH', ord('l'), 0, 11, 0, len(name), len(cookie), 0) + name + b'\0' * (-len(name) % 4) + cookie)
-                response = client.recv(8)
+                response = b''
+                while len(response) < 8:
+                    part = client.recv(8 - len(response))
+                    if not part:
+                        break
+                    response += part
                 if len(response) != 8 or response[0] != 1:
                     raise WorkspaceError('x11-authorization-failed', 'desktop rejected controller X11 authorization')
             with connect(runtime_base / 'run' / 'vnc.sock') as client:
