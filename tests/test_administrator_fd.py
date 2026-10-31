@@ -15,6 +15,8 @@ from zog.root_control import administrator_fd as broker
 def sockets(kind=socket.SOCK_SEQPACKET):
     left, right = socket.socketpair(socket.AF_UNIX, kind)
     try:
+        if kind == socket.SOCK_SEQPACKET:
+            broker.prepare_receiver_socket(right)
         yield left, right
     finally:
         left.close()
@@ -58,6 +60,7 @@ def sealed(*, readonly=True, size=32, do_seal=True):
 def test_one_verified_sealed_readonly_fd_over_real_unix_seqpacket():
     left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     with left, right, sealed() as fd:
+        broker.prepare_receiver_socket(right)
         operation = frame()
         broker.send_secret_fd(left, fd, receiver=peer(), frame=operation)
         received = broker.receive_secret_fd(right, broker=peer(), frame=operation)
@@ -137,3 +140,12 @@ def test_recovery_control_requires_exact_peer_and_no_fds():
                        array.array("i", [fd]).tobytes())])
         with pytest.raises(broker.ProtectedFdDenied):
             broker.receive_recovery(right, broker=peer(), frame=operation)
+
+
+def test_socket_must_preinstall_passcred_before_receiving():
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with left, right, sealed() as fd:
+        operation = frame()
+        broker.send_secret_fd(left, fd, receiver=peer(), frame=operation)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_secret_fd(right, broker=peer(), frame=operation)
