@@ -380,3 +380,130 @@ def receive_commit(sock: socket.socket, *, station: ExpectedPeer, frame: bytes):
     finally:
         for fd in descriptors:
             os.close(fd)
+
+
+# Commit replies travel on the same authenticated, already-connected local
+# channel. They are not Host-signed installation receipts and never contain
+# password material. A lost reply is reconciled by the original recovery frame.
+_COMMIT_PREFIX = b"zog-admin-commit-v1\\0"
+COMMIT_SCHEMA = "zog-station-admin-password-protected-commit-v1"
+_COMMIT_FIELDS = frozenset({
+    "schema", "state", "request_id", "delivery_id", "authorization_id",
+    "credential_revision", "account_id", "installed_at",
+})
+
+
+def _commit_payload(frame: bytes, result: dict):
+    """Canonical and exact nonsecret Django commit matching the selected frame."""
+    if type(frame) is not bytes or not 0 < len(frame) <= MAX_FRAME:
+        _deny()
+    try:
+        operation = json.loads(frame)
+        if (type(operation) is not dict or set(operation) != _FIELDS
+                or operation.get("schema") != SCHEMA
+                or operation_frame(
+                    request_id=operation["request_id"],
+                    delivery_id=operation["delivery_id"],
+                    authorization_id=operation["authorization_id"],
+                    credential_revision=operation["credential_revision"],
+                    account_id=operation["account_id"]) != frame
+                or type(result) is not dict or set(result) != _COMMIT_FIELDS
+                or result["schema"] != COMMIT_SCHEMA
+                or result["state"] != "committed-awaiting-host-signed-receipt"
+                or type(result["installed_at"]) is not int
+                or result["installed_at"] <= 0
+                or any(result[key] != operation[key] or
+                       type(result[key]) is not type(operation[key])
+                       for key in ("request_id", "delivery_id", "authorization_id",
+                                   "credential_revision", "account_id"))):
+            _deny()
+        raw = json.dumps(result, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True, allow_nan=False).encode("ascii")
+        if len(_COMMIT_PREFIX) + len(raw) > MAX_FRAME:
+            _deny()
+        return _COMMIT_PREFIX + raw
+    except (TypeError, ValueError, KeyError, UnicodeError, OverflowError):
+        _deny()
+
+
+def send_commit_result(sock: socket.socket, *, broker: ExpectedPeer,
+                       frame: bytes, result: dict):
+    """Django->root nonsecret result, on the exact peer-authenticated channel.
+
+    The receiver process does not sign a Host receipt, nor can this response
+    authorize one: the independent native Host signer remains out of scope.
+    """
+    data = _commit_payload(frame, result)
+    peer_verified(sock, broker)
+    try:
+        if sock.sendmsg([data]) != len(data):
+            _deny()
+        peer_verified(sock, broker)
+    except OSError:
+        _deny()
+
+
+def receive_commit_result(sock: socket.socket, *, receiver: ExpectedPeer,
+                          frame: bytes):
+    """Root receives only a bounded exact commit, with no passed descriptors.
+
+    SO_PASSCRED must have been configured before the reply was queued. All
+    unexpected SCM_RIGHTS descriptors are closed even on protocol rejection.
+    """
+    peer_verified(sock, receiver)
+    descriptors = []
+    try:
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1:
+            _deny()
+        data, ancillary, flags, _ = sock.recvmsg(
+            MAX_FRAME + 1,
+            socket.CMSG_SPACE(_MAX_ANCILLARY_FDS * array.array("i").itemsize)
+            + socket.CMSG_SPACE(struct.calcsize("3i")),
+            socket.MSG_CMSG_CLOEXEC)
+        unexpected = False
+        senders = []
+        for level, kind, raw in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                if len(raw) != struct.calcsize("3i"):
+                    unexpected = True
+                else:
+                    senders.append(struct.unpack("3i", raw))
+            elif level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                part = array.array("i")
+                part.frombytes(raw[:len(raw) // part.itemsize * part.itemsize])
+                descriptors.extend(part)
+                unexpected = True
+            else:
+                unexpected = True
+        if (unexpected or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+                or senders != [(receiver.pid, receiver.uid, receiver.gid)]
+                or not data.startswith(_COMMIT_PREFIX)):
+            _deny()
+        try:
+            result = json.loads(data[len(_COMMIT_PREFIX):], object_pairs_hook=(
+                lambda pairs: _unique_commit(pairs)), parse_constant=lambda _: _deny())
+        except (ValueError, UnicodeError, TypeError):
+            _deny()
+        if not hmac.compare_digest(data, _commit_payload(frame, result)):
+            _deny()
+        if process_identity(senders[0][0]) != (receiver.start_ticks, receiver.cgroup):
+            _deny()
+        peer_verified(sock, receiver)
+        return result
+    except OSError:
+        _deny()
+    finally:
+        for fd in descriptors:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _unique_commit(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            _deny()
+        result[key] = value
+    return result
