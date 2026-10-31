@@ -193,3 +193,105 @@ def test_commit_reply_rejects_wrong_operation_and_account_and_fd_smuggling():
                                      array.array("i", [fd]).tobytes())])
         with pytest.raises(broker.ProtectedFdDenied):
             broker.receive_commit(host, station=peer(), frame=operation)
+
+
+def commit(operation):
+    import json
+    selected = json.loads(operation)
+    return {
+        "schema": broker.COMMIT_SCHEMA,
+        "state": "committed-awaiting-host-signed-receipt",
+        "request_id": selected["request_id"],
+        "delivery_id": selected["delivery_id"],
+        "authorization_id": selected["authorization_id"],
+        "credential_revision": selected["credential_revision"],
+        "account_id": selected["account_id"],
+        "installed_at": 1793480000,
+    }
+
+
+def test_authenticated_commit_reply_on_original_recovery_channel():
+    original = frame()
+    expected = commit(original)
+    with sockets() as (installer, django):
+        # The protected owner enables response credentials BEFORE sending.
+        broker.prepare_receiver_socket(installer)
+        broker.send_recovery(installer, receiver=peer(), frame=original)
+        broker.receive_recovery(django, broker=peer(), frame=original)
+        broker.send_commit_result(django, broker=peer(),
+                                  frame=original, result=expected)
+        assert broker.receive_commit_result(
+            installer, receiver=peer(), frame=original) == expected
+
+
+@pytest.mark.parametrize("change,value", [
+    ("request_id", "00000000-0000-0000-0000-000000000001"),
+    ("delivery_id", "00000000-0000-0000-0000-000000000001"),
+    ("authorization_id", "00000000-0000-0000-0000-000000000001"),
+    ("credential_revision", 9), ("account_id", 999),
+    ("state", "ready"), ("schema", "other"), ("installed_at", True),
+])
+def test_commit_reply_rejects_foreign_identity_or_noncommit(change, value):
+    original = frame()
+    result = commit(original)
+    result[change] = value
+    with sockets() as (installer, django):
+        broker.prepare_receiver_socket(installer)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.send_commit_result(django, broker=peer(),
+                                      frame=original, result=result)
+
+
+def test_commit_reply_fails_closed_on_duplicate_keys_and_attached_fd():
+    original = frame()
+    data = broker._commit_payload(original, commit(original))
+    with sockets() as (installer, django):
+        broker.prepare_receiver_socket(installer)
+        # The exact original result is a map; duplicate JSON keys can never
+        # be used to redefine the selected account after transport checks.
+        duplicate = data[:-1] + b',"account_id":73}'
+        django.sendmsg([duplicate])
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit_result(installer, receiver=peer(), frame=original)
+    with sockets() as (installer, django), sealed() as fd:
+        broker.prepare_receiver_socket(installer)
+        django.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                array.array("i", [fd]).tobytes())])
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit_result(installer, receiver=peer(), frame=original)
+
+
+def test_lost_commit_response_requires_new_authenticated_inspection_not_redelivery():
+    original = frame()
+    persisted = commit(original)
+    with sockets() as (installer, django):
+        # First send is lost before caller receives an acknowledgement; do
+        # not send another credential or repeat Django's password mutation.
+        broker.prepare_receiver_socket(installer)
+        broker.send_commit_result(django, broker=peer(), frame=original,
+                                  result=persisted)
+    with sockets() as (installer, django):
+        broker.prepare_receiver_socket(installer)
+        broker.send_recovery(installer, receiver=peer(), frame=original)
+        broker.receive_recovery(django, broker=peer(), frame=original)
+        broker.send_commit_result(django, broker=peer(), frame=original,
+                                  result=persisted)
+        assert broker.receive_commit_result(installer, receiver=peer(),
+                                            frame=original) == persisted
+
+
+def test_commit_reply_peer_and_response_credentials_are_mandatory():
+    original = frame()
+    value = commit(original)
+    with sockets() as (installer, django):
+        broker.send_commit_result(django, broker=peer(),
+                                  frame=original, result=value)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit_result(installer, receiver=peer(), frame=original)
+    with sockets() as (installer, django):
+        broker.prepare_receiver_socket(installer)
+        broker.send_commit_result(django, broker=peer(),
+                                  frame=original, result=value)
+        wrong = replace(peer(), start_ticks=peer().start_ticks + 1)
+        with pytest.raises(broker.ProtectedFdDenied):
+            broker.receive_commit_result(installer, receiver=wrong, frame=original)
