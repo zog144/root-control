@@ -268,14 +268,17 @@ class IssuerExecutionFence:
                 _deny()
             if row["revoked"]:
                 return row
-            if publish_pending_revocation() is not True:
-                _deny()
+            # Commit the irrevocable deny FIRST, while holding the same
+            # lock as launch. If the subsequent tombstone publication fails
+            # or crashes, this ledger remains terminal, not launchable.
             row["revoked"] = True
             row["epoch"] += 1
             for op in row["operations"].values():
                 if op["phase"] != "terminal":
                     op["phase"] = "cancel-pending"
             self._write(row)
+            if publish_pending_revocation() is not True:
+                _deny()
             return row
 
     def reboot(self, *, new_boot_id):
