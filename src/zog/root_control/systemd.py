@@ -815,6 +815,9 @@ class BusctlSystemdBackend:
                 raise ValueError('saved request selector differs from operation intent')
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError) as exc:
             raise SystemdBackendError('selected-program authority is unavailable or disagrees') from exc
+        # Root-owned selected execution binding. Never obtain the original
+        # request ID from the RPC payload or newly mint one on recovery.
+        return record['request_id']
 
     @staticmethod
     def _validate_local_login_manager(definition):
@@ -1150,6 +1153,53 @@ class BusctlSystemdBackend:
 
     def start_service(self, *, project_root, generation: str, definition: dict) -> None:
         self._validate_service_definition(project_root, generation, definition)
+        if (definition.get("application_name") == "certify-manage"
+                and definition.get("selected_program") is not None):
+            # All issuer-selected programs, including legacy issue, must take
+            # the fixed protected path. The broker only admits three named
+            # operations, so never let a differently named selected issuer
+            # program fall back to the generic systemd launch.
+            program = definition["selected_program"]
+            if program not in ("renew", "inspect", "stage"):
+                raise SystemdBackendError("selected issuer execution requires approved broker")
+            from .issuer_execution_fence import installed_fence, current_boot_id
+            request_id = self._validate_program_selection(project_root, definition)
+            boot = current_boot_id()
+            try:
+                with installed_fence() as (fence, committed_digest):
+                    def native_launch(*, request_id, program, epoch, boot_id):
+                        # Reopen authoritative controller operation under
+                        # the root-owner lock before touching PID1.
+                        if (boot_id != current_boot_id()
+                                or self._validate_program_selection(
+                                    project_root, definition) != request_id):
+                            raise SystemdBackendError("issuer selected intent changed")
+                        self._validate_service_definition(project_root, generation, definition)
+                        self._start_service_validated(project_root=project_root,
+                                                      generation=generation,
+                                                      definition=definition)
+                        observed = self.observe(project_root=project_root,
+                                                unit_name=definition["unit_name"])
+                        if (observed.get("exists") is not True
+                                or observed.get("unit_name") != definition["unit_name"]
+                                or observed.get("transient") is not True):
+                            raise SystemdBackendError("selected issuer PID1 identity unavailable")
+                        # No invented InvocationID for very short services.
+                        return {"request_id": request_id, "program": program,
+                                "runtime_id": definition["runtime_id"],
+                                "invocation_id": observed.get("invocation_id")}
+                    fence.admit(request_id=request_id, program=program,
+                                boot_id=boot, trusted_commit_sha256=committed_digest,
+                                native_launch=native_launch)
+                return
+            except Exception as exc:
+                raise SystemdBackendError("protected selected issuer admission unavailable") from exc
+        return self._start_service_validated(project_root=project_root,
+                                             generation=generation,
+                                             definition=definition)
+
+    def _start_service_validated(self, *, project_root, generation: str,
+                                 definition: dict) -> None:
         # Timings are diagnostic only, not evidence of program completion.
         # Emit only the already validated fixed systemd unit identity; no
         # command, environment, credential, policy or writable path values.
