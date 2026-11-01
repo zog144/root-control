@@ -221,3 +221,27 @@ def test_real_systemd_admission_lost_reply_keeps_uncertain_record(fenced, monkey
     assert count==[1]
     assert json.loads((root/STATE).read_text())[
         "operations"]["REQ-UNCERTAIN"]["phase"]=="admission-uncertain"
+
+
+
+def test_revocation_publication_loss_keeps_terminal_epoch_and_same_marker_retry(fenced):
+    fence, folder = fenced
+    fence.admit(request_id="REQ-1", program="inspect", boot_id=BOOT,
+                trusted_commit_sha256=COMMIT, native_launch=result)
+    sent=[]
+    def lost_marker():
+        sent.append(1)
+        raise OSError("interrupted after durable terminal epoch")
+    with pytest.raises(OSError):
+        fence.revoke(publish_pending_revocation=lost_marker)
+    state=json.loads((folder/STATE).read_text())
+    assert state["revoked"] is True and state["epoch"] == 2
+    assert state["operations"]["REQ-1"]["phase"] == "cancel-pending"
+    with pytest.raises(IssuerFenceDenied):
+        fence.admit(request_id="REQ-2",program="renew",boot_id=BOOT,
+                    trusted_commit_sha256=COMMIT,native_launch=result)
+    accepted=[]
+    assert fence.revoke(publish_pending_revocation=lambda:
+                        (accepted.append(1),True)[1])["epoch"] == 2
+    assert accepted == [1] and sent == [1]
+    assert fence.reboot(new_boot_id=NEXT_BOOT)["revoked"] is True
