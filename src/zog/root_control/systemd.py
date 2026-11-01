@@ -1167,6 +1167,10 @@ class BusctlSystemdBackend:
             boot = current_boot_id()
             try:
                 with installed_fence() as (fence, committed_digest):
+                    # A changed kernel boot epoch may not silently reuse a
+                    # previous runtime identity. Persist cleanup-pending before
+                    # any new selected execution is admitted.
+                    fence.reboot(new_boot_id=boot)
                     def native_launch(*, request_id, program, epoch, boot_id):
                         # Reopen authoritative controller operation under
                         # the root-owner lock before touching PID1.
