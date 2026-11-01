@@ -56,7 +56,7 @@ def _valid_id(value, expression):
 # authority stays 0755/0444 for non-root consumers; this nested directory is
 # root-only 0700 and is provisioned ONLY by the separately trusted installer.
 FIXED_PARENT = "/etc/zog/host-deploy"
-FIXED_DIRECTORY = "issuer-execution"
+FIXED_DIRECTORY = "selected-issuer-execution"
 # Reviewed source candidate only; installer pin update requires independent
 # rights and installed-wheels acceptance. A retained older commit fails closed.
 REVIEWED_BOX_CONTROL = "baca7f815974dbf685950c0c7e78f693dd0a96e2"
