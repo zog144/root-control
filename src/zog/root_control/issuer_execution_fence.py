@@ -52,6 +52,74 @@ def _valid_id(value, expression):
     return type(value) is str and expression.fullmatch(value) is not None
 
 
+# One fixed root-owned installation and lock identity. The public broker
+# authority stays 0755/0444 for non-root consumers; this nested directory is
+# root-only 0700 and is provisioned ONLY by the separately trusted installer.
+FIXED_PARENT = "/etc/zog/host-deploy"
+FIXED_DIRECTORY = "issuer-execution"
+# Reviewed source candidate only; installer pin update requires independent
+# rights and installed-wheels acceptance. A retained older commit fails closed.
+REVIEWED_BOX_CONTROL = "baca7f815974dbf685950c0c7e78f693dd0a96e2"
+
+
+@contextmanager
+def installed_fence():
+    """Fixed root-only opener shared by systemd admission and host-install.
+
+    The exact host-install final commit is read through the independent
+    broker-side protected reader. Neither the broker nor a client can supply
+    a replacement path/epoch/digest. Installation must pre-provision this
+    0700 child under an independently authorized root source.
+    """
+    if os.geteuid() != 0:
+        _deny()
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    child = None
+    try:
+        for name in ("etc", "zog", "host-deploy"):
+            following = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
+                                os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            os.close(parent)
+            parent = following
+            st = os.fstat(parent)
+            if (st.st_uid != 0 or st.st_gid != 0
+                    or st.st_mode & 0o022):
+                _deny()
+        from zog.box_control import issuer_broker_authority as authority
+        identity = authority._read_authority_in_parent(parent)
+        commit, raw, _ = authority._read_commit(parent)
+        if (identity["box_control_revision"] != REVIEWED_BOX_CONTROL
+                or commit["box_control_revision"] != REVIEWED_BOX_CONTROL):
+            _deny()
+        child = os.open(FIXED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY |
+                        os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        state = os.fstat(child)
+        if (state.st_uid != 0 or state.st_gid != 0
+                or stat.S_IMODE(state.st_mode) != 0o700
+                or state.st_dev != os.fstat(parent).st_dev):
+            _deny()
+        fence = IssuerExecutionFence(child)
+        yield fence, __import__("hashlib").sha256(raw).hexdigest()
+    except (OSError, ValueError, ImportError, KeyError):
+        _deny()
+    finally:
+        if child is not None:
+            os.close(child)
+        os.close(parent)
+
+
+def current_boot_id():
+    """Read the Linux kernel epoch, not an RPC-provided boot identity."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+            value = stream.read(80).strip().replace("-", "").lower()
+        if not _valid_id(value, _BOOT):
+            _deny()
+        return value
+    except (OSError, UnicodeError, ValueError):
+        _deny()
+
+
 class IssuerExecutionFence:
     """Durable execution intent plus a cross-process root-owner writer lock.
 
