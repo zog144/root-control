@@ -24,7 +24,8 @@ jobs:
           python -m pip install 'pytest>=8,<10' 'dbus-next==0.2.3'
           PYTHONPATH=src python -m pytest -q -ra \
             tests/test_issuer_execution_fence.py \
-            tests/test_issuer_systemd_fence.py
+            tests/test_issuer_systemd_fence.py \
+            tests/test_issuer_execution_reconcile.py
       - name: Declare native hold
         if: always()
         run: |
