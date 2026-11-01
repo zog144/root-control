@@ -335,6 +335,11 @@ class IssuerExecutionFence:
             if row is None:
                 _deny()
             if row["revoked"]:
+                # Earlier publication may have crashed after durable revoke.
+                # Repeat the original no-replacement marker write; never
+                # clear the terminal epoch or an uncertain operation.
+                if publish_pending_revocation() is not True:
+                    _deny()
                 return row
             # Commit the irrevocable deny FIRST, while holding the same
             # lock as launch. If the subsequent tombstone publication fails
