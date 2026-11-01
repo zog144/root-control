@@ -94,7 +94,8 @@ class Issuer:
             os.fsync(self.fd)
         except FileExistsError:
             fd=os.open(LOCK,os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.fd)
-        self._regular(fd)
+        inode=self._regular(fd)
+        self._lock_identity=(inode.st_dev,inode.st_ino)
         os.close(fd)
 
     def _regular(self,fd):
@@ -111,7 +112,8 @@ class Issuer:
             st=self._regular(fd)
             fcntl.flock(fd,fcntl.LOCK_EX)
             path=os.stat(LOCK,dir_fd=self.fd,follow_symlinks=False)
-            if (path.st_ino,path.st_dev)!=(st.st_ino,st.st_dev):deny()
+            if ((path.st_dev,path.st_ino)!=(st.st_dev,st.st_ino)
+                    or (st.st_dev,st.st_ino)!=self._lock_identity):deny()
             yield
         finally:
             fcntl.flock(fd,fcntl.LOCK_UN)
