@@ -92,7 +92,7 @@ def test_foreign_unit_or_uncertain_observation_never_stops(prepared, foreign):
 def test_interrupted_stop_and_lost_response_keep_cancel_pending(prepared):
     fence, backend, calls = prepared
     backend.lost = True
-    with pytest.raises(OSError):
+    with pytest.raises(IssuerFenceDenied):
         reconcile(backend)
     assert fence._read()["operations"]["REQ1"]["phase"] == "cancel-pending"
     backend.lost = False
