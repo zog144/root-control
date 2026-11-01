@@ -130,3 +130,94 @@ def test_corrupted_ledger_and_foreign_install_commit_fail_closed(fenced):
     with pytest.raises(IssuerFenceDenied):
         fence.admit(request_id="REQ-1", program="renew", boot_id=BOOT,
                     trusted_commit_sha256=COMMIT, native_launch=result)
+
+
+
+def test_actual_systemd_start_service_serializes_with_revoke(fenced, monkeypatch):
+    """Exercise actual BusctlSystemdBackend.start_service, not only model."""
+    from contextlib import contextmanager
+    from zog.root_control import issuer_execution_fence as module
+    from zog.root_control.systemd import BusctlSystemdBackend
+    fence, root = fenced
+    started, release, revoked = (threading.Event() for _ in range(3))
+    @contextmanager
+    def native_source():
+        yield fence, COMMIT
+    monkeypatch.setattr(module, "installed_fence", native_source)
+    monkeypatch.setattr(module, "current_boot_id", lambda: BOOT)
+    backend = BusctlSystemdBackend()
+    monkeypatch.setattr(backend, "_validate_service_definition",
+                        lambda *args, **kwargs: None)
+    monkeypatch.setattr(backend, "_validate_program_selection",
+                        lambda *args, **kwargs: "REQ-NATIVE")
+    dispatches = []
+    def admitted(**kwargs):
+        dispatches.append(kwargs)
+        started.set()
+        assert release.wait(3)
+    monkeypatch.setattr(backend, "_start_service_validated", admitted)
+    monkeypatch.setattr(backend, "observe", lambda **kwargs: {
+        "exists": True, "unit_name": kwargs["unit_name"],
+        "transient": True, "invocation_id": "d"*32,
+    })
+    definition = {
+        "application_name": "certify-manage",
+        "selected_program": "renew",
+        "runtime_id": "c"*32,
+        "unit_name": "zog-certify-" + "c"*32 + ".service",
+    }
+    errors = []
+    def start():
+        try:
+            backend.start_service(project_root="/synthetic",
+                                  generation="any", definition=definition)
+        except Exception as exc:
+            errors.append(exc)
+    worker = threading.Thread(target=start)
+    worker.start()
+    assert started.wait(3)
+    revoker = threading.Thread(target=lambda: (
+        fence.revoke(publish_pending_revocation=lambda: True),revoked.set()))
+    revoker.start()
+    assert not revoked.wait(.05)
+    release.set()
+    worker.join(3);revoker.join(3)
+    assert not worker.is_alive() and not revoker.is_alive()
+    assert not errors and revoked.is_set() and len(dispatches) == 1
+    assert json.loads((root / STATE).read_text())[
+        "operations"]["REQ-NATIVE"]["phase"] == "cancel-pending"
+    with pytest.raises(Exception, match="protected selected issuer admission unavailable"):
+        backend.start_service(project_root="/synthetic",
+                              generation="any", definition=definition)
+    assert len(dispatches) == 1
+
+
+def test_real_systemd_admission_lost_reply_keeps_uncertain_record(fenced, monkeypatch):
+    from contextlib import contextmanager
+    from zog.root_control import issuer_execution_fence as module
+    from zog.root_control.systemd import BusctlSystemdBackend
+    fence, root = fenced
+    @contextmanager
+    def native_source():
+        yield fence, COMMIT
+    monkeypatch.setattr(module, "installed_fence", native_source)
+    monkeypatch.setattr(module, "current_boot_id", lambda: BOOT)
+    backend=BusctlSystemdBackend()
+    monkeypatch.setattr(backend, "_validate_service_definition",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr(backend, "_validate_program_selection",
+                        lambda *a, **kw: "REQ-UNCERTAIN")
+    count=[]
+    def lost(**kw):
+        count.append(1)
+        raise OSError("PID1 acknowledgement unavailable")
+    monkeypatch.setattr(backend,"_start_service_validated",lost)
+    definition={"application_name":"certify-manage","selected_program":"renew",
+                "runtime_id":"c"*32,"unit_name":"zog-certify-"+ "c"*32+".service"}
+    for attempt in range(2):
+        with pytest.raises(Exception,match="protected selected issuer admission unavailable"):
+            backend.start_service(project_root="/synthetic",
+                                  generation="any", definition=definition)
+    assert count==[1]
+    assert json.loads((root/STATE).read_text())[
+        "operations"]["REQ-UNCERTAIN"]["phase"]=="admission-uncertain"
