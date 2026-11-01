@@ -117,3 +117,20 @@ def test_other_apps_remain_unchanged_and_legacy_issuer_is_denied(entry):
         start(backend, dict(definition, selected_program="issue",
                             program_name="issue"))
     assert commands == ["editor"]
+
+
+def test_no_second_privileged_selected_start_entrypoint_is_exposed():
+    """Generic daemon RPC must pass through the single protected wrapper."""
+    import inspect
+    from pathlib import Path
+    from zog.root_control import systemd, daemon
+    source = inspect.getsource(systemd.BusctlSystemdBackend.start_service)
+    handler = inspect.getsource(daemon.RootControlDaemon.handle)
+    assert "with installed_fence()" in source
+    assert "fence.admit(" in source
+    assert "fence.reboot(" in source
+    assert "self.systemd.start_service(" in handler
+    assert "self.systemd._start_service_validated(" not in handler
+    assert "issuer_execution_adapter" not in handler
+    assert not (Path(systemd.__file__).parent /
+                "issuer_execution_adapter.py").exists()
