@@ -28,7 +28,7 @@ def _deny():
 
 
 @contextmanager
-def protected_execution_directory():
+def protected_execution_directory(*, for_revocation=False):
     """Open exact root:root ancestry, 0755 parent and fixed 0700 ledger.
 
     Never creates missing STATE, lock directory, or an authority record.
@@ -49,7 +49,8 @@ def protected_execution_directory():
         if stat.S_IMODE(os.fstat(fd).st_mode) != 0o755:
             _deny()
         # Revocation can be pending or committed. Both are terminal.
-        _require_no_revocation(fd)
+        if not for_revocation:
+            _require_no_revocation(fd)
         commit = _read_commit(fd)
         nxt = os.open(_FENCE_DIR, os.O_RDONLY | os.O_DIRECTORY |
                       os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
