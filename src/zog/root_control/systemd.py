@@ -1421,6 +1421,22 @@ class BusctlSystemdBackend:
             "properties": [[name, value] for name, value in properties],
         }
 
+    def reconcile_selected_issuer(self, *, project_root, request_id,
+                                  trusted_cleanup_witness):
+        """Root-only selected cleanup; no generic RPC or caller unit selector.
+
+        The native root lifecycle controller must independently instantiate
+        this witness from protected process/cgroup and filesystem evidence.
+        A timer/box-control request cannot install a callback through RPC.
+        """
+        if os.geteuid() != 0:
+            raise SystemdBackendError("protected issuer cleanup requires root")
+        from .issuer_execution_reconcile import reconcile_selected_issuer
+        return reconcile_selected_issuer(
+            self, project_root=project_root, request_id=request_id,
+            trusted_cleanup_witness=trusted_cleanup_witness,
+        )
+
     def kill(self, *, project_root, unit_name: str, signal_number: int) -> None:
         self._validate_unit(project_root, unit_name)
         self._manager_call("KillUnit", "ssi", unit_name, "all", int(signal_number))
