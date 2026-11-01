@@ -106,7 +106,19 @@ def installed_fence(*, for_revocation=False):
                 or state.st_dev != os.fstat(parent).st_dev):
             _deny()
         fence = IssuerExecutionFence(child)
-        yield fence, __import__("hashlib").sha256(raw).hexdigest()
+        from zog.host_install.certificate_selected_broker_install import (
+            ROOT_CONTROL_EXECUTION_REVIEWED_COMMIT, BOX_CONTROL_REVIEWED_COMMIT,
+        )
+        from .issuer_execution_provenance import require_installed_provenance
+        commit_sha = __import__("hashlib").sha256(raw).hexdigest()
+        if BOX_CONTROL_REVIEWED_COMMIT != REVIEWED_BOX_CONTROL:
+            _deny()
+        require_installed_provenance(
+            child, root_control_revision=ROOT_CONTROL_EXECUTION_REVIEWED_COMMIT,
+            box_control_revision=REVIEWED_BOX_CONTROL,
+            commit_sha256=commit_sha, identities=commit,
+        )
+        yield fence, commit_sha
     except (OSError, ValueError, ImportError, KeyError):
         _deny()
     finally:
