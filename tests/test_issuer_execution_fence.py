@@ -232,7 +232,7 @@ def test_revocation_publication_loss_keeps_terminal_epoch_and_same_marker_retry(
     def lost_marker():
         sent.append(1)
         raise OSError("interrupted after durable terminal epoch")
-    with pytest.raises(OSError):
+    with pytest.raises(IssuerFenceDenied):
         fence.revoke(publish_pending_revocation=lost_marker)
     state=json.loads((folder/STATE).read_text())
     assert state["revoked"] is True and state["epoch"] == 2
