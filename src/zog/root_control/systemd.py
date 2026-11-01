@@ -1270,19 +1270,11 @@ class BusctlSystemdBackend:
         emit("systemd-start-service-job-dispatch-attempt", unit_name=unit,
              preparation_seconds=round(time.monotonic() - started_at, 6))
         try:
-            def dispatch_job():
-                self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
-                          [unit, "fail", props, []])
-            if (definition.get("application_name") == "certify-manage"
-                    and definition.get("selected_program") is not None):
-                # This IS the real PID1 selected-program admission path, not
-                # an optional broker-side preflight. No unfenced fallback.
-                from .issuer_execution_adapter import admit_selected_start
-                admit_selected_start(
-                    self, project_root=project_root, definition=definition,
-                    dispatch=dispatch_job)
-            else:
-                dispatch_job()
+            # The public start_service() entry above already enters the
+            # fixed installed_fence() for selected issuer lifecycles. Do not
+            # recurse into a second admission fence at the PID1 boundary.
+            self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
+                      [unit, "fail", props, []])
         except Exception:
             # A failed local wait cannot prove PID1 rejected the job.
             emit("systemd-start-service-job-unconfirmed", unit_name=unit,
