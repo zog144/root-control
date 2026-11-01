@@ -123,9 +123,11 @@ def test_no_second_privileged_selected_start_entrypoint_is_exposed():
     """Generic daemon RPC must pass through the single protected wrapper."""
     import inspect
     from pathlib import Path
-    from zog.root_control import systemd, daemon
+    from zog.root_control import systemd
     source = inspect.getsource(systemd.BusctlSystemdBackend.start_service)
-    handler = inspect.getsource(daemon.RootControlDaemon.handle)
+    # The minimal root-control source test intentionally lacks the separate
+    # box-control image-build dependency required to import daemon itself.
+    handler = (Path(systemd.__file__).parent / "daemon.py").read_text()
     assert "with installed_fence()" in source
     assert "fence.admit(" in source
     assert "fence.reboot(" in source
