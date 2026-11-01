@@ -66,7 +66,9 @@ def test_lost_launch_reply_never_replays(fenced):
     def uncertain(**args):
         count.append(args)
         raise OSError("lost launch result")
-    with pytest.raises(OSError):
+    # The protected adapter redacts the callback's external error while
+    # retaining its durable uncertain-launch record for reconciliation.
+    with pytest.raises(IssuerFenceDenied):
         fence.admit(request_id="REQ-1", program="renew", boot_id=BOOT,
                     trusted_commit_sha256=COMMIT, native_launch=uncertain)
     assert len(count) == 1
