@@ -63,7 +63,7 @@ REVIEWED_BOX_CONTROL = "baca7f815974dbf685950c0c7e78f693dd0a96e2"
 
 
 @contextmanager
-def installed_fence():
+def installed_fence(*, for_revocation=False):
     """Fixed root-only opener shared by systemd admission and host-install.
 
     The exact host-install final commit is read through the independent
@@ -86,10 +86,17 @@ def installed_fence():
                     or st.st_mode & 0o022):
                 _deny()
         from zog.box_control import issuer_broker_authority as authority
-        identity = authority._read_authority_in_parent(parent)
+        # Only the root-owned revocation installer may use the narrowed
+        # marker-resumption mode. It still must attest the original signed
+        # owner approval, projection, receipt and commit under this fence.
+        # Ordinary PID1 admission always requires the live unrevoked
+        # projection and its exact committed installation.
+        if not for_revocation:
+            identity = authority._read_authority_in_parent(parent)
         commit, raw, _ = authority._read_commit(parent)
-        if (identity["box_control_revision"] != REVIEWED_BOX_CONTROL
-                or commit["box_control_revision"] != REVIEWED_BOX_CONTROL):
+        if (commit["box_control_revision"] != REVIEWED_BOX_CONTROL
+                or (not for_revocation and
+                    identity["box_control_revision"] != REVIEWED_BOX_CONTROL)):
             _deny()
         child = os.open(FIXED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY |
                         os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
