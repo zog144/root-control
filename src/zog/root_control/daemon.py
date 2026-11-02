@@ -279,7 +279,7 @@ class RootControlDaemon:
 
     def _dispatch(self, conn, request, workers, slots):
         operation = self._authorize_role_request(request)
-        lane = 1 if operation in {'ping', 'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
+        lane = 1 if operation in {'ping', 'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'workspace_readiness', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
@@ -413,10 +413,16 @@ class RootControlDaemon:
             self.systemd.delete_application_storage(project_root=request['project_root'],
                 application=request['application'], storage_id=request['storage_id'])
             return {"ok": True, "result": None}
-        if operation in {'workspace_prepare', 'workspace_verify'}:
+        if operation in {'workspace_prepare', 'workspace_verify', 'workspace_readiness'}:
             from .workspace import WorkspaceBackend
-            backend = WorkspaceBackend(BusctlSystemdBackend() if operation == 'workspace_verify' else self.systemd)
-            return {"ok": True, "result": getattr(backend, operation[10:])(**{k:v for k,v in request.items() if k != 'operation'})}
+            backend = WorkspaceBackend(BusctlSystemdBackend() if operation in {'workspace_verify', 'workspace_readiness'} else self.systemd)
+            arguments = {k:v for k,v in request.items() if k != 'operation'}
+            if operation == 'workspace_readiness':
+                if set(arguments) != {'project_root', 'binding'}:
+                    raise ValueError('unsupported workspace readiness arguments')
+                from .workspace_readiness import inspect
+                return {"ok": True, "result": inspect(backend, **arguments)}
+            return {"ok": True, "result": getattr(backend, operation[10:])(**arguments)}
         if operation == "systemd_version":
             return {"ok": True, "result": self.systemd.version()}
         if operation == "systemd_start_slice":
