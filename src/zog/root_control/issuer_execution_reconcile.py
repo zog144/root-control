@@ -92,4 +92,5 @@ def reconcile_selected_issuer(backend, *, project_root, request_id,
         # leaves it on exceptions, uncertain PID1 observations, or failed
         # independently authenticated cleanup.
         return fence.reconcile(request_id=request_id,
-                               verify_stopped_and_clean=stop_and_verify)
+                               verify_stopped_and_clean=stop_and_verify,
+                               expected_program=program)
