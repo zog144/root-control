@@ -79,9 +79,9 @@ class FakeSocket:
         self.sent = payload
     def recv(self, count):
         if not self.data:
-            self.data = (b"\\x01\\0\\x0b\\0\\0\\0\\0\\0"
-                         if self.x11_accepted else b"\\x00\\0" * 4) if self.path.endswith("/X1") else (
-                            b"RFB 003.008\\n" if self.rfb_valid else b"RFB 003.x08\\n")
+            self.data = (b"\x01\0\x0b\0\0\0\0\0"
+                         if self.x11_accepted else b"\x00\0" * 4) if self.path.endswith("/X1") else (
+                            b"RFB 003.008\n" if self.rfb_valid else b"RFB 003.x08\n")
         answer, self.data = self.data[:count], self.data[count:]
         return answer
 
