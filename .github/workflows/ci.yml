@@ -2,7 +2,7 @@ name: Public source verification
 
 on:
   push:
-    branches: [main, unstable]
+    branches: [main, unstable, regular/graphical-checkpoint-issuer-prototype-20261101]
   pull_request:
     branches: [main, unstable]
   workflow_dispatch:
