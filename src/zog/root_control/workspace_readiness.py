@@ -129,7 +129,7 @@ def _probe(path, *, uid, namespace, groups, x11, cookie):
                 name = b"MIT-MAGIC-COOKIE-1"
                 client.sendall(struct.pack("<BBHHHHH", ord("l"), 0, 11, 0,
                             len(name), len(cookie), 0) + name +
-                            b"\\0" * (-len(name) % 4) + cookie)
+                            b"\0" * (-len(name) % 4) + cookie)
                 response = b""
                 while len(response) < 8:
                     fragment = client.recv(8 - len(response))
@@ -146,7 +146,7 @@ def _probe(path, *, uid, namespace, groups, x11, cookie):
                         break
                     banner += fragment
                 if (len(banner) != 12 or banner[:4] != b"RFB " or
-                        banner[7:8] != b"." or banner[11:12] != b"\\n" or
+                        banner[7:8] != b"." or banner[11:12] != b"\n" or
                         not banner[4:7].isdigit() or not banner[8:11].isdigit()):
                     return {"status": "failed", "code": "rfb-invalid"}
             return {"status": "confirmed", "code": "ok"}
