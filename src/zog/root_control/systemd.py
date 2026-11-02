@@ -815,6 +815,9 @@ class BusctlSystemdBackend:
                 raise ValueError('saved request selector differs from operation intent')
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError) as exc:
             raise SystemdBackendError('selected-program authority is unavailable or disagrees') from exc
+        # Root-owned selected execution binding. Never obtain the original
+        # request ID from the RPC payload or newly mint one on recovery.
+        return record['request_id']
 
     @staticmethod
     def _validate_local_login_manager(definition):
@@ -1150,6 +1153,57 @@ class BusctlSystemdBackend:
 
     def start_service(self, *, project_root, generation: str, definition: dict) -> None:
         self._validate_service_definition(project_root, generation, definition)
+        if (definition.get("application_name") == "certify-manage"
+                and definition.get("selected_program") is not None):
+            # All issuer-selected programs, including legacy issue, must take
+            # the fixed protected path. The broker only admits three named
+            # operations, so never let a differently named selected issuer
+            # program fall back to the generic systemd launch.
+            program = definition["selected_program"]
+            if program not in ("renew", "inspect", "stage"):
+                raise SystemdBackendError("selected issuer execution requires approved broker")
+            from .issuer_execution_fence import installed_fence, current_boot_id
+            request_id = self._validate_program_selection(project_root, definition)
+            boot = current_boot_id()
+            try:
+                with installed_fence() as (fence, committed_digest):
+                    # A changed kernel boot epoch may not silently reuse a
+                    # previous runtime identity. Persist cleanup-pending before
+                    # any new selected execution is admitted.
+                    fence.reboot(new_boot_id=boot)
+                    def native_launch(*, request_id, program, epoch, boot_id):
+                        # Reopen authoritative controller operation under
+                        # the root-owner lock before touching PID1.
+                        if (boot_id != current_boot_id()
+                                or self._validate_program_selection(
+                                    project_root, definition) != request_id):
+                            raise SystemdBackendError("issuer selected intent changed")
+                        self._validate_service_definition(project_root, generation, definition)
+                        self._start_service_validated(project_root=project_root,
+                                                      generation=generation,
+                                                      definition=definition)
+                        observed = self.observe(project_root=project_root,
+                                                unit_name=definition["unit_name"])
+                        if (observed.get("exists") is not True
+                                or observed.get("unit_name") != definition["unit_name"]
+                                or observed.get("transient") is not True):
+                            raise SystemdBackendError("selected issuer PID1 identity unavailable")
+                        # No invented InvocationID for very short services.
+                        return {"request_id": request_id, "program": program,
+                                "runtime_id": definition["runtime_id"],
+                                "invocation_id": observed.get("invocation_id")}
+                    fence.admit(request_id=request_id, program=program,
+                                boot_id=boot, trusted_commit_sha256=committed_digest,
+                                native_launch=native_launch)
+                return
+            except Exception as exc:
+                raise SystemdBackendError("protected selected issuer admission unavailable") from exc
+        return self._start_service_validated(project_root=project_root,
+                                             generation=generation,
+                                             definition=definition)
+
+    def _start_service_validated(self, *, project_root, generation: str,
+                                 definition: dict) -> None:
         # Timings are diagnostic only, not evidence of program completion.
         # Emit only the already validated fixed systemd unit identity; no
         # command, environment, credential, policy or writable path values.
@@ -1216,6 +1270,9 @@ class BusctlSystemdBackend:
         emit("systemd-start-service-job-dispatch-attempt", unit_name=unit,
              preparation_seconds=round(time.monotonic() - started_at, 6))
         try:
+            # The public start_service() entry above already enters the
+            # fixed installed_fence() for selected issuer lifecycles. Do not
+            # recurse into a second admission fence at the PID1 boundary.
             self._job("StartTransientUnit", "ssa(sv)a(sa(sv))",
                       [unit, "fail", props, []])
         except Exception:
@@ -1363,6 +1420,22 @@ class BusctlSystemdBackend:
             "control_group": str(control_group) if control_group else None,
             "properties": [[name, value] for name, value in properties],
         }
+
+    def reconcile_selected_issuer(self, *, project_root, request_id,
+                                  trusted_cleanup_witness):
+        """Root-only selected cleanup; no generic RPC or caller unit selector.
+
+        The native root lifecycle controller must independently instantiate
+        this witness from protected process/cgroup and filesystem evidence.
+        A timer/box-control request cannot install a callback through RPC.
+        """
+        if os.geteuid() != 0:
+            raise SystemdBackendError("protected issuer cleanup requires root")
+        from .issuer_execution_reconcile import reconcile_selected_issuer
+        return reconcile_selected_issuer(
+            self, project_root=project_root, request_id=request_id,
+            trusted_cleanup_witness=trusted_cleanup_witness,
+        )
 
     def kill(self, *, project_root, unit_name: str, signal_number: int) -> None:
         self._validate_unit(project_root, unit_name)
