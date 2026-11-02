@@ -45,10 +45,15 @@ def _bounded_file(path, limit=MAX_MECHANISM):
 
 
 def _endpoint_info(path):
-    info = path.lstat()
-    if not stat.S_ISSOCK(info.st_mode):
-        raise _Untrusted()
-    return (info.st_dev, info.st_ino)
+    # Missing or substituted endpoints are independently UNKNOWN. A missing
+    # RFB socket cannot erase otherwise verified X11 authorization evidence.
+    try:
+        info = path.lstat()
+        if not stat.S_ISSOCK(info.st_mode):
+            return None
+        return (info.st_dev, info.st_ino)
+    except OSError:
+        return None
 
 
 def _context(backend, project_root, binding):
@@ -165,8 +170,13 @@ def inspect(backend, *, project_root, binding):
     try:
         initial = _context(backend, project_root, binding)
         project, mechanism, authority, cookie, uid, ns, groups, x11, rfb, endpoints, selected = initial
-        result_x11 = _probe(x11, uid=uid, namespace=ns, groups=groups, x11=True, cookie=cookie)
-        result_rfb = _probe(rfb, uid=uid, namespace=ns, groups=groups, x11=False, cookie=cookie)
+        offline = {"status": "unknown", "code": "probe-unavailable"}
+        result_x11 = (_probe(x11, uid=uid, namespace=ns, groups=groups,
+                             x11=True, cookie=cookie)
+                      if endpoints[0] is not None else dict(offline))
+        result_rfb = (_probe(rfb, uid=uid, namespace=ns, groups=groups,
+                             x11=False, cookie=cookie)
+                      if endpoints[1] is not None else dict(offline))
         # Re-evaluate all authority and runtime evidence after both live probes.
         final = _context(backend, project_root, binding)
         if (final[1] != mechanism or final[2] != authority or
