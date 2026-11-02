@@ -139,3 +139,30 @@ def test_stop_ack_is_not_cleanup_proof(prepared):
     with pytest.raises(IssuerFenceDenied):
         reconcile(backend)
     assert fence._read()["operations"]["REQ1"]["phase"] == "cancel-pending"
+
+
+def test_original_program_mismatch_cannot_stop_or_finalize(prepared, monkeypatch):
+    """A different selected operation must not inherit a retained InvocationID."""
+    fence, backend, calls = prepared
+    monkeypatch.setattr(cleanup, "_authoritative_unit",
+                        lambda project_root, request_id:
+                            (UNIT, "RUNTIME1", "inspect"))
+    with pytest.raises(IssuerFenceDenied):
+        reconcile(backend)
+    assert calls == []
+    assert fence._read()["operations"]["REQ1"]["phase"] == "running"
+
+
+def test_original_program_mismatch_cannot_relabel_completed_cleanup(
+        prepared, monkeypatch):
+    fence, backend, calls = prepared
+    assert reconcile(backend)["phase"] == "terminal"
+    calls.clear()
+    monkeypatch.setattr(cleanup, "_authoritative_unit",
+                        lambda project_root, request_id:
+                            (UNIT, "RUNTIME1", "stage"))
+    with pytest.raises(IssuerFenceDenied):
+        reconcile(backend)
+    assert calls == []
+    assert fence._read()["operations"]["REQ1"]["program"] == "renew"
+    assert fence._read()["operations"]["REQ1"]["phase"] == "terminal"
