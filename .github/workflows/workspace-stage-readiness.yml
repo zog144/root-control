@@ -1,0 +1,57 @@
+name: Independent Workspace stage evidence — source only
+on:
+  push:
+    branches: [regular/workspace-independent-readiness-20261102]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  read-only-probes:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: zog144/box-control
+          ref: fc51bedbcc42a38db82e0ce2ffb573585d22fc24
+          path: companions/box-control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: zog144/zog
+          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
+          path: companions/zog
+          persist-credentials: false
+      - name: Use non-shadowing, immutable historical support modules only
+        run: |
+          test "$(git -C companions/zog rev-parse HEAD)" = d47d86b363824c718d9c165124cb55bbed12e0f9
+          python - <<'PY'
+          from pathlib import Path
+          src=Path('companions/zog/src/zog').resolve()
+          dst=Path('.ci-deps/zog')
+          dst.mkdir(parents=True,exist_ok=True)
+          for p in src.iterdir():
+              if p.name in {'__init__.py','__pycache__','root_control','box_control'}:
+                  continue
+              if p.is_dir() or (p.is_file() and p.suffix=='.py'):
+                  (dst/p.name).symlink_to(p)
+          assert not (dst/'__init__.py').exists()
+          assert (dst/'image_build').is_dir()
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: |
+          test "$(git -C companions/box-control rev-parse HEAD)" = fc51bedbcc42a38db82e0ce2ffb573585d22fc24
+          python -m pip install 'pytest>=8,<10' 'dbus-next==0.2.3'
+          PYTHONPATH="$PWD/src:$PWD/companions/box-control/box-control/src:$PWD/.ci-deps:$PWD/tests" python -m compileall -q src/zog/root_control/workspace_readiness.py src/zog/root_control/daemon.py tests/test_workspace_readiness.py
+          PYTHONPATH="$PWD/src:$PWD/companions/box-control/box-control/src:$PWD/.ci-deps:$PWD/tests" python -m pytest -q -rs tests/test_workspace_readiness.py tests/test_workspace_backend.py
+      - name: Native evidence still required
+        if: always()
+        run: echo 'Synthetic source probes are not an independently authorized live desktop, X server or RFB service.' >> "$GITHUB_STEP_SUMMARY"
