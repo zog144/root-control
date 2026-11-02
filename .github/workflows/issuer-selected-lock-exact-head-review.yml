@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: zog144/host-install
-          ref: 8429496b222792a4de97e9eda01d3538a1b005b2
+          ref: bd588bbe6fd06fe8484e2d0ae418110aa280d9a5
           path: companion/host-install
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
       - name: Pin exact original reviewed owners
         run: |
           test "$(git -C companion/box-control rev-parse HEAD)" = baca7f815974dbf685950c0c7e78f693dd0a96e2
-          test "$(git -C companion/host-install rev-parse HEAD)" = 8429496b222792a4de97e9eda01d3538a1b005b2
+          test "$(git -C companion/host-install rev-parse HEAD)" = bd588bbe6fd06fe8484e2d0ae418110aa280d9a5
           test "$(git -C companion/zog rev-parse HEAD)" = d47d86b363824c718d9c165124cb55bbed12e0f9
       - name: Retain real reviewed owner modules, supply unrelated namespace ancestors
         run: |
