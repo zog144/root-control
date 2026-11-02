@@ -29,6 +29,12 @@ jobs:
           ref: 437b4448b7af7de5f4237cdf56fac924c833d279
           path: companion/host-install
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: zog144/zog
+          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
+          path: companion/zog
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -36,10 +42,26 @@ jobs:
         run: |
           test "$(git -C companion/box-control rev-parse HEAD)" = baca7f815974dbf685950c0c7e78f693dd0a96e2
           test "$(git -C companion/host-install rev-parse HEAD)" = 437b4448b7af7de5f4237cdf56fac924c833d279
+          test "$(git -C companion/zog rev-parse HEAD)" = d47d86b363824c718d9c165124cb55bbed12e0f9
+      - name: Retain real reviewed owner modules, supply unrelated namespace ancestors
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source=Path('companion/zog/src/zog').resolve()
+          target=Path('.ci-support/zog')
+          target.mkdir(parents=True,exist_ok=True)
+          for child in source.iterdir():
+              if child.name in {'__init__.py','box_control','root_control',
+                                'host_install','__pycache__'}:
+                  continue
+              if child.is_dir() or (child.is_file() and child.suffix=='.py'):
+                  (target/child.name).symlink_to(child)
+          assert not (target/'__init__.py').exists()
+          PY
       - name: Verify no implicit lock rebootstrap and selected cancellation/reconciliation source
         run: |
           python -m pip install 'pytest>=8,<10' 'dbus-next==0.2.3' 'cryptography>=44,<49'
-          PYTHONPATH="$PWD/src:$PWD/companion/box-control/box-control/src:$PWD/companion/host-install/src:$PWD/companion/box-control/box-control/tests" \
+          PYTHONPATH="$PWD/src:$PWD/companion/box-control/box-control/src:$PWD/companion/host-install/src:$PWD/.ci-support:$PWD/companion/box-control/box-control/tests" \
             python -m pytest -q -rs tests/test_issuer_execution_fence.py \
               tests/test_issuer_systemd_fence.py \
               tests/test_issuer_execution_reconcile.py \
@@ -47,7 +69,7 @@ jobs:
               -k 'not pending_marker_lost_response_still_denies_real_execution'
       - name: Root-owned exact projection / missing final marker / reboot hold
         run: |
-          sudo -E env PYTHONPATH="$PWD/src:$PWD/companion/box-control/box-control/src:$PWD/companion/host-install/src:$PWD/companion/box-control/box-control/tests" \
+          sudo -E env PYTHONPATH="$PWD/src:$PWD/companion/box-control/box-control/src:$PWD/companion/host-install/src:$PWD/.ci-support:$PWD/companion/box-control/box-control/tests" \
             "$(command -v python)" -m pytest -q -rs \
               tests/test_issuer_exact_combined_security.py
       - name: Native approval withheld
