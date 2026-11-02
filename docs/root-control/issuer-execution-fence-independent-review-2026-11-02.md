@@ -5,12 +5,14 @@
 **Exact reviewed original heads:** root-control PR #23
 `32ec525903834d3a707e5aace408cf4dbee32d83`;
 box-control PR #15 `baca7f815974dbf685950c0c7e78f693dd0a96e2`;
-host-install PR #15 `437b4448b7af7de5f4237cdf56fac924c833d279`.
+host-install PR #15 `afab16e0d1d13ce4a529d4a2425836d13722f6cd`.
 The proposed **additional** root-only lock correction is deliberately on a
 separate review branch, not silently installed or selected by host-install's
 source/RECORD trust digest.
 
 ## Independent review outcomes
+
+**Exact execution commit point:** root-control durably writes an `admission-uncertain` record under its original protected writer lock **before** calling the validated selected-program systemd start. `running` is committed only after the native callback returns and the matching transient unit and InvocationID have been observed. A successful dispatch without an acknowledgement is **not** a new admissible request, and the missing InvocationID is never synthesized. The already-running invocation does not terminate merely because the private revocation epoch becomes durable; cancellation/cleanup is separate.
 
 **Selected admission:** box-control rechecks committed projection and pending
 or final tombstone before mutation; protected root-control
@@ -64,6 +66,8 @@ guarantee, and independent installed provenance/native reboot acceptance
 remain necessary.
 
 ## Source evidence and native stop condition
+
+The latest host-install recovery-only source head `afab16e0...` adds deep snapshots of nested original owner/ledger evidence for revocation and abandonment; its [exact-head source CI 41539075214](https://github.com/zog144/host-install/actions/runs/41539075214) completed successfully. The cross-owner review workflow pins that same head for its new run. These head updates are review-only and do not replace an authorized installed-source pin.
 
 Existing original source CI: root-control selected fence, public source and
 privileged socket tests PASS at the original PR #23 head; box-control
