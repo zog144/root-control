@@ -146,6 +146,17 @@ def test_root_operation_is_nonmutating_and_unknown_on_missing_endpoint(model, mo
     before = {p: p.read_bytes() for p in project.state_dir.rglob("*.json")}
     (root / "x11" / "X1").unlink()
     result = ready.inspect(backend, project_root=project.path, binding=binding)
-    assert result["endpoint_identity"] is None
+    assert len(result["endpoint_identity"]) == 64
     assert result["x11"]["status"] == result["rfb"]["status"] == "unknown"
     assert before == {p: p.read_bytes() for p in project.state_dir.rglob("*.json")}
+
+
+def test_rfb_socket_loss_does_not_suppress_independent_x11_confirmation(
+        model, monkeypatch):
+    backend, project, binding, root = model
+    (root / "run" / "vnc.sock").unlink()
+    monkeypatch.setattr(ready.socket, "socket", lambda *a, **k: FakeSocket())
+    stage = ready.inspect(backend, project_root=project.path, binding=binding)
+    assert stage["x11"] == {"status": "confirmed", "code": "ok"}
+    assert stage["rfb"] == {"status": "unknown", "code": "probe-unavailable"}
+    assert len(stage["endpoint_identity"]) == 64
