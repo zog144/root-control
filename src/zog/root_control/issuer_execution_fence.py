@@ -390,15 +390,24 @@ class IssuerExecutionFence:
                 self._write(row)
             return row
 
-    def reconcile(self, *, request_id, verify_stopped_and_clean):
+    def reconcile(self, *, request_id, verify_stopped_and_clean,
+                  expected_program=None):
         """An independent root observation is required before terminal ACK."""
-        if not _valid_id(request_id, _REQUEST) or not callable(verify_stopped_and_clean):
+        if (not _valid_id(request_id, _REQUEST)
+                or not callable(verify_stopped_and_clean)
+                or (expected_program is not None and expected_program not in _PROGRAMS)):
             _deny()
         with self._locked():
             row = self._read()
             if (row is None or request_id not in row["operations"]):
                 _deny()
             op = row["operations"][request_id]
+            # Native reconciliation must bind the controller's original
+            # selected operation to the program recorded at admission, even
+            # on a repeated terminal inspection. A changed operation record
+            # cannot authorize stopping or certify cleanup of another action.
+            if expected_program is not None and op["program"] != expected_program:
+                _deny()
             if op["phase"] == "terminal":
                 return dict(op)
             # An ambiguous launch may have executed before a lost result.
