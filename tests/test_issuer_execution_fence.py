@@ -245,3 +245,53 @@ def test_revocation_publication_loss_keeps_terminal_epoch_and_same_marker_retry(
                         (accepted.append(1),True)[1])["epoch"] == 2
     assert accepted == [1] and sent == [1]
     assert fence.reboot(new_boot_id=NEXT_BOOT)["revoked"] is True
+
+
+
+def test_missing_stable_writer_lock_with_existing_epoch_is_hard_hold(fenced):
+    """Never bootstrap a second lock for a durable old execution ledger."""
+    from zog.root_control.issuer_execution_fence import (
+        IssuerExecutionFence, LOCK, STATE,
+    )
+    fence, root = fenced
+    before=(root/STATE).read_bytes()
+    (root/LOCK).unlink()
+    with pytest.raises(IssuerFenceDenied):
+        IssuerExecutionFence(fence.dirfd,owner_uid=os.getuid())
+    assert not (root/LOCK).exists()
+    assert (root/STATE).read_bytes()==before
+    with pytest.raises(IssuerFenceDenied):
+        fence.admit(request_id="REQ-NO-LOCK",program="renew",boot_id=BOOT,
+                    trusted_commit_sha256=COMMIT,
+                    native_launch=lambda **kw:pytest.fail("must never start"))
+    assert (root/STATE).read_bytes()==before
+
+
+def test_active_fence_refuses_replaced_writer_inode_without_republishing(fenced):
+    """Do not use a substituted writer inode in a long-lived root instance."""
+    from zog.root_control.issuer_execution_fence import LOCK,STATE
+    fence,root=fenced
+    original=(root/STATE).read_bytes()
+    (root/LOCK).rename(root/"retained-original-lock")
+    (root/LOCK).write_bytes(b"")
+    (root/LOCK).chmod(0o600)
+    with pytest.raises(IssuerFenceDenied):
+        fence.reboot(new_boot_id=NEXT_BOOT)
+    with pytest.raises(IssuerFenceDenied):
+        fence.revoke(publish_pending_revocation=lambda:
+                     pytest.fail("no marker under replaced lock"))
+    assert (root/STATE).read_bytes()==original
+
+
+def test_missing_lock_denies_even_after_durable_terminal_revocation(fenced):
+    from zog.root_control.issuer_execution_fence import (
+        IssuerExecutionFence, LOCK,STATE,
+    )
+    fence,root=fenced
+    fence.revoke(publish_pending_revocation=lambda:True)
+    prior=(root/STATE).read_bytes()
+    (root/LOCK).unlink()
+    with pytest.raises(IssuerFenceDenied):
+        IssuerExecutionFence(fence.dirfd,owner_uid=os.getuid())
+    assert (root/STATE).read_bytes()==prior
+    assert not (root/LOCK).exists()
