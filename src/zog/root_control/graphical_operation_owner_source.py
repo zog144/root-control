@@ -25,7 +25,8 @@ SHA = re.compile(r"sha256:[a-f0-9]{64}\Z")
 NONCE = re.compile(r"[a-f0-9]{48}\Z")
 LANE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}\Z")
 FIELDS = {
-    "schema", "host_id", "installation_id", "state_volume_id",
+    "schema", "host_id", "host_fingerprint", "registry_id", "controller_id",
+    "target_identity_sha256", "installation_id", "state_volume_id",
     "lane", "task", "catalogue_sha256", "source_revision",
     "monthly_pin_identity", "base_generation_id",
     "predecessor_receipt_sha256", "request_id", "original_request_sha256",
@@ -34,7 +35,9 @@ FIELDS = {
     "approval_sha256",
 }
 BIND = (
-    "host_id", "installation_id", "state_volume_id", "lane", "task",
+    "host_id", "host_fingerprint", "registry_id", "controller_id",
+    "target_identity_sha256", "installation_id", "state_volume_id",
+    "lane", "task",
     "catalogue_sha256", "source_revision", "monthly_pin_identity",
     "base_generation_id", "predecessor_receipt_sha256",
     "authority_epoch", "authority_pin_sha256", "approval_sha256",
@@ -73,9 +76,10 @@ def validate_request(row):
     for key in ("host_id", "installation_id", "state_volume_id",
                 "base_generation_id"):
         if not match(row[key], H64): deny()
-    for key in ("request_id", "operation_id"):
+    for key in ("request_id", "operation_id", "registry_id", "controller_id"):
         if not match(row[key], H32): deny()
-    for key in ("catalogue_sha256", "monthly_pin_identity",
+    for key in ("host_fingerprint", "target_identity_sha256",
+                "catalogue_sha256", "monthly_pin_identity",
                 "predecessor_receipt_sha256", "original_request_sha256",
                 "stage_once_receipt_sha256", "remote_request_sha256",
                 "authority_pin_sha256", "approval_sha256"):
