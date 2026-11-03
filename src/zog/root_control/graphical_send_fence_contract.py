@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from cryptography.exceptions import InvalidSignature
 
 SCHEMA = "zog-graphical-monotonic-operation-send-claim-v1"
 APPROVAL_SCHEMA = "zog-graphical-send-owner-approval-v1"
@@ -73,8 +73,10 @@ def validate_claim(claim):
             ("request_id", "operation_id"))
             or any(not _hex(claim[field], HEX64) for field in
                    ("remote_request_sha256", "binding_sha256",
-                    "task_catalogue_sha256", "source_revision",
-                    "source_generation", "monthly_pin_identity"))
+                    "task_catalogue_sha256", "source_generation",
+                    "monthly_pin_identity"))
+            or not (type(claim["source_revision"]) is str and
+                    re.fullmatch(r"[0-9a-f]{40}", claim["source_revision"]))
             or claim["stage"] not in STAGES
             or type(claim["ordinal"]) is not int or not 0 <= claim["ordinal"] < 64
             or type(claim["lane"]) is not str or not claim["lane"]
@@ -91,14 +93,13 @@ def validate_claim(claim):
 
 def verify_signed(payload, signature_hex, public_key):
     """Caller cannot select the key; only the protected owner provides it."""
-    if not isinstance(signature_hex, str) or not _hex(signature_hex, HEX64):
-        # Ed25519 signatures are 64 bytes, encoded as *128* hex characters.
-        if not (type(signature_hex) is str and
-                re.fullmatch(r"[0-9a-f]{128}", signature_hex)):
-            _deny()
+    # Ed25519 signatures are 64 bytes, encoded as exactly 128 hex chars.
+    if not (type(signature_hex) is str and
+            re.fullmatch(r"[0-9a-f]{128}", signature_hex)):
+        _deny()
     try:
         public_key.verify(bytes.fromhex(signature_hex), canonical(payload))
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, InvalidSignature):
         _deny()
 
 
