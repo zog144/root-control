@@ -16,7 +16,7 @@ import re
 import secrets
 import stat
 
-SCHEMA = "zog-root-selected-issuer-execution-fence-v1"
+SCHEMA = "zog-root-selected-issuer-execution-fence-v2"
 LOCK = "selected-issuer-execution.lock"
 STATE = "selected-issuer-execution.json"
 _PROGRAMS = frozenset(("renew", "inspect", "stage"))
@@ -246,7 +246,12 @@ class IssuerExecutionFence:
             _deny()
         if (type(row) is not dict or set(row) != {
                 "schema", "authority_commit_sha256", "boot_id", "epoch",
-                "revoked", "operations"} or row["schema"] != SCHEMA
+                "revoked", "operations", "lock_inode"} or row["schema"] != SCHEMA
+                # The original writer identity must survive *new* fence
+                # instances, not only the lifetime of an open lock fd.
+                # A replaced lock with retained STATE cannot start or revoke.
+                or type(row["lock_inode"]) is not int
+                or row["lock_inode"] != self._lock_identity[1]
                 or not _valid_id(row["authority_commit_sha256"], _HEX)
                 or not _valid_id(row["boot_id"], _BOOT)
                 or type(row["epoch"]) is not int or row["epoch"] < 1
@@ -310,7 +315,7 @@ class IssuerExecutionFence:
                 return row
             row = {"schema": SCHEMA, "authority_commit_sha256": trusted_commit_sha256,
                    "boot_id": boot_id, "epoch": 1, "revoked": False,
-                   "operations": {}}
+                   "operations": {}, "lock_inode": self._lock_identity[1]}
             self._write(row)
             return row
 
