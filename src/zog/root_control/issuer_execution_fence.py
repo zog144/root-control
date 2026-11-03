@@ -16,7 +16,7 @@ import re
 import secrets
 import stat
 
-SCHEMA = "zog-root-selected-issuer-execution-fence-v1"
+SCHEMA = "zog-root-selected-issuer-execution-fence-v2"
 LOCK = "selected-issuer-execution.lock"
 STATE = "selected-issuer-execution.json"
 _PROGRAMS = frozenset(("renew", "inspect", "stage"))
@@ -170,6 +170,18 @@ class IssuerExecutionFence:
         return st
 
     def _ensure_lock(self):
+        # Never create a replacement serialization identity for an existing
+        # execution ledger. A lost lock with surviving operations is a HOLD,
+        # not first-install provisioning, even when the ledger is revoked.
+        try:
+            os.stat(LOCK, dir_fd=self.dirfd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.stat(STATE, dir_fd=self.dirfd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                _deny()
         try:
             fd = os.open(LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                          os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.dirfd)
@@ -177,7 +189,11 @@ class IssuerExecutionFence:
             fd = os.open(LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
                          dir_fd=self.dirfd)
         try:
-            self._regular(fd, 0o600)
+            st = self._regular(fd, 0o600)
+            by_path = os.stat(LOCK, dir_fd=self.dirfd, follow_symlinks=False)
+            if (st.st_dev, st.st_ino) != (by_path.st_dev, by_path.st_ino):
+                _deny()
+            self._lock_identity = (st.st_dev, st.st_ino)
             os.fsync(fd)
             os.fsync(self.dirfd)
         finally:
@@ -193,7 +209,8 @@ class IssuerExecutionFence:
             # Prevent unlink/recreate from silently replacing the lock identity.
             by_path = os.stat(LOCK, dir_fd=self.dirfd, follow_symlinks=False)
             st = os.fstat(fd)
-            if (st.st_dev, st.st_ino) != (by_path.st_dev, by_path.st_ino):
+            if ((st.st_dev, st.st_ino) != (by_path.st_dev, by_path.st_ino)
+                    or (st.st_dev, st.st_ino) != self._lock_identity):
                 _deny()
             yield
         except OSError:
@@ -229,7 +246,12 @@ class IssuerExecutionFence:
             _deny()
         if (type(row) is not dict or set(row) != {
                 "schema", "authority_commit_sha256", "boot_id", "epoch",
-                "revoked", "operations"} or row["schema"] != SCHEMA
+                "revoked", "operations", "lock_inode"} or row["schema"] != SCHEMA
+                # The original writer identity must survive *new* fence
+                # instances, not only the lifetime of an open lock fd.
+                # A replaced lock with retained STATE cannot start or revoke.
+                or type(row["lock_inode"]) is not int
+                or row["lock_inode"] != self._lock_identity[1]
                 or not _valid_id(row["authority_commit_sha256"], _HEX)
                 or not _valid_id(row["boot_id"], _BOOT)
                 or type(row["epoch"]) is not int or row["epoch"] < 1
@@ -293,7 +315,7 @@ class IssuerExecutionFence:
                 return row
             row = {"schema": SCHEMA, "authority_commit_sha256": trusted_commit_sha256,
                    "boot_id": boot_id, "epoch": 1, "revoked": False,
-                   "operations": {}}
+                   "operations": {}, "lock_inode": self._lock_identity[1]}
             self._write(row)
             return row
 

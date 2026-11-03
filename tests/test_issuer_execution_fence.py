@@ -245,3 +245,104 @@ def test_revocation_publication_loss_keeps_terminal_epoch_and_same_marker_retry(
                         (accepted.append(1),True)[1])["epoch"] == 2
     assert accepted == [1] and sent == [1]
     assert fence.reboot(new_boot_id=NEXT_BOOT)["revoked"] is True
+
+def test_missing_stable_writer_lock_with_existing_epoch_is_hard_hold(fenced):
+    """Never bootstrap a second lock for a durable old execution ledger."""
+    from zog.root_control.issuer_execution_fence import (
+        IssuerExecutionFence, LOCK, STATE,
+    )
+    fence, root = fenced
+    before=(root/STATE).read_bytes()
+    (root/LOCK).unlink()
+    with pytest.raises(IssuerFenceDenied):
+        IssuerExecutionFence(fence.dirfd,owner_uid=os.getuid())
+    assert not (root/LOCK).exists()
+    assert (root/STATE).read_bytes()==before
+    with pytest.raises(IssuerFenceDenied):
+        fence.admit(request_id="REQ-NO-LOCK",program="renew",boot_id=BOOT,
+                    trusted_commit_sha256=COMMIT,
+                    native_launch=lambda **kw:pytest.fail("must never start"))
+    assert (root/STATE).read_bytes()==before
+
+
+def test_active_fence_refuses_replaced_writer_inode_without_republishing(fenced):
+    """Do not use a substituted writer inode in a long-lived root instance."""
+    from zog.root_control.issuer_execution_fence import LOCK,STATE
+    fence,root=fenced
+    original=(root/STATE).read_bytes()
+    (root/LOCK).rename(root/"retained-original-lock")
+    (root/LOCK).write_bytes(b"")
+    (root/LOCK).chmod(0o600)
+    with pytest.raises(IssuerFenceDenied):
+        fence.reboot(new_boot_id=NEXT_BOOT)
+    with pytest.raises(IssuerFenceDenied):
+        fence.revoke(publish_pending_revocation=lambda:
+                     pytest.fail("no marker under replaced lock"))
+    assert (root/STATE).read_bytes()==original
+
+
+def test_missing_lock_denies_even_after_durable_terminal_revocation(fenced):
+    from zog.root_control.issuer_execution_fence import (
+        IssuerExecutionFence, LOCK,STATE,
+    )
+    fence,root=fenced
+    fence.revoke(publish_pending_revocation=lambda:True)
+    prior=(root/STATE).read_bytes()
+    (root/LOCK).unlink()
+    with pytest.raises(IssuerFenceDenied):
+        IssuerExecutionFence(fence.dirfd,owner_uid=os.getuid())
+    assert (root/STATE).read_bytes()==prior
+    assert not (root/LOCK).exists()
+
+
+def test_new_fence_refuses_replaced_lock_inode_after_existing_epoch(fenced):
+    """Cross-process substitution cannot inherit existing admission authority."""
+    fence, root = fenced
+    from zog.root_control.issuer_execution_fence import LOCK, STATE, IssuerExecutionFence
+    old = (root / STATE).read_bytes()
+    (root / LOCK).rename(root / "retained-first-lock")
+    (root / LOCK).write_bytes(b"")
+    (root / LOCK).chmod(0o600)
+    newly_opened = IssuerExecutionFence(fence.dirfd, owner_uid=os.getuid())
+    with pytest.raises(IssuerFenceDenied):
+        newly_opened.admit(
+            request_id="REQ-REPLACED", program="stage", boot_id=BOOT,
+            trusted_commit_sha256=COMMIT,
+            native_launch=lambda **kw: pytest.fail("split writer lock launch"))
+    with pytest.raises(IssuerFenceDenied):
+        newly_opened.revoke(
+            publish_pending_revocation=lambda: pytest.fail("split writer marker"))
+    assert (root / STATE).read_bytes() == old
+
+
+def test_fresh_fence_reopens_same_inode_across_reboot_and_retains_uncertainty(fenced):
+    from zog.root_control.issuer_execution_fence import IssuerExecutionFence
+    fence, root = fenced
+    fence.admit(
+        request_id="REQ-SAVED", program="renew", boot_id=BOOT,
+        trusted_commit_sha256=COMMIT,
+        native_launch=lambda **kwargs: {
+            "request_id": kwargs["request_id"], "program": kwargs["program"],
+            "runtime_id": "RUNTIME1", "invocation_id": "d" * 32})
+    reread = IssuerExecutionFence(fence.dirfd, owner_uid=os.getuid())
+    current = reread.reboot(new_boot_id=NEXT_BOOT)
+    assert current["operations"]["REQ-SAVED"]["phase"] == "cancel-pending"
+    assert current["lock_inode"] == os.stat(root / "selected-issuer-execution.lock").st_ino
+    with pytest.raises(IssuerFenceDenied):
+        reread.admit(
+            request_id="REQ-NEW", program="stage", boot_id=NEXT_BOOT,
+            trusted_commit_sha256=COMMIT,
+            native_launch=lambda **kw: pytest.fail("replayed uncertain operation"))
+
+
+def test_pre_v2_ledger_without_immutable_lock_inode_fails_closed(fenced):
+    from zog.root_control.issuer_execution_fence import IssuerExecutionFence
+    fence, root = fenced
+    record = fence._read()
+    record.pop("lock_inode")
+    record["schema"] = "zog-root-selected-issuer-execution-fence-v1"
+    fence._write(record)
+    later = IssuerExecutionFence(fence.dirfd, owner_uid=os.getuid())
+    with pytest.raises(IssuerFenceDenied):
+        later.reboot(new_boot_id=NEXT_BOOT)
+    assert not any(root.glob(".selected-issuer-fence-*"))
