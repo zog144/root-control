@@ -224,3 +224,59 @@ def test_no_approval_or_operation_can_be_expanded_by_signed_observation():
     denied(lambda: first.read_signed(request=request(), nonce="f"*48))
     denied(lambda: first.submit_once({**request(), "task":"mesa-final"}))
     denied(lambda: first.submit_once({**request(), "sender":"invoke-arbitrary"}))
+
+
+
+def test_fresh_signed_observation_binds_external_key_nonce_state_and_highwater():
+    ledger, first, calls, signer = setup()
+    first.submit_once(request())
+    raw = first.read_signed(request=request(), nonce="a"*48)
+    key = first.public_key
+    pin = "sha256:" + __import__("hashlib").sha256(key).hexdigest()
+    verified = owner.verify_signed_observation(
+        raw, expected_nonce="a"*48, original_request=request(),
+        externally_pinned_public_key=key,
+        externally_pinned_key_sha256=pin, minimum_sequence=1)
+    assert verified["outcome"] == "SENT_ORIGINAL"
+    assert verified["command_id"] == "ssm-original-command-1"
+    assert verified["revoked"] is False
+    denied(lambda: owner.verify_signed_observation(
+        raw, expected_nonce="b"*48, original_request=request(),
+        externally_pinned_public_key=key,
+        externally_pinned_key_sha256=pin, minimum_sequence=1))
+    denied(lambda: owner.verify_signed_observation(
+        raw, expected_nonce="a"*48, original_request=request(),
+        externally_pinned_public_key=key,
+        externally_pinned_key_sha256=pin, minimum_sequence=2))
+    stale_state = request()
+    stale_state["state_volume_id"] = "0"*64
+    denied(lambda: owner.verify_signed_observation(
+        raw, expected_nonce="a"*48, original_request=stale_state,
+        externally_pinned_public_key=key,
+        externally_pinned_key_sha256=pin, minimum_sequence=1))
+    other = Ed25519PrivateKey.generate().public_key().public_bytes(
+        __import__("cryptography.hazmat.primitives.serialization",fromlist=["Encoding"]).Encoding.Raw,
+        __import__("cryptography.hazmat.primitives.serialization",fromlist=["PublicFormat"]).PublicFormat.Raw)
+    denied(lambda: owner.verify_signed_observation(
+        raw, expected_nonce="a"*48, original_request=request(),
+        externally_pinned_public_key=other,
+        externally_pinned_key_sha256="sha256:"+
+            __import__("hashlib").sha256(other).hexdigest(), minimum_sequence=1))
+    assert len(calls)==1
+
+
+def test_revoked_state_is_signed_but_never_reopened_as_authority():
+    ledger, first, _, _ = setup()
+    first.submit_once(request())
+    first.revoke(owner.scope_from_request(request()))
+    raw = first.read_signed(request=request(), nonce="e"*48)
+    key = first.public_key
+    row = owner.verify_signed_observation(
+        raw, expected_nonce="e"*48, original_request=request(),
+        externally_pinned_public_key=key,
+        externally_pinned_key_sha256="sha256:"+
+            __import__("hashlib").sha256(key).hexdigest(),
+        minimum_sequence=2)
+    assert row["revoked"] is True
+    assert row["sequence"]==2
+    denied(lambda: first.submit_once(request()))
