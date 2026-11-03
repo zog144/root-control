@@ -36,7 +36,12 @@ def request():
 
 def setup(sender=None):
     row = request()
-    ledger = owner.SyntheticExternalLedger(owner.scope_from_request(row))
+    ledger = owner.SyntheticExternalLedger(
+        owner.scope_from_request(row),
+        independently_approved_operations={
+            row["operation_id"]: owner.digest(row),
+        },
+    )
     calls = []
     if sender is None:
         def sender(x):
@@ -188,14 +193,9 @@ def test_new_operation_is_distinct_but_never_selected_by_caller_receipt(field,va
     first.submit_once(request())
     changed = request()
     changed[field] = value
-    if field == "operation_id":
-        # This is a *different* frozen operation identity. Only an actual
-        # independent root-owned original-history attester can authorize it.
-        # Source model alone cannot validate that admission: it will claim,
-        # so this test explicitly MUST NOT mistake it for native approval.
-        assert owner.validate_request(changed) == changed
-        assert ledger.scope == owner.scope_from_request(changed)
-        return
+    # Even a valid-looking *new* operation ID has no original root-approved
+    # request grant in the independently protected ledger. No first-seen
+    # operation selection is allowed.
     denied(lambda: first.submit_once(changed))
     assert len(calls) == 1
 
