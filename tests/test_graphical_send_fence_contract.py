@@ -25,7 +25,7 @@ def claim(op="7"*32):
     return {"request_id":"8"*32,"operation_id":op,
             "stage":"submit","ordinal":0,"remote_request_sha256":"9"*64,
             "binding_sha256":"a"*64,"task_catalogue_sha256":"b"*64,
-            "source_revision":"c"*64,"source_generation":"d"*64,
+            "source_revision":"c"*40,"source_generation":"d"*64,
             "lane":"graphical","target":"host-selected","monthly_pin_identity":"e"*64,
             "operation":"pipeline.submit"}
 
