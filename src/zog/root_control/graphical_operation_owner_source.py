@@ -25,7 +25,8 @@ SHA = re.compile(r"sha256:[a-f0-9]{64}\Z")
 NONCE = re.compile(r"[a-f0-9]{48}\Z")
 LANE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}\Z")
 FIELDS = {
-    "schema", "host_id", "installation_id", "state_volume_id",
+    "schema", "host_id", "host_fingerprint", "registry_id", "controller_id",
+    "target_identity_sha256", "installation_id", "state_volume_id",
     "lane", "task", "catalogue_sha256", "source_revision",
     "monthly_pin_identity", "base_generation_id",
     "predecessor_receipt_sha256", "request_id", "original_request_sha256",
@@ -34,7 +35,9 @@ FIELDS = {
     "approval_sha256",
 }
 BIND = (
-    "host_id", "installation_id", "state_volume_id", "lane", "task",
+    "host_id", "host_fingerprint", "registry_id", "controller_id",
+    "target_identity_sha256", "installation_id", "state_volume_id",
+    "lane", "task",
     "catalogue_sha256", "source_revision", "monthly_pin_identity",
     "base_generation_id", "predecessor_receipt_sha256",
     "authority_epoch", "authority_pin_sha256", "approval_sha256",
@@ -73,9 +76,10 @@ def validate_request(row):
     for key in ("host_id", "installation_id", "state_volume_id",
                 "base_generation_id"):
         if not match(row[key], H64): deny()
-    for key in ("request_id", "operation_id"):
+    for key in ("request_id", "operation_id", "registry_id", "controller_id"):
         if not match(row[key], H32): deny()
-    for key in ("catalogue_sha256", "monthly_pin_identity",
+    for key in ("host_fingerprint", "target_identity_sha256",
+                "catalogue_sha256", "monthly_pin_identity",
                 "predecessor_receipt_sha256", "original_request_sha256",
                 "stage_once_receipt_sha256", "remote_request_sha256",
                 "authority_pin_sha256", "approval_sha256"):
@@ -94,6 +98,95 @@ def validate_request(row):
 def scope_from_request(request):
     row = validate_request(request)
     return {"schema": SCOPE, **{k: row[k] for k in BIND}}
+
+
+# PR28's short-lived, independently signed operator approval is retained as a
+# *pre-admission prerequisite* for PR29's stronger protected-owner sender.
+# This verifier NEVER grants a caller a SendCommand token.
+APPROVAL_SCHEMA = "zog-protected-graphical-original-operation-approval-v1"
+APPROVAL_DOMAIN = b"zog-protected-graphical-original-operation-approval-v1\0"
+
+
+def verify_original_operator_approval(request, approval_envelope, *,
+                                      externally_pinned_operator_key,
+                                      expected_approval_id, now):
+    """Verify separately approved immutable original operation before owner admission.
+
+    An installer, not gateway request data, must supply the pinned operator
+    public key and expected approval identity. This offline source check
+    does not create an approved operation in a native ledger.
+    """
+    req = validate_request(request)
+    if (type(approval_envelope) is not dict or
+            set(approval_envelope) != {"schema", "approval_id", "request_sha256",
+                                      "scope_sha256", "expires_at",
+                                      "signature_ed25519"} or
+            approval_envelope["schema"] != APPROVAL_SCHEMA or
+            not match(expected_approval_id, H32) or
+            approval_envelope["approval_id"] != expected_approval_id or
+            approval_envelope["request_sha256"] != digest(req) or
+            approval_envelope["scope_sha256"] != digest(scope_from_request(req)) or
+            type(now) is not int or type(approval_envelope["expires_at"]) is not int
+            or approval_envelope["expires_at"] < now
+            or approval_envelope["expires_at"] - now > 900 or
+            type(externally_pinned_operator_key) is not bytes or
+            len(externally_pinned_operator_key) != 32):
+        deny()
+    try:
+        signature = base64.b64decode(
+            approval_envelope["signature_ed25519"], validate=True)
+        if (len(signature) != 64 or
+                base64.b64encode(signature).decode("ascii") !=
+                approval_envelope["signature_ed25519"]):
+            deny()
+        Ed25519PublicKey.from_public_bytes(externally_pinned_operator_key).verify(
+            signature, APPROVAL_DOMAIN + canonical({
+                k: v for k, v in approval_envelope.items()
+                if k != "signature_ed25519"}))
+    except (ValueError, TypeError, KeyError, InvalidSignature):
+        deny()
+    return {"operation_id": req["operation_id"],
+            "request_sha256": digest(req),
+            "approval_id": expected_approval_id,
+            "status": "signed-original-grant-verified-not-installed"}
+
+
+REVOCATION_APPROVAL_SCHEMA = "zog-protected-graphical-revocation-approval-v1"
+REVOCATION_APPROVAL_DOMAIN = b"zog-protected-graphical-revocation-approval-v1\0"
+
+
+def verify_signed_revocation_approval(approved_scope, signed_grant, *,
+                                      externally_pinned_operator_key,
+                                      expected_approval_id, now):
+    """Source contract: revocation must not be a caller-controlled naked scope."""
+    if (type(approved_scope) is not dict or
+            set(approved_scope) != {"schema", *BIND}
+            or approved_scope.get("schema") != SCOPE
+            or type(signed_grant) is not dict or
+            set(signed_grant) != {"schema", "approval_id", "scope_sha256",
+                                  "action", "expires_at", "signature_ed25519"}
+            or signed_grant["schema"] != REVOCATION_APPROVAL_SCHEMA
+            or signed_grant["action"] != "revoke"
+            or not match(expected_approval_id,H32)
+            or signed_grant["approval_id"] != expected_approval_id
+            or signed_grant["scope_sha256"] != digest(approved_scope)
+            or type(now) is not int
+            or type(signed_grant["expires_at"]) is not int
+            or not now <= signed_grant["expires_at"] <= now + 900
+            or type(externally_pinned_operator_key) is not bytes
+            or len(externally_pinned_operator_key) != 32):
+        deny()
+    try:
+        signature=base64.b64decode(signed_grant["signature_ed25519"],validate=True)
+        if len(signature)!=64 or base64.b64encode(signature).decode("ascii") != signed_grant["signature_ed25519"]:
+            deny()
+        Ed25519PublicKey.from_public_bytes(externally_pinned_operator_key).verify(
+            signature,REVOCATION_APPROVAL_DOMAIN+canonical({
+                k:v for k,v in signed_grant.items() if k!="signature_ed25519"}))
+    except (InvalidSignature,ValueError,TypeError,KeyError):
+        deny()
+    return {"status":"signed-revocation-verified-no-authority-changed",
+            "scope_sha256":digest(approved_scope)}
 
 
 class SyntheticExternalLedger:
@@ -180,6 +273,17 @@ class SourceOnlyProtectedOwner:
             return json.loads(canonical(item))
 
     def revoke(self, approved_scope):
+        return self._ledger.revoke(approved_scope)
+
+    def revoke_signed(self, approved_scope, signed_grant, *,
+                      externally_pinned_operator_key, expected_approval_id, now):
+        """Selected revocation source interface: operator signed, same lock."""
+        verify_signed_revocation_approval(
+            approved_scope,signed_grant,
+            externally_pinned_operator_key=externally_pinned_operator_key,
+            expected_approval_id=expected_approval_id,now=now)
+        # Existing synthetic ledger.revoke uses the SAME RLock as submit_once.
+        # No gateway or native caller may invoke raw revoke as an RPC.
         return self._ledger.revoke(approved_scope)
 
     def read_signed(self, *, request, nonce):

@@ -18,7 +18,10 @@ from zog.root_control import graphical_operation_owner_source as owner
 def request():
     return {
         "schema": owner.SCHEMA,
-        "host_id": "a"*64, "installation_id": "b"*64,
+        "host_id": "a"*64, "host_fingerprint": "sha256:"+"a"*64,
+        "registry_id": "d"*32, "controller_id": "e"*32,
+        "target_identity_sha256": "sha256:"+"a"*64,
+        "installation_id": "b"*64,
         "state_volume_id": "c"*64, "lane": "graphical-lane",
         "task": "graphics-x11-core-image-v1",
         "catalogue_sha256": "sha256:"+"1"*64,
@@ -165,7 +168,10 @@ def test_revocation_during_inflight_serializes_before_next_attempt():
 
 @pytest.mark.parametrize("field,value", (
     ("host_id","0"*64), ("installation_id","0"*64),
-    ("state_volume_id","0"*64), ("lane","different-lane"),
+    ("state_volume_id","0"*64), ("host_fingerprint","sha256:"+"0"*64),
+    ("registry_id","0"*32), ("controller_id","0"*32),
+    ("target_identity_sha256","sha256:"+"0"*64),
+    ("lane","different-lane"),
     ("task","graphics-mesa-image-v1"), ("catalogue_sha256","sha256:"+"0"*64),
     ("source_revision","0"*40), ("monthly_pin_identity","sha256:"+"0"*64),
     ("base_generation_id","0"*64),
