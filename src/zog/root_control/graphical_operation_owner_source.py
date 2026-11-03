@@ -152,7 +152,7 @@ def verify_original_operator_approval(request, approval_envelope, *,
 
 
 REVOCATION_APPROVAL_SCHEMA = "zog-protected-graphical-revocation-approval-v1"
-REVOCATION_APPROVAL_DOMAIN = b"zog-protected-graphical-revocation-approval-v1\\0"
+REVOCATION_APPROVAL_DOMAIN = b"zog-protected-graphical-revocation-approval-v1\0"
 
 
 def verify_signed_revocation_approval(approved_scope, signed_grant, *,
