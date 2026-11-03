@@ -1,0 +1,29 @@
+name: Graphical external monotonic checkpoint issuer source
+on:
+  push:
+    branches: [regular/graphical-checkpoint-issuer-prototype-20261101]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12','3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Isolated separate-administrator source tests
+        run: |
+          python -m pip install 'pytest>=8,<10' 'cryptography>=44,<49'
+          PYTHONPATH="$PWD/src" python -m pytest -q -rs tests/test_graphical_monotonic_issuer.py
+      - name: Native authority withheld
+        if: always()
+        run: |
+          echo 'Synthetic file backend only: external nonrollbackable service, independent signing key, transport, Host installation and operator authority are not installed' >> "$GITHUB_STEP_SUMMARY"
