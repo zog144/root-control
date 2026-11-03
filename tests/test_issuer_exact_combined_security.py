@@ -21,20 +21,39 @@ from test_issuer_broker_revocation_admission import (
 )
 
 BOX_HEAD="baca7f815974dbf685950c0c7e78f693dd0a96e2"
-ROOT_REVIEWED="98da48c7dc897ba12ef609832a48d702c01bd948"
+ROOT_REVIEWED="a2dc35d4370ad508c8ea1434e86035e3885436ad"
 BOOT="a"*32
 NEXT="b"*32
 
 
-def test_exact_pinned_owner_components_are_not_silently_replaced():
+def _assert_exact_selected_source_contract():
+    """Require the reviewed v2 lock-inode source, not a former v1 selection."""
     from zog.root_control import issuer_execution_fence
     assert installer.BOX_CONTROL_REVIEWED_COMMIT == BOX_HEAD
     assert issuer_execution_fence.REVIEWED_BOX_CONTROL == BOX_HEAD
-    # The corrected root-control HEAD is review-only; do NOT promote
-    # the installed root-control pin inside the immutable host-install grant.
     assert installer.ROOT_CONTROL_EXECUTION_REVIEWED_COMMIT == ROOT_REVIEWED
+    assert issuer_execution_fence.SCHEMA == "zog-root-selected-issuer-execution-fence-v2"
     assert broker_authority.COMMIT_NAME == installer.COMMIT_NAME
     assert broker_authority.REVOCATION_NAME == installer.REVOCATION_NAME
+
+
+def test_exact_pinned_owner_components_are_not_silently_replaced():
+    _assert_exact_selected_source_contract()
+
+
+@pytest.mark.parametrize("field,replacement", [
+    ("ROOT_CONTROL_EXECUTION_REVIEWED_COMMIT",
+     "98da48c7dc897ba12ef609832a48d702c01bd948"),
+    ("ROOT_CONTROL_EXECUTION_REVIEWED_COMMIT", "f" * 40),
+    ("BOX_CONTROL_REVIEWED_COMMIT", "f" * 40),
+])
+def test_unauthorized_selected_source_substitution_is_rejected(
+        monkeypatch, field, replacement):
+    # Unlike the historical comparison, this is enforced for the *selected*
+    # candidate at the exact immutable source checked out by CI.
+    monkeypatch.setattr(installer, field, replacement)
+    with pytest.raises(AssertionError):
+        _assert_exact_selected_source_contract()
 
 
 @pytest.mark.skipif(os.geteuid()!=0,reason="requires root-owned 0444 ephemeral fixture")
