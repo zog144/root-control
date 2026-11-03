@@ -100,7 +100,7 @@ def scope_from_request(request):
 # *pre-admission prerequisite* for PR29's stronger protected-owner sender.
 # This verifier NEVER grants a caller a SendCommand token.
 APPROVAL_SCHEMA = "zog-protected-graphical-original-operation-approval-v1"
-APPROVAL_DOMAIN = b"zog-protected-graphical-original-operation-approval-v1\\0"
+APPROVAL_DOMAIN = b"zog-protected-graphical-original-operation-approval-v1\0"
 
 
 def verify_original_operator_approval(request, approval_envelope, *,
