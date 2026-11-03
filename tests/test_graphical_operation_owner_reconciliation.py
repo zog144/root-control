@@ -6,6 +6,9 @@ from cryptography.hazmat.primitives import serialization
 import pytest
 
 from zog.root_control import graphical_operation_owner_source as owner
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 from test_graphical_operation_owner_source import request, setup
 
 def approved(req=None, *, key=None, expires=600):
