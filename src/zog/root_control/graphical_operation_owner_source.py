@@ -100,13 +100,22 @@ class SyntheticExternalLedger:
     It is *not* rollback-resistant. The native owner must use another
     rollback domain, immutable current authority and persistent monotonic CAS.
     """
-    def __init__(self, approved_scope):
+    def __init__(self, approved_scope, *, independently_approved_operations):
         if (type(approved_scope) is not dict
                 or set(approved_scope) != {"schema", *BIND}
-                or approved_scope["schema"] != SCOPE):
+                or approved_scope["schema"] != SCOPE
+                or type(independently_approved_operations) is not dict
+                or not independently_approved_operations
+                or any(not match(k, H32) or not match(v, SHA)
+                       for k,v in independently_approved_operations.items())):
             deny()
         self.lock = threading.RLock()
         self.scope = json.loads(canonical(approved_scope))
+        # TEST: preinstalled original-history decisions from a separate
+        # protected root owner, not arbitrary first-seen remote requests.
+        # Native source must authenticate each external approval before any
+        # operation is added; this fixture deliberately cannot add entries.
+        self.approved_operations = dict(independently_approved_operations)
         self.revoked = False
         self.sequence = 0
         self.claims = {}
@@ -141,7 +150,9 @@ class SourceOnlyProtectedOwner:
         req = validate_request(request)
         ledger = self._ledger
         with ledger.lock:
-            if ledger.revoked or scope_from_request(req) != ledger.scope:
+            if (ledger.revoked or scope_from_request(req) != ledger.scope
+                    or ledger.approved_operations.get(req["operation_id"]) !=
+                    digest(req)):
                 deny()
             if req["operation_id"] in ledger.claims:
                 # Exact replay and differing same-ID requests both deny.
