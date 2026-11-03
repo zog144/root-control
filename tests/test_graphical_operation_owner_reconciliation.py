@@ -96,3 +96,48 @@ def test_signed_observation_never_enables_new_send_after_revoke_and_reboot():
     with pytest.raises(owner.OperationDenied):
         restarted.submit_once(request())
     assert len(calls)==1
+
+def signed_revoke(svc,operator,now=400):
+    body={"schema":owner.REVOCATION_APPROVAL_SCHEMA,
+          "approval_id":"f"*32,
+          "scope_sha256":owner.digest(owner.scope_from_request(request())),
+          "action":"revoke","expires_at":now+300}
+    signature=operator.sign(owner.REVOCATION_APPROVAL_DOMAIN+owner.canonical(body))
+    return {**body,"signature_ed25519":base64.b64encode(signature).decode("ascii")}
+
+def test_same_serial_owner_uses_explicit_signed_revocation_and_retains_claim():
+    ledger,svc,calls,signer=setup()
+    operator=Ed25519PrivateKey.generate()
+    grant=signed_revoke(svc,operator)
+    with pytest.raises(owner.OperationDenied):
+        svc.revoke_signed(
+            owner.scope_from_request(request()),grant,
+            externally_pinned_operator_key=rawkey(Ed25519PrivateKey.generate()),
+            expected_approval_id="f"*32,now=400)
+    assert not ledger.revoked
+    assert svc.submit_once(request())["outcome"]=="SENT_ORIGINAL"
+    assert svc.revoke_signed(
+        owner.scope_from_request(request()),grant,
+        externally_pinned_operator_key=rawkey(operator),
+        expected_approval_id="f"*32,now=400)==2
+    with pytest.raises(owner.OperationDenied):
+        svc.submit_once(request())
+    assert ledger.revoked and len(calls)==1
+
+@pytest.mark.parametrize("change",[
+    lambda g:g.update(action="send-claim"),
+    lambda g:g.update(scope_sha256="sha256:"+"0"*64),
+    lambda g:g.update(approval_id="0"*32),
+    lambda g:g.update(expires_at=300),
+    lambda g:g.update(signature_ed25519="broken"),
+])
+def test_signed_revocation_rejects_substituted_scope_expiry_and_wrong_action(change):
+    ledger,svc,calls,signer=setup()
+    operator=Ed25519PrivateKey.generate()
+    grant=signed_revoke(svc,operator);change(grant)
+    with pytest.raises(owner.OperationDenied):
+        svc.revoke_signed(
+            owner.scope_from_request(request()),grant,
+            externally_pinned_operator_key=rawkey(operator),
+            expected_approval_id="f"*32,now=400)
+    assert not ledger.revoked
