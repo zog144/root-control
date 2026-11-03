@@ -9,6 +9,8 @@ import hashlib
 import json
 import re
 import threading
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
@@ -199,3 +201,77 @@ class SourceOnlyProtectedOwner:
             sig = self._signer.sign(DOMAIN + canonical(body))
             return canonical({**body, "signature_ed25519":
                               base64.b64encode(sig).decode("ascii")})
+
+
+
+def verify_signed_observation(raw, *, expected_nonce, original_request,
+                              externally_pinned_public_key,
+                              externally_pinned_key_sha256,
+                              minimum_sequence):
+    """Offline contract verifier; no operation grants returned.
+
+    The public key and highwater MUST come from separately installed,
+    protected independent authority, never a caller-chosen gateway file.
+    A native consumer needs fixed-provenance transport/peer admission and
+    a fresh online nonce; a signed old/cache reply is not current authority.
+    """
+    if (type(raw) is not bytes or not 0 < len(raw) <= 8192
+            or not match(expected_nonce, NONCE)
+            or type(externally_pinned_public_key) is not bytes
+            or len(externally_pinned_public_key) != 32
+            or not match(externally_pinned_key_sha256, SHA)
+            or "sha256:" + hashlib.sha256(externally_pinned_public_key).hexdigest()
+            != externally_pinned_key_sha256
+            or type(minimum_sequence) is not int or minimum_sequence < 1):
+        deny()
+    try:
+        def unique(pairs):
+            obj = {}
+            for k,v in pairs:
+                if k in obj: deny()
+                obj[k] = v
+            return obj
+        row=json.loads(raw,object_pairs_hook=unique,
+                       parse_constant=lambda _:deny())
+        if type(row) is not dict or canonical(row) != raw:
+            deny()
+        if (set(row) != {"schema","nonce","scope","revoked","sequence",
+                         "operation","signature_ed25519"}
+                or row["schema"] != RECEIPT or row["nonce"] != expected_nonce
+                or row["scope"] != scope_from_request(original_request)
+                or type(row["revoked"]) is not bool
+                or type(row["sequence"]) is not int
+                or row["sequence"] < minimum_sequence):
+            deny()
+        item = row["operation"]
+        if (type(item) is not dict or
+                set(item) != {"operation_id","request_sha256",
+                              "sequence","outcome","command_id"}
+                or item["operation_id"] != original_request["operation_id"]
+                or item["request_sha256"] != digest(
+                    validate_request(original_request))
+                or type(item["sequence"]) is not int
+                or not 1 <= item["sequence"] <= row["sequence"]
+                or item["outcome"] not in (
+                    "CLAIMED_UNCERTAIN","SENT_ORIGINAL")
+                or (item["outcome"] == "CLAIMED_UNCERTAIN" and
+                    item["command_id"] is not None)
+                or (item["outcome"] == "SENT_ORIGINAL" and
+                    (type(item["command_id"]) is not str or
+                     not 1 <= len(item["command_id"]) <= 128))):
+            deny()
+        signature=base64.b64decode(row["signature_ed25519"],validate=True)
+        if (len(signature) != 64 or
+                base64.b64encode(signature).decode("ascii") !=
+                row["signature_ed25519"]):
+            deny()
+        Ed25519PublicKey.from_public_bytes(
+            externally_pinned_public_key).verify(
+                signature, DOMAIN+canonical({
+                    k:v for k,v in row.items() if k!="signature_ed25519"
+                }))
+        return {"outcome":item["outcome"],"revoked":row["revoked"],
+                "sequence":row["sequence"],"command_id":item["command_id"]}
+    except (ValueError,KeyError,TypeError,UnicodeError,
+            InvalidSignature,OverflowError):
+        deny()
