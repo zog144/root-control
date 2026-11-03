@@ -1,0 +1,29 @@
+name: Graphical protected operation owner source-only contract
+on:
+  push:
+    branches: [regular/graphical-operation-protected-owner-source-20261103]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-owner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install bounded test tools
+        run: python -m pip install 'pytest>=8,<10' 'cryptography>=44,<49'
+      - name: Run original request, revocation, reboot, lost acknowledgment source tests
+        run: |
+          python -m compileall -q src/zog/root_control/graphical_operation_owner_source.py tests/test_graphical_operation_owner_source.py
+          PYTHONPATH=src python -m pytest -q tests/test_graphical_operation_owner_source.py
+      - name: Report native issuer unavailable
+        if: always()
+        run: |
+          echo 'Source-only: in-memory synthetic independent backend, no issuer installed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No AWS/SSM, protected authority, native Sender, or compiler. Native NO-GO.' >> "$GITHUB_STEP_SUMMARY"
