@@ -124,11 +124,9 @@ class ProtectedLedger:
         if self.checkpoint is None:
             # A file-only storage domain cannot make a native send decision.
             hold()
-        fd = self._lock_fd()
-        try:
-            self.lock_inode = (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
-        finally:
-            os.close(fd)
+        self._stable_lock_fd = self._lock_fd()
+        self.lock_inode = (os.fstat(self._stable_lock_fd).st_dev,
+                           os.fstat(self._stable_lock_fd).st_ino)
 
     def _subdir(self, name):
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
@@ -147,7 +145,7 @@ class ProtectedLedger:
 
     @contextmanager
     def locked(self):
-        fd = self._lock_fd()
+        fd = os.dup(self._stable_lock_fd)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             a = os.fstat(fd)
@@ -265,7 +263,7 @@ class SelectedOwner:
         contract.verify_signed_revocation_approval(
             self.installed["scope"], signed_grant,
             externally_pinned_operator_key=self.operator_key,
-            expected_approval_id=self.installed["identity"][:32], now=now)
+            expected_approval_id=self.installed["identity"].split(":",1)[1][:32], now=now)
         with self.ledger.locked():
             self.ledger.revoke(self.installed)
             return {"status": "revoked"}
