@@ -31,6 +31,11 @@ CREDS = Path("/run/credentials/zog-graphical-owner.service/aws-session.json")
 SCRIPTS = Path("/etc/zog/graphical-owner/commands")
 POLICY_SCHEMA = "zog-installed-graphical-owner-v1"
 TOKEN_SCHEMA = "zog-protected-ssm-session-v1"
+# Source can be installed for review, but two writable filesystems alone do
+# NOT prove nonrollbackable highwater and source tests cannot prove gateway IAM
+# SendCommand denial. A separate native reviewed implementation must replace
+# this gate after independent evidence, not an operator-controlled JSON flag.
+NATIVE_SEND_ADMISSION_IMPLEMENTED = False
 
 
 def _read_root(path, *, max_bytes=32768, mode=0o600):
@@ -190,6 +195,10 @@ def _systemd_socket():
 
 def main():
     # Deliberately no CLI argument controlling paths, signer, target or AWS.
+    # Source-only root/host-install candidates MUST NOT become a live SSM
+    # issuer merely because someone manually starts their systemd units.
+    if not NATIVE_SEND_ADMISSION_IMPLEMENTED:
+        hold()
     if len(sys.argv) != 1:
         hold()
     policy, selection, operator, signer = installed()
