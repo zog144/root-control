@@ -15,6 +15,10 @@ license-files = ["LICENSE", "LICENSES/*.txt", "THIRD-PARTY-NOTICES.md"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+# Disabled native graphical sender candidate only. Resident/Host installation
+# must separately select exact reviewed wheels, installed interpreter, and
+# RECORD evidence; this extra is not a production repin or activation.
+graphical-native-owner = ["cryptography>=44,<49", "boto3>=1.34,<2"]
 
 [project.scripts]
 root-control = "zog.root_control.daemon:main"
