@@ -303,3 +303,27 @@ def test_native_stream_rejects_wrong_kernel_peer_before_owner_claim(tmp_path):
     finally:
         first.close()
         second.close()
+
+
+def test_task_c_rejects_file_only_backend_and_no_native_sends(tmp_path):
+    from zog.root_control.graphical_owner_checkpoint import SeparateDurableCheckpoint
+    executor, frames, signer, sender, inspector, ledger = setup(tmp_path)
+    ledger.checkpoint = SeparateDurableCheckpoint(tmp_path / "external")
+    with pytest.raises(contract.OperationDenied):
+        TaskCExecutor(
+            executor.registry, protected_owner=executor.owner,
+            ssm_inspector=inspector)
+    assert sender.sent == []
+
+
+def test_signed_s3_head_advances_with_independent_preflight_and_stage(tmp_path):
+    executor, frames, signer, sender, inspector, ledger = setup(tmp_path)
+    preflight = executor.handle(frames["preflight-original"], now=400)
+    assert preflight["checkpoint_sequence"] == 1
+    inspector.states["command-1"] = "success"
+    ready = executor.handle(observe(frames["preflight-original"]), now=400)
+    assert ready["checkpoint_head_sha256"] == preflight["checkpoint_head_sha256"]
+    stage = executor.handle(frames["submit-original"], now=400)
+    assert stage["checkpoint_sequence"] == 2
+    assert stage["checkpoint_head_sha256"] != preflight["checkpoint_head_sha256"]
+    verify_signed(stage, signer)
