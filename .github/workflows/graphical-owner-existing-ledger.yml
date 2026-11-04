@@ -5,7 +5,8 @@ on:
   pull_request:
     paths:
       - src/zog/root_control/graphical_operation_owner_sqlite.py
-      - tests/test_graphical_operation_owner_sqlite.py
+      - tests/test_graphical_operation_owner_sqlite.py tests/test_graphical_operation_owner_ipc_admission.py
+      - tests/test_graphical_operation_owner_ipc_admission.py
       - .github/workflows/graphical-owner-existing-ledger.yml
 permissions:
   contents: read
