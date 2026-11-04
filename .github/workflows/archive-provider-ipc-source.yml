@@ -1,0 +1,41 @@
+name: Disabled archive provider IPC cross-owner source contract
+on:
+  push:
+    branches: [review/archive-provider-ipc-boundary-20261103]
+  pull_request:
+    paths:
+      - project/archive-provider-ipc-source-handoff-v1.json
+      - tests/test_archive_provider_ipc_source_handoff.py
+      - docs/root-control/ARCHIVE-PROVIDER-PROTECTED-IPC-2026-11-03.md
+      - .github/workflows/archive-provider-ipc-source.yml
+permissions:
+  contents: read
+jobs:
+  source-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12','3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: zog144/host-install
+          ref: 59a2e99c877c2687a01e69cd026d0966a2631afd
+          path: companions/host-install
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install 'pytest>=8,<10'
+      - name: Exact host-install source pin and disabled IPC contract
+        run: |
+          test "$(git -C companions/host-install rev-parse HEAD)" = 59a2e99c877c2687a01e69cd026d0966a2631afd
+          python -m pytest -q tests/test_archive_provider_ipc_source_handoff.py
+      - name: No native archive authority
+        if: always()
+        run: echo 'Source shape only; no root-control listener, native socket, UID/GID, sealed FD transmission, credential movement or production activation.' >> "$GITHUB_STEP_SUMMARY"
