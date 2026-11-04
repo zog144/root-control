@@ -7,6 +7,7 @@ Never call AWS, create native services or authorize a production operation.
 import base64
 import copy
 import os
+import socket
 from pathlib import Path
 import sys
 
@@ -246,3 +247,44 @@ def test_ssm_observer_requires_matching_original_target_and_success_code():
     client.response["InstanceId"] = "i-fffffffffffffffff"
     with pytest.raises(contract.OperationDenied):
         inspector.inspect("command-1")
+
+
+def test_actual_stream_socketpair_uses_peer_witness_and_signed_result(tmp_path, monkeypatch):
+    from zog.root_control import graphical_task_c_service as service
+    from zog.root_control import graphical_task_c_native as native
+    executor, frames, signer, sender, inspector, ledger = setup(tmp_path)
+    seen = []
+    monkeypatch.setattr(native, "installed_peer",
+                        lambda pid, policy: seen.append((pid, policy)))
+    policy = {"gateway_uid": os.getuid(), "gateway_gid": os.getgid()}
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        second.sendall(taskc.canonical(frames["preflight-original"]) + b"\n")
+        result = service.serve_selected_connection(
+            first, executor, policy, now=400)
+        actual = second.recv(8192)
+        assert actual == taskc.canonical(result) + b"\n"
+        assert result["status"] == "preflight-pending"
+        assert len(sender.sent) == 1
+        verify_signed(result, signer)
+        assert seen and seen[0][0] == os.getpid()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_native_stream_rejects_wrong_kernel_peer_before_owner_claim(tmp_path):
+    from zog.root_control import graphical_task_c_service as service
+    executor, frames, signer, sender, inspector, ledger = setup(tmp_path)
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        second.sendall(taskc.canonical(frames["preflight-original"]) + b"\n")
+        with pytest.raises(contract.OperationDenied):
+            service.serve_selected_connection(
+                first, executor,
+                {"gateway_uid": os.getuid() + 1, "gateway_gid": os.getgid()},
+                now=400)
+        assert sender.sent == []
+    finally:
+        first.close()
+        second.close()
