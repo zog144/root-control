@@ -63,6 +63,18 @@ def setup(tmp_path):
         "scope": scope, "identity": contract.digest(scope),
         "approved": approved, "commands": commands,
     }
+    # A Task C service may never accept the previous file-only checkpoint.
+    from zog.root_control.graphical_s3_checkpoint import (
+        S3AppendOnlyCheckpoint, SCHEMA)
+    from test_graphical_s3_checkpoint import Remote
+    s3 = Remote()
+    genesis = {"schema": SCHEMA, "scope_sha256": selection["identity"],
+               "sequence": 0, "action": "genesis"}
+    s3.rows["acceptance/run/000000.json"] = contract.canonical(genesis)
+    ledger.checkpoint = S3AppendOnlyCheckpoint(
+        s3, bucket="test-bucket", prefix="acceptance/run/",
+        account_id="123456789012", scope_digest=selection["identity"],
+        genesis_sha256=contract.digest(genesis))
     signer = Ed25519PrivateKey.generate()
     sender = Sender()
     inspector = Inspector()
@@ -83,6 +95,9 @@ def verify_signed(row, signer):
     body = {key: value for key, value in row.items()
             if key != "signature_ed25519"}
     assert body["schema"] == RESULT_SCHEMA
+    assert type(body["checkpoint_sequence"]) is int
+    assert body["checkpoint_sequence"] >= 1
+    assert contract.match(body["checkpoint_head_sha256"], contract.SHA)
     signer.public_key().verify(signature, RESULT_DOMAIN + contract.canonical(body))
 
 
