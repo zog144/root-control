@@ -233,3 +233,23 @@ def test_compiled_native_sender_has_no_default_aws_credentials_or_gateway_script
     assert "InstanceIds=[self.install[\"instance_id\"]]" in code
     assert "DocumentName=\"AWS-RunShellScript\"" in code
     assert "script_sha256" in code
+
+
+def test_crash_after_external_revocation_before_local_marker_denies_observation(tmp_path):
+    req,selection,operator,signer,pub,grant,first,sender,local,remote=setup(tmp_path)
+    first.submit(req,grant,now=400)
+    first.ledger.checkpoint.revoke(selection["identity"])
+    assert (remote/"revoked.json").exists()
+    assert not (local/"revoked.json").exists()
+    with pytest.raises(base.OperationDenied):
+        first.observe(req,"a"*48)
+    with pytest.raises(base.OperationDenied):
+        first.submit(req,grant,now=400)
+    assert len(sender.calls)==1
+
+
+def test_even_manually_started_root_service_cannot_enable_unproven_iam_or_highwater():
+    from zog.root_control import graphical_owner_service as native
+    assert native.NATIVE_SEND_ADMISSION_IMPLEMENTED is False
+    with pytest.raises(base.OperationDenied):
+        native.main()
