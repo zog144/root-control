@@ -34,7 +34,8 @@ ORIGINAL_KEYS = frozenset((
     "stage", "ordinal", "binding_sha256", "remote_request_sha256"))
 FRAME_KEYS = ORIGINAL_KEYS | {"schema", "action", "nonce"}
 ASCII_ACTOR = re.compile(r"[A-Za-z0-9-]{1,100}\Z")
-TASK_C_ACTIONS = frozenset(("preflight-original", "submit-original"))
+# Read-only observation uses the same original bound identity, never a fresh claim.
+TASK_C_ACTIONS = frozenset(("preflight-original", "submit-original", "observe-original"))
 
 
 def deny():
@@ -181,7 +182,8 @@ class ProtectedOriginalRegistry:
         if item is None or item["original"] != original(frame):
             deny()
         stage_id = item["stage_operation_id"]
-        if frame["action"] == "preflight-original":
+        if (frame["action"] in ("preflight-original", "observe-original") and
+                stage_id != frame["operation_id"]):
             if (preflight_id(frame["request_id"], stage_id) !=
                     frame["operation_id"] or stage_id not in self.entries):
                 deny()
@@ -194,7 +196,8 @@ class ProtectedOriginalRegistry:
                     for k in comparable) or
                     stage_id == frame["operation_id"]):
                 deny()
-        elif frame["action"] != "submit-original" or stage_id != frame["operation_id"]:
+        elif (frame["action"] == "preflight-original" or
+              (frame["action"] == "submit-original" and stage_id != frame["operation_id"])):
             deny()
         return item
 
