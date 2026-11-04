@@ -1,7 +1,7 @@
 name: Task C protected graphical owner source IPC reconciliation
 on:
   push:
-    branches: [regular/graphical-owner-task-c-admission-20261104]
+    branches: [regular/task-c-installed-owner-runtime-20261104]
   pull_request:
     paths:
       - src/zog/root_control/graphical_s3_checkpoint.py
@@ -10,8 +10,15 @@ on:
       - src/zog/root_control/graphical_native_owner.py
       - src/zog/root_control/graphical_owner_checkpoint.py
       - src/zog/root_control/graphical_task_c_owner.py
+      - src/zog/root_control/graphical_task_c_runtime.py
+      - src/zog/root_control/graphical_task_c_native.py
+      - src/zog/root_control/graphical_task_c_origin.py
+      - src/zog/root_control/graphical_task_c_service.py
       - tests/test_graphical_task_c_owner.py
+      - tests/test_graphical_task_c_runtime.py
+      - tests/test_graphical_task_c_origin.py
       - tests/test_graphical_task_c_ssm_single_attempt.py
+      - docs/graphical-task-c-installed-stream-runtime-handoff-2026-11-04.md
       - .github/workflows/graphical-task-c-source.yml
 permissions:
   contents: read
@@ -38,9 +45,11 @@ jobs:
           python -m pytest -q -rs \
             tests/test_graphical_s3_checkpoint.py \
             tests/test_graphical_task_c_owner.py \
+            tests/test_graphical_task_c_runtime.py \
+            tests/test_graphical_task_c_origin.py \
             tests/test_graphical_task_c_ssm_single_attempt.py \
             tests/test_graphical_native_owner.py \
             tests/test_graphical_operation_owner_source.py \
             tests/test_graphical_operation_owner_reconciliation.py
       - if: always()
-        run: echo 'Source-only. Task C selected IPC has no native authenticated positive response or highwater; SSM not permitted.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Source-only stream runtime. Signed v2 observations, distinct S3/SSM role selection and protected preflight are exercised with fake credentials. Native service activation and real SSM remain blocked.' >> "$GITHUB_STEP_SUMMARY"
