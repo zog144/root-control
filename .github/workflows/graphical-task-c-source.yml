@@ -12,9 +12,11 @@ on:
       - src/zog/root_control/graphical_task_c_owner.py
       - src/zog/root_control/graphical_task_c_runtime.py
       - src/zog/root_control/graphical_task_c_native.py
+      - src/zog/root_control/graphical_task_c_origin.py
       - src/zog/root_control/graphical_task_c_service.py
       - tests/test_graphical_task_c_owner.py
       - tests/test_graphical_task_c_runtime.py
+      - tests/test_graphical_task_c_origin.py
       - tests/test_graphical_task_c_ssm_single_attempt.py
       - .github/workflows/graphical-task-c-source.yml
 permissions:
@@ -43,6 +45,7 @@ jobs:
             tests/test_graphical_s3_checkpoint.py \
             tests/test_graphical_task_c_owner.py \
             tests/test_graphical_task_c_runtime.py \
+            tests/test_graphical_task_c_origin.py \
             tests/test_graphical_task_c_ssm_single_attempt.py \
             tests/test_graphical_native_owner.py \
             tests/test_graphical_operation_owner_source.py \
