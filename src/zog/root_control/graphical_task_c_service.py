@@ -15,6 +15,7 @@ from pathlib import Path
 import socket
 import stat
 import sys
+import time
 
 from . import graphical_operation_owner_source as owner
 from . import graphical_task_c_owner as taskc
@@ -96,23 +97,29 @@ def main():
         # No native service is activated merely by installing these bytes;
         # no test fixture or signed status can flip the send gate.
         denied()
-    registry, gateway_uid, gateway_gid = selected_original_registry()
+    # The native constructor selects externally pinned S3 genesis/history,
+    # distinct owner-only checkpoint/SSM role sessions, original approvals,
+    # and fixed send/readback. No caller can select these through IPC.
+    from .graphical_task_c_native import installed_runtime, installed_peer
+    executor, policy = installed_runtime()
     sock = _socket_from_systemd()
-    # Future native admission will use a cryptographically authenticated
-    # signed result and current independent highwater. This source prototype
-    # may only perform strict read-only original mapping preadmission.
     while True:
         connection, _ = sock.accept()
         with connection:
             connection.settimeout(5)
             try:
-                taskc.inspect_one(connection, registry=registry,
-                                  gateway_uid=gateway_uid,
-                                  gateway_gid=gateway_gid)
-                # No positive "sent-original" / "preflight-ready" ever sent.
-                connection.sendall(
-                    b'{"error":"owner-native-send-not-admitted"}\n')
+                pid = taskc.verify_peer(
+                    connection, gateway_uid=policy["gateway_uid"],
+                    gateway_gid=policy["gateway_gid"])
+                installed_peer(pid, policy)
+                frame = taskc.read_stream_frame(connection)
+                reply = executor.handle(frame, now=int(time.time()))
+                wire = taskc.canonical(reply) + b"\n"
+                if len(wire) > taskc.FRAME_MAX:
+                    denied()
+                connection.sendall(wire)
             except (OSError, ValueError, owner.OperationDenied):
+                # Denials never imply original operation acceptance.
                 try:
                     connection.sendall(b'{"error":"owner-denied"}\n')
                 except OSError:
