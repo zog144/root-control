@@ -27,10 +27,13 @@ from .graphical_native_owner import ProtectedLedger, SelectedOwner, hold, strict
 from .graphical_owner_service import FixedSSMSender, _read_root, TOKEN_SCHEMA
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
 from .graphical_task_c_runtime import TaskCExecutor
+from .graphical_task_c_origin import verify_installed_evidence
 
 RUNTIME_CONFIG = Path("/etc/zog/graphical-owner/task-c-runtime.json")
 OPERATOR_PIN = Path("/etc/zog/graphical-owner/operator-public.key")
 OBSERVATION_SECRET = Path("/etc/zog/graphical-owner/observation-private.key")
+ORIGIN_ISSUER_PIN = Path("/etc/zog/graphical-owner/origin-issuer-public.key")
+ORIGIN_EVIDENCE = Path("/etc/zog/graphical-owner/original-github-evidence.json")
 SSM_SESSION = Path("/run/credentials/zog-graphical-owner.service/aws-session.json")
 CHECKPOINT_SESSION = Path("/run/credentials/zog-graphical-owner.service/checkpoint-session.json")
 LEDGER = Path("/var/lib/zog-graphical-owner-ledger")
@@ -139,7 +142,7 @@ def installed_runtime():
         "gateway_uid", "gateway_gid", "gateway_cgroup", "gateway_executable_sha256",
         "ledger_directory", "gateway_state_directory", "operator_key_sha256",
         "observation_public_sha256", "originals", "commands", "checkpoint",
-        "ssm", "origin_evidence_sha256",
+        "ssm", "origin_evidence_sha256", "origin_issuer_public_sha256",
     }
     if (set(row) != expected or row["schema"] != RUNTIME_SCHEMA
             or row["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
@@ -152,7 +155,8 @@ def installed_runtime():
             or not row["gateway_cgroup"].endswith(".service")
             or any(not contract.match(row[k], contract.SHA)
                    for k in ("gateway_executable_sha256", "operator_key_sha256",
-                             "observation_public_sha256", "origin_evidence_sha256"))
+                             "observation_public_sha256", "origin_evidence_sha256",
+                             "origin_issuer_public_sha256"))
             or row["ledger_directory"] != str(LEDGER)
             or type(row["gateway_state_directory"]) is not str
             or not row["gateway_state_directory"].startswith("/")):
@@ -184,6 +188,19 @@ def installed_runtime():
 
     registry = taskc.ProtectedOriginalRegistry(
         row["originals"], pinned_operator_public_key=operator)
+    # The independently trusted GitHub event issuer is NOT the operator
+    # grant signer and NOT a key supplied by the gateway or same request.
+    origin_issuer = _read_root(ORIGIN_ISSUER_PIN, max_bytes=32, mode=0o600)
+    origin_raw = _read_root(ORIGIN_EVIDENCE, max_bytes=16000)
+    if (len(origin_issuer) != 32 or
+            "sha256:" + hashlib.sha256(origin_issuer).hexdigest() !=
+            row["origin_issuer_public_sha256"] or
+            "sha256:" + hashlib.sha256(origin_raw).hexdigest() !=
+            row["origin_evidence_sha256"] or origin_issuer == operator):
+        hold()
+    verify_installed_evidence(
+        strict(origin_raw), registry=registry,
+        pinned_issuer_key=origin_issuer, now=int(time.time()))
     if (type(row["commands"]) is not dict
             or set(row["commands"]) != set(registry.entries)):
         hold()
