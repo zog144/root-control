@@ -32,6 +32,13 @@ jobs:
           ref: a3e939b7a22ef6277ae9712961ffbd5a18ccac39
           path: companions/box-control
           persist-credentials: false
+      - name: Checkout exact host-install archive-provider IPC source
+        uses: actions/checkout@v4
+        with:
+          repository: zog144/host-install
+          ref: 59a2e99c877c2687a01e69cd026d0966a2631afd
+          path: companions/host-install
+          persist-credentials: false
       - name: Checkout public Zog aggregate for image-build
         uses: actions/checkout@v4
         with:
@@ -46,6 +53,8 @@ jobs:
         run: |
           test "$(git -C companions/box-control rev-parse HEAD)" = "a3e939b7a22ef6277ae9712961ffbd5a18ccac39"
           test "$(git -C companions/zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
+          test "$(git -C companions/host-install rev-parse HEAD)" = "59a2e99c877c2687a01e69cd026d0966a2631afd"
+          test -f companions/host-install/src/zog/host_install/archive_provider_ipc_contract.py
           test ! -e COPYRIGHT
           test ! -e version-share-handoff.json
           test -f LICENSE
