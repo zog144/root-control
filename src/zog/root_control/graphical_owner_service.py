@@ -164,7 +164,13 @@ class FixedSSMSender:
         if ("sha256:" + hashlib.sha256(script).hexdigest() !=
                 command["script_sha256"]):
             hold()
-        client = self._session().client("ssm")
+        # SendCommand has no idempotency token. SDK retries after a lost
+        # acknowledgement could execute the same approved operation twice,
+        # even though our durable ledger claims it only once.
+        from botocore.config import Config
+        client = self._session().client(
+            "ssm", config=Config(connect_timeout=5, read_timeout=15,
+                                 retries={"total_max_attempts": 1}))
         result = client.send_command(
             InstanceIds=[self.install["instance_id"]],
             DocumentName="AWS-RunShellScript",
