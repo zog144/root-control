@@ -143,7 +143,7 @@ def test_gateway_rollback_cannot_rewind_checkpoint_and_owner_claim(tmp_path):
 def test_signed_revoke_same_protected_lock_denies_send(tmp_path):
     req,selection,operator,signer,pub,grant,first,sender,local,remote=setup(tmp_path)
     body={"schema":base.REVOCATION_APPROVAL_SCHEMA,
-          "approval_id":selection["identity"][:32],
+          "approval_id":selection["identity"].split(":")[1][:32],
           "scope_sha256":base.digest(selection["scope"]),
           "action":"revoke","expires_at":600}
     signed={**body,"signature_ed25519":base64.b64encode(
