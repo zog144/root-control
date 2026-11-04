@@ -60,7 +60,7 @@ class SeparateDurableCheckpoint:
         # shares the original open-file description, so flock on duplicates
         # would not serialize concurrent threads within one owner process.
         # Keep _stable_lock_fd open only as the inode-reuse/replace witness.
-        fd = self._lock_fd()
+        fd = self._open_lock()
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             a = os.fstat(fd)
