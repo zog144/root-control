@@ -136,8 +136,11 @@ class TaskCExecutor:
                           "preflight-failed" if ssm_state == "failed" else
                           "preflight-pending")
             else:
-                status = ("stage-observed" if ssm_state in ("success", "failed")
-                          else "stage-pending")
+                # A failure must never share a success-shaped label.
+                # Neither status implies immutable image-generation success.
+                status = ("stage-succeeded" if ssm_state == "success" else
+                          "stage-failed" if ssm_state == "failed" else
+                          "stage-pending")
             body = {
                 "schema": RESULT_SCHEMA,
                 "action": parsed["action"],
