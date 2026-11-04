@@ -21,6 +21,8 @@ from zog.root_control.graphical_native_owner import (
     ProtectedLedger, SelectedOwner, serve_one, RPC_SCHEMA,
 )
 from zog.root_control.graphical_owner_checkpoint import SeparateDurableCheckpoint
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 from test_graphical_operation_owner_source import request
 
 
