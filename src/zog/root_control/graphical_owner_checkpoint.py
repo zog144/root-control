@@ -44,9 +44,9 @@ class SeparateDurableCheckpoint:
                 child.st_uid != self.uid or
                 stat.S_IMODE(child.st_mode) != 0o700):
             hold()
-        lock = self._open_lock()
-        self._identity = (os.fstat(lock).st_dev, os.fstat(lock).st_ino)
-        os.close(lock)
+        self._stable_lock_fd = self._open_lock()
+        self._identity = (os.fstat(self._stable_lock_fd).st_dev,
+                          os.fstat(self._stable_lock_fd).st_ino)
 
     def _open_lock(self):
         fd = os.open(LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -56,7 +56,7 @@ class SeparateDurableCheckpoint:
 
     @contextmanager
     def locked(self):
-        fd = self._open_lock()
+        fd = os.dup(self._stable_lock_fd)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             a = os.fstat(fd)
