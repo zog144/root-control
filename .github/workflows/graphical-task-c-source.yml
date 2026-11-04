@@ -18,6 +18,7 @@ on:
       - tests/test_graphical_task_c_runtime.py
       - tests/test_graphical_task_c_origin.py
       - tests/test_graphical_task_c_ssm_single_attempt.py
+      - docs/graphical-task-c-installed-stream-runtime-handoff-2026-11-04.md
       - .github/workflows/graphical-task-c-source.yml
 permissions:
   contents: read
