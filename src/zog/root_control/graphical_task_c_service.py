@@ -90,6 +90,26 @@ def _socket_from_systemd():
     return sock
 
 
+def serve_selected_connection(connection, executor, policy, *, now):
+    """Strict native stream entry; source tests use disposable socketpairs.
+
+    The caller must have independently installed the exact executor and policy.
+    Nothing in the incoming frame can choose signer, target or AWS credentials.
+    """
+    from .graphical_task_c_native import installed_peer
+    pid = taskc.verify_peer(
+        connection, gateway_uid=policy["gateway_uid"],
+        gateway_gid=policy["gateway_gid"])
+    installed_peer(pid, policy)
+    frame = taskc.read_stream_frame(connection)
+    result = executor.handle(frame, now=now)
+    wire = taskc.canonical(result) + b"\n"
+    if len(wire) > taskc.FRAME_MAX:
+        denied()
+    connection.sendall(wire)
+    return result
+
+
 def main():
     if len(sys.argv) != 1 or os.geteuid() != 0:
         denied()
@@ -100,7 +120,7 @@ def main():
     # The native constructor selects externally pinned S3 genesis/history,
     # distinct owner-only checkpoint/SSM role sessions, original approvals,
     # and fixed send/readback. No caller can select these through IPC.
-    from .graphical_task_c_native import installed_runtime, installed_peer
+    from .graphical_task_c_native import installed_runtime
     executor, policy = installed_runtime()
     sock = _socket_from_systemd()
     while True:
@@ -108,16 +128,8 @@ def main():
         with connection:
             connection.settimeout(5)
             try:
-                pid = taskc.verify_peer(
-                    connection, gateway_uid=policy["gateway_uid"],
-                    gateway_gid=policy["gateway_gid"])
-                installed_peer(pid, policy)
-                frame = taskc.read_stream_frame(connection)
-                reply = executor.handle(frame, now=int(time.time()))
-                wire = taskc.canonical(reply) + b"\n"
-                if len(wire) > taskc.FRAME_MAX:
-                    denied()
-                connection.sendall(wire)
+                serve_selected_connection(
+                    connection, executor, policy, now=int(time.time()))
             except (OSError, ValueError, owner.OperationDenied):
                 # Denials never imply original operation acceptance.
                 try:
