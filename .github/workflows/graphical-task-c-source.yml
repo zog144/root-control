@@ -1,0 +1,40 @@
+name: Task C protected graphical owner source IPC reconciliation
+on:
+  push:
+    branches: [regular/graphical-owner-task-c-admission-20261104]
+  pull_request:
+    paths:
+      - src/zog/root_control/graphical_native_owner.py
+      - src/zog/root_control/graphical_owner_checkpoint.py
+      - src/zog/root_control/graphical_task_c_owner.py
+      - tests/test_graphical_task_c_owner.py
+      - .github/workflows/graphical-task-c-source.yml
+permissions:
+  contents: read
+jobs:
+  exact-task-c-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install 'pytest>=8,<10' 'cryptography>=44,<49'
+      - name: Validate exact Task C mapping and native owner history
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          python -m pytest -q -rs \
+            tests/test_graphical_task_c_owner.py \
+            tests/test_graphical_native_owner.py \
+            tests/test_graphical_operation_owner_source.py \
+            tests/test_graphical_operation_owner_reconciliation.py
+      - if: always()
+        run: echo 'Source-only. Task C selected IPC has no native authenticated positive response or highwater; SSM not permitted.' >> "$GITHUB_STEP_SUMMARY"
