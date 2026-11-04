@@ -1,0 +1,9 @@
+# Task C successor: preserve the original owner claim across SDK retries
+
+Selected base: root-control PR #35 `3caa4d1c6fcfb5f52a81ed701f8e0ad609406599`. Root-control PR #34 independently identified and corrected an SSM SDK retry hole in the older PR #33 branch, but the selected Task C PR #35 still inherited the **unfixed** `client("ssm")` path. These source changes carry that correction onto the *actual Task C selected lineage*, without merging alternative owner protocols.
+
+The fixed, installer-selected SSM sender now passes `botocore.config.Config(connect_timeout=5,read_timeout=15,retries={"total_max_attempts":1})`. This is important because an internal SDK retry of `SendCommand` after a lost HTTP acknowledgement could create a second AWS command within one durable owner claim. The durable claim itself cannot prevent retries inside a single SDK call.
+
+A real local botocore HTTP regression runs two failure cases (HTTP 500 and dropped response) under `AWS_MAX_ATTEMPTS=5` and adaptive retry environment overrides. It asserts exactly one HTTP request in each case and no false success. The Task C exact-head CI now includes this test with explicit boto3 dependency. This does not authorize native SSM or replace independent current highwater, signed original authorization, protected preflight, host-install native IAM separation, signed current-authority receipts or live gateway denial.
+
+**Still NO-GO:** Current Task C native service has `NATIVE_TASK_C_SEND_ADMISSION_IMPLEMENTED=False`; old seqpacket service stays unselected; no external nonrollbackable CAS, original preflight/result, native receipt, production pin, installed AWS credentials or actual SSM execution is changed. Separate native Work proof required.
