@@ -156,6 +156,18 @@ class S3AppendOnlyCheckpoint:
         _, _, _, revoked = self._scan(scope_digest)
         return {"revoked": revoked}
 
+    def current_witness(self, scope_digest):
+        """Fresh append-only history head for a signed read-only observation.
+
+        The gateway must verify this against independently pinned current
+        highwater/authority; it must not treat a gateway-supplied value as a
+        permission to send another operation.
+        """
+        next_sequence, history_sha256, _, revoked = self._scan(scope_digest)
+        return {"sequence": next_sequence - 1,
+                "history_sha256": history_sha256,
+                "revoked": revoked}
+
     def inspect_claim(self, scope_digest, operation_id, request_digest):
         if (not contract.match(operation_id, contract.H32)
                 or not contract.match(request_digest, contract.SHA)):
