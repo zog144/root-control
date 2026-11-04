@@ -56,7 +56,11 @@ class SeparateDurableCheckpoint:
 
     @contextmanager
     def locked(self):
-        fd = os.dup(self._stable_lock_fd)
+        # Reopen the lock for an INDEPENDENT open-file description. dup()
+        # shares the original open-file description, so flock on duplicates
+        # would not serialize concurrent threads within one owner process.
+        # Keep _stable_lock_fd open only as the inode-reuse/replace witness.
+        fd = self._open_lock()
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             a = os.fstat(fd)
