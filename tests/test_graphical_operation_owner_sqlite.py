@@ -83,3 +83,36 @@ def test_exact_original_approval_and_same_id_conflict(tmp_path):
     with pytest.raises(protocol.OperationDenied):
         owner(root,scope,cp).claim_and_send(changed,sender=lambda _:pytest.fail("unauthorized"))
     assert owner(root,scope,cp).claim_and_send(request(),sender=lambda _:"accepted")["outcome"]=="SENT_ORIGINAL"
+
+def test_separate_process_terminated_at_send_boundary_never_reissues(tmp_path):
+    import multiprocessing,os
+    root,scope,cp=create(tmp_path)
+    context=multiprocessing.get_context("fork")
+    def child():
+        # Simulate process death immediately after the externally fsynced
+        # CLAIMED_UNCERTAIN commit and at the outbound sender boundary.
+        owner(root,scope,cp).claim_and_send(request(),sender=lambda _:os._exit(42))
+    proc=context.Process(target=child)
+    proc.start();proc.join(6)
+    assert proc.exitcode==42
+    row=owner(root,scope,cp).inspect(request()["operation_id"])
+    assert row["outcome"]=="CLAIMED_UNCERTAIN"
+    assert row["command_id"] is None
+    with pytest.raises(protocol.OperationDenied):
+        owner(root,scope,cp).claim_and_send(request(),sender=lambda _:pytest.fail("resend"))
+
+def test_ledger_recreation_with_stale_external_checkpoint_is_not_native_approval(tmp_path):
+    root,scope,cp=create(tmp_path)
+    owner(root,scope,cp).claim_and_send(request(),sender=lambda _:"original")
+    # Native MUST pin/check an independent sequence ≥ 1, instead of asking
+    # the mutable local storage to declare its own high-water.
+    pinned={**cp,"minimum_sequence":1}
+    assert owner(root,scope,pinned).inspect(request()["operation_id"])["sequence"]==1
+    # A synthetic replacement with matching scope but reset sequence is denied.
+    for path in ("owner.sqlite3","owner.lock"):
+        (root/path).unlink()
+    root.rmdir()
+    durable.provision_synthetic_fixture(root,scope=scope,operations={
+        request()["operation_id"]:protocol.digest(request())},storage_id=cp["storage_id"])
+    with pytest.raises(protocol.OperationDenied):
+        owner(root,scope,pinned).inspect(request()["operation_id"])
