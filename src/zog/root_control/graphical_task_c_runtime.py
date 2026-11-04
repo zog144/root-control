@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from . import graphical_operation_owner_source as contract
 from . import graphical_task_c_owner as taskc
 from .graphical_native_owner import SelectedOwner, hold
+from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
 
 RESULT_SCHEMA = "zog-graphical-task-c-owner-observation-v2"
 RESULT_DOMAIN = b"zog-graphical-task-c-owner-observation-v2\0"
@@ -35,6 +36,8 @@ class TaskCExecutor:
         if (not isinstance(registry, taskc.ProtectedOriginalRegistry)
                 or not isinstance(protected_owner, SelectedOwner)
                 or not isinstance(protected_owner.signer, Ed25519PrivateKey)
+                or not isinstance(protected_owner.ledger.checkpoint,
+                                  S3AppendOnlyCheckpoint)
                 or not callable(getattr(ssm_inspector, "inspect", None))):
             hold()
         self.registry = registry
@@ -58,18 +61,23 @@ class TaskCExecutor:
         # Called only while holding the owner critical section. Remote S3
         # current history is checked before anything is signed.
         row = self.owner.ledger.inspect(req, scope=self.owner.installed)
-        if row["revoked"]:
+        witness = self.owner.ledger.checkpoint.current_witness(
+            self.owner.installed["identity"])
+        if (row["revoked"] or witness["revoked"] or
+                type(witness["sequence"]) is not int or
+                witness["sequence"] < 1 or
+                not contract.match(witness["history_sha256"], contract.SHA)):
             hold()
         command_id = row["command_id"]
         if command_id is None:
-            return row, "uncertain"
+            return row, "uncertain", witness
         if (not isinstance(command_id, str)
                 or COMMAND_ID.fullmatch(command_id) is None):
             hold()
         state = self.inspector.inspect(command_id)
         if state not in ("pending", "success", "failed"):
             hold()
-        return row, state
+        return row, state, witness
 
     def _preflight_succeeded(self, original, stage_id):
         preflight_operation = taskc.preflight_id(original["request_id"], stage_id)
@@ -84,7 +92,7 @@ class TaskCExecutor:
         for key in taskc.ORIGINAL_KEYS - {"operation_id"}:
             if selected["original"][key] != original[key]:
                 hold()
-        row, state = self._current(selected["owner_request"])
+        row, state, witness = self._current(selected["owner_request"])
         if row["outcome"] != "SENT_ORIGINAL" or state != "success":
             hold()
 
@@ -127,7 +135,7 @@ class TaskCExecutor:
             elif parsed["action"] != "observe-original":
                 hold()
 
-            row, ssm_state = self._current(request)
+            row, ssm_state, witness = self._current(request)
             is_preflight = request["operation_id"] != item["stage_operation_id"]
             if row["outcome"] != "SENT_ORIGINAL":
                 status = "claimed-uncertain"
@@ -157,6 +165,8 @@ class TaskCExecutor:
                 "ssm_state": ssm_state,
                 "status": status,
                 "revoked": row["revoked"],
+                "checkpoint_sequence": witness["sequence"],
+                "checkpoint_head_sha256": witness["history_sha256"],
             }
             sig = self.owner.signer.sign(RESULT_DOMAIN + contract.canonical(body))
             return {**body, "signature_ed25519":
