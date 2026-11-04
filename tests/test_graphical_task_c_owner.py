@@ -217,3 +217,13 @@ def test_task_c_native_service_keeps_hard_send_admission_hold(monkeypatch):
                         lambda: pytest.fail("systemd socket must not be reached"))
     with pytest.raises(owner.OperationDenied):
         executable.main()
+
+
+def test_graphical_native_sender_dependencies_are_explicit_optional_source_inputs():
+    import tomllib
+    p=Path(__file__).resolve().parents[1]/"pyproject.toml"
+    row=tomllib.loads(p.read_text())
+    extras=row["project"]["optional-dependencies"]["graphical-native-owner"]
+    assert any(x.startswith("cryptography") for x in extras)
+    assert any(x.startswith("boto3") for x in extras)
+    assert "graphical-native-owner" not in row["project"].get("dependencies", [])
