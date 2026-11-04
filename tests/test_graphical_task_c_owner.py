@@ -203,3 +203,17 @@ def test_independent_open_file_flock_serializes_real_thread_contention(tmp_path,
     t.join(3);u.join(3)
     assert not t.is_alive() and not u.is_alive()
     assert hold.is_set()
+
+
+def test_task_c_native_service_keeps_hard_send_admission_hold(monkeypatch):
+    from zog.root_control import graphical_task_c_service as executable
+    assert executable.SOCKET == "/run/zog/graphical-operation-owner.sock"
+    assert executable.NATIVE_TASK_C_SEND_ADMISSION_IMPLEMENTED is False
+    monkeypatch.setattr(executable.os, "geteuid", lambda:0)
+    monkeypatch.setattr(executable.sys, "argv", ["graphical_task_c_service"])
+    monkeypatch.setattr(executable,"selected_original_registry",
+                        lambda: pytest.fail("installer source must not be reached"))
+    monkeypatch.setattr(executable,"_socket_from_systemd",
+                        lambda: pytest.fail("systemd socket must not be reached"))
+    with pytest.raises(owner.OperationDenied):
+        executable.main()
