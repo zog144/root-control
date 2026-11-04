@@ -4,6 +4,8 @@ on:
     branches: [regular/graphical-owner-task-c-admission-20261104]
   pull_request:
     paths:
+      - src/zog/root_control/graphical_s3_checkpoint.py
+      - tests/test_graphical_s3_checkpoint.py
       - src/zog/root_control/graphical_owner_service.py
       - src/zog/root_control/graphical_native_owner.py
       - src/zog/root_control/graphical_owner_checkpoint.py
@@ -34,6 +36,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
           python -m pytest -q -rs \
+            tests/test_graphical_s3_checkpoint.py \
             tests/test_graphical_task_c_owner.py \
             tests/test_graphical_task_c_ssm_single_attempt.py \
             tests/test_graphical_native_owner.py \
