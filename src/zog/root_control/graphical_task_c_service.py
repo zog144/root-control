@@ -37,7 +37,6 @@ def selected_original_registry():
     """Inspect root-installed, owner-signed exact Task C mapping, no send."""
     if os.geteuid() != 0:
         denied()
-    config = taskc._unique([])  # ensure canonical parser helper imported
     config = json.loads(_read_root(CONFIG, max_bytes=32768),
                         object_pairs_hook=taskc._unique,
                         parse_constant=lambda _:denied())
