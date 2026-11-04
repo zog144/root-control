@@ -211,7 +211,14 @@ class ProtectedLedger:
                      "status": "revoked"}, self.uid)
 
     def inspect(self, req, *, scope):
-        self.checkpoint.inspect_current(scope["identity"])
+        checkpoint=self.checkpoint.inspect_current(scope["identity"])
+        self.checkpoint.inspect_claim(
+            scope["identity"],req["operation_id"],contract.digest(req))
+        local_revoked = _read_one(self.root, REVOKED, self.uid) is not None
+        if checkpoint["revoked"] != local_revoked:
+            # Crash between independent durable revocation and local
+            # receipt: recovery only, never expose apparently live authority.
+            hold()
         prior, result = self._state(req["operation_id"])
         if prior is None or prior.get("request_sha256") != contract.digest(req):
             hold()
@@ -219,7 +226,7 @@ class ProtectedLedger:
                 "request_sha256": contract.digest(req),
                 "outcome": result["outcome"] if result else "CLAIMED_UNCERTAIN",
                 "command_id": result["command_id"] if result else None,
-                "revoked": _read_one(self.root, REVOKED, self.uid) is not None}
+                "revoked": local_revoked}
 
 
 class SelectedOwner:
