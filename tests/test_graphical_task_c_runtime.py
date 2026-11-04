@@ -119,12 +119,24 @@ def test_preflight_must_finish_before_distinct_stage_claim(tmp_path):
 
     inspector.states["command-2"] = "success"
     observed = executor.handle(observe(stage, "d"*48), now=400)
-    assert observed["status"] == "stage-observed"
+    assert observed["status"] == "stage-succeeded"
     assert observed["nonce"] == "d"*48
     verify_signed(observed, signer)
     with pytest.raises(contract.OperationDenied):
         executor.handle(stage, now=400)
     assert len(sender.sent) == 2
+
+
+def test_failed_stage_must_never_return_positive_status(tmp_path):
+    executor, frames, signer, sender, inspector, ledger = setup(tmp_path)
+    executor.handle(frames["preflight-original"], now=400)
+    inspector.states["command-1"] = "success"
+    executor.handle(frames["submit-original"], now=400)
+    inspector.states["command-2"] = "failed"
+    result = executor.handle(observe(frames["submit-original"]), now=400)
+    assert result["status"] == "stage-failed"
+    assert result["ssm_state"] == "failed"
+    verify_signed(result, signer)
 
 
 def test_lost_ssm_ack_does_not_reopen_preflight_claim(tmp_path):
