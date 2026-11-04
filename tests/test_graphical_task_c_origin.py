@@ -70,7 +70,7 @@ def test_forged_or_stale_original_evidence_refuses_installation(changed):
     if changed == "actor":
         changed_body["records"][stage_id]["original"]["origin_trigger_actor"]="wrong"
     elif changed == "request_sha":
-        changed_body["records"][stage_id]["original"]["original_request_sha256"]="a"*64
+        changed_body["records"][stage_id]["original"]["original_request_sha256"]="f"*64
     elif changed == "delivery":
         changed_body["records"][stage_id]["github_delivery_id"]="invalid id !"
     elif changed == "expired":
