@@ -178,7 +178,7 @@ def run(argv=None):
     if opts.action == "operator-registry":
         signer, pub = _key("operator")
         required = {"stage_request", "preflight_request", "stage_original",
-                    "approval_ids", "expires_at"}
+                    "original_checkpoint", "approval_ids", "expires_at"}
         if set(m) != required:
             _deny()
         _human_confirm("original preflight and stage", m)
@@ -205,6 +205,9 @@ def run(argv=None):
         event = _read(opts.webhook, size=issue.EVENT_LIMIT, mode=0o600)
         signature = _read(opts.webhook_signature, size=80, mode=0o600)
         _claim("github-event", opts.delivery_id)
+        # A delivery ID substitution cannot turn identical original bytes
+        # into a new issuance if an old acknowledgement was lost.
+        _claim("github-event-content", issue.sha(event)[7:])
         result = issue.attest_original_github_event(
             event_raw=event, signature_header=signature.decode("ascii").strip(),
             delivery_id=opts.delivery_id, secret=secret,
