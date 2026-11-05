@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: zog144/host-deploy
-          ref: 76416b9d7ef64aac17b75b6ce06b98244fd487e0
+          ref: 0ea6d583fa441527f45dabbbf542731560644a72
           path: companions/host-deploy
           persist-credentials: false
       - uses: actions/setup-python@v5
