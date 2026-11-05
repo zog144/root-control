@@ -295,3 +295,9 @@ def test_native_owner_and_broker_gates_remain_disabled():
     assert graphical_task_c_service.NATIVE_TASK_C_SEND_ADMISSION_IMPLEMENTED is False
     from zog.host_deploy.gateway import graphics_owner_trust_daemon
     assert graphics_owner_trust_daemon.NATIVE_TRUST_BROKER_ADMISSION_IMPLEMENTED is False
+
+
+def test_exact_reviewed_constructor_source_repin_and_no_silent_legacy_selection():
+    assert authority.BROKER_SOURCE == "0ea6d583fa441527f45dabbbf542731560644a72"
+    assert authority.BROKER_SOURCE != "76416b9d7ef64aac17b75b6ce06b98244fd487e0"
+    assert authority.OWNER_SOURCE == "5ad7d5ed72d1b72edc767a658de28506791a74d4"
