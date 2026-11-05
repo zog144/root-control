@@ -1,0 +1,21 @@
+# Task C read-only broker authority source review — 2026-11-05
+
+Selected upstream source: root-control PR #39 `5ad7d5ed72d1b72edc767a658de28506791a74d4` retains the *original* S3 checkpoint identity; host-deploy PR #26 broker candidate `76416b9d7ef64aac17b75b6ce06b98244fd487e0`. The new root-control trust-provider source is a **separate consumer** and does not change the original checkpoint record's `root_source_revision`. Retained account, region, bucket, prefix, scope, genesis, and **writer role ARN** must remain invariant.
+
+## Independent native selector
+
+`graphical_task_c_trust_authority.installed_readonly_authority()` reads fixed root-owned sources, not gateway RPC arguments: original immutable checkpoint record plus local reservation and a separate existing external anchor; root owner-signed original preflight/stage registry; independently issuer-signed GitHub event; operator/issuer observation public-key pins; root-owned gateway public trust pin; and an independently retained **operator-signed purpose approval** at `/var/lib/zog-graphical-owner-authority/trust-broker-approval.json`. The approval binds the original record digest, issuer evidence digest, exact public pin digest, broker source revision, original owner revision, exact Host/installation/STATE/scope, distinct read/writer/SSM role ARNs, and gateway UID/GID/cgroup/executable. No source code generates a pin, approval, original event, key or S3 genesis.
+
+The source binds the real broker signer obtained only from the systemd `broker-private.key` credential to the independently approved public pin. A distinct explicit short-lived `read-only-checkpoint.json` session is checked against its exact STS assumed-role identity, and an S3 capability wrapper exposes **GetObject only**. `S3AppendOnlyCheckpoint.current_witness()` verifies the original genesis and the complete hash-linked current history. No ListBucket, PutObject, DeleteObject, alternate bucket discovery or default credential chain is supplied. A denied read of a missing sequence is **not** a valid history end; it must HOLD. Work may not broaden IAM with ListBucket merely to make the test pass without separate security review.
+
+The existing host-deploy trust daemon's `NATIVE_TRUST_BROKER_ADMISSION_IMPLEMENTED=False` and gateway's `APPROVED_PIN_SHA256=None` remain intact. Host-deploy still has a held `installed_runtime()` seam: its Regular owner must select this reviewed root-control constructor only **after** the actual native authority bundle is accepted. A reviewed source selector is not an activation flag.
+
+## Work acceptance, not source assertions
+
+1. Independently authenticate the original operator-signed mapping, separately issuer-signed event and true retained original checkpoint/anchor, not a newly invented approval or alternate S3 prefix. Prove anchor retention outside gateway rollback.
+2. Independently verify signed broker-purpose approval and public pin against real installed source/wheel RECORD/executable and unit/socket bytes; maintain a genuinely protected pin SHA not stored under gateway mutable STATE. Broker private key remains owner-only, never exposed through public pin.
+3. Verify the separately issued read-only AWS principal with **actual** GetObject behavior (existing + missing sequence) and effective denial of Put/Copy/Delete/List/SSM/PassRole/STS escalation. The S3 wrapper alone does not prove IAM.
+4. Verify exact live gateway UID, executable and cgroup/InvocationID and real denial of owner's credential files, IMDS, AssumeRole and SendCommand. No synthetic gateway principal or self-issued accepted receipts.
+5. Install the exact broker wheel/RECORD and units **disabled**, record real storage and pin custody, and leave the owner sender inactive. Native socket operation, reboot and a separately approved original SSM send are later gates.
+
+The component test role evidence and source pass do not authorize enabling a broker or sending a graphical command. Do not mutate the shared Host role.
