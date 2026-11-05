@@ -94,9 +94,42 @@ def _signature(signer, pinned_public, domain, body):
     return {**body, "signature_ed25519": base64.b64encode(sig).decode("ascii")}
 
 
+def check_original_checkpoint(record, stage_request):
+    """Require the original full protected checkpoint tuple for every grant.
+
+    A caller cannot create, replace or independently authenticate this record.
+    The native installer must first attest its immutable protected reservation,
+    external anchor and S3 genesis/history under separate custody.
+    """
+    req = owner.validate_request(stage_request)
+    if (type(record) is not dict or set(record) != trust.ORIGINAL_FIELDS
+            or record.get("schema") != trust.ORIGINAL_SCHEMA
+            or record.get("root_source_revision") != trust.OWNER_SOURCE
+            or any(record.get(k) != req[k] for k in (
+                "host_id", "installation_id", "state_volume_id"))
+            or record.get("checkpoint_scope_sha256") != owner.digest(
+                owner.scope_from_request(req))
+            or type(record.get("checkpoint_account_id")) is not str
+            or len(record["checkpoint_account_id"]) != 12
+            or not record["checkpoint_account_id"].isdigit()
+            or type(record.get("checkpoint_bucket")) is not str
+            or not 3 <= len(record["checkpoint_bucket"]) <= 63
+            or type(record.get("checkpoint_region")) is not str
+            or not record["checkpoint_region"].startswith("us-")
+            or type(record.get("checkpoint_prefix")) is not str
+            or not record["checkpoint_prefix"].endswith("/")
+            or not owner.match(record.get("checkpoint_genesis_sha256"), owner.SHA)
+            or not trust.ROLE.fullmatch(record.get("checkpoint_role_arn", ""))
+            or record["checkpoint_role_arn"].split(":")[4] !=
+                record["checkpoint_account_id"]):
+        hold()
+    return sha(canonical(record))
+
+
 def issue_original_registry(
     *, stage_request, preflight_request, stage_original,
-    approval_ids, expires_at, now, sign_operator, pinned_operator_public,
+    original_checkpoint, approval_ids, expires_at, now,
+    sign_operator, pinned_operator_public,
 ):
     """Create exact v1 operator approvals and mapping for two distinct claims.
 
@@ -105,6 +138,7 @@ def issue_original_registry(
     """
     stage = owner.validate_request(stage_request)
     preflight = owner.validate_request(preflight_request)
+    check_original_checkpoint(original_checkpoint, stage)
     stage_id = stage["operation_id"]
     pre_id = taskc.preflight_id(stage["request_id"], stage_id)
     if (preflight != {**stage, "operation_id": pre_id}
@@ -194,6 +228,8 @@ def attest_original_github_event(
             or not isinstance(registry, taskc.ProtectedOriginalRegistry)):
         hold()
     event = strict(event_raw)
+    if type(event) is not dict:
+        hold()
     repo, sender, issue = (event.get("repository"), event.get("sender"),
                            event.get("issue"))
     if (not isinstance(repo, dict) or
@@ -201,7 +237,8 @@ def attest_original_github_event(
             or not isinstance(sender, dict) or
             sender.get("id") != expected_actor_id
             or not isinstance(issue, dict)
-            or issue.get("user", {}).get("id") != expected_actor_id
+            or not isinstance(issue.get("user"), dict)
+            or issue["user"].get("id") != expected_actor_id
             or event.get("action") != "opened"):
         hold()
     try:
