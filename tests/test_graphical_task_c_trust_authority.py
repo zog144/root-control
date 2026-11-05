@@ -201,7 +201,7 @@ def test_original_operator_issuer_pin_and_3_distinct_roles_selected():
     "operator", "broker", "owner_key", "session_role",
     "same_role", "record_sha", "wrong_source", "expired", "approval_sig",
     "origin_event", "wrong_host", "pin_replacement",
-    "gateway_uid", "gateway_executable", "gateway_cgroup",
+    "gateway_uid", "gateway_executable", "gateway_cgroup", "mixed_scope",
 ))
 def test_no_substitution_and_no_fabricated_authority(tamper):
     row = setup()
@@ -247,6 +247,9 @@ def test_no_substitution_and_no_fabricated_authority(tamper):
         row["broker_config"]["gateway_executable_sha256"] = "sha256:"+"0"*64
     elif tamper == "gateway_cgroup":
         row["broker_config"]["gateway_cgroup"] = "/system.slice/swap.service"
+    elif tamper == "mixed_scope":
+        selected = next(iter(row["registry"].entries.values()))
+        selected["owner_request"]["authority_epoch"] += 1
     with pytest.raises(owner.OperationDenied):
         review(row)
 
