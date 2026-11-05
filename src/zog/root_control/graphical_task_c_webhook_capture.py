@@ -62,7 +62,8 @@ def validate_delivery(raw, *, signature, delivery_id, webhook_secret,
             or actor.get("id") != expected_actor_id
             or actor.get("login") != authorized_actor
             or not isinstance(issue, dict)
-            or issue.get("user", {}).get("id") != expected_actor_id):
+            or not isinstance(issue.get("user"), dict)
+            or issue["user"].get("id") != expected_actor_id):
         deny()
     try:
         from zog.host_deploy.gateway.github_dispatch import prepare_event
