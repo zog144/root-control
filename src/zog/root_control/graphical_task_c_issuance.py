@@ -295,7 +295,7 @@ def prepare_broker_purpose(
             or pin["installation_id"] != record["installation_id"]
             or pin["state_volume_id"] != record["state_volume_id"]
             or pin["installed_owner_source"] != trust.OWNER_SOURCE
-            or pin["installed_broker_source"] != trust.BROKER_SOURCE
+            or not owner.match(pin["installed_broker_source"], owner.H64)
             or record["host_id"] != root_row.get("host_id")
             or record["installation_id"] != root_row.get("installation_id")
             or record["state_volume_id"] != root_row.get("state_volume_id")
