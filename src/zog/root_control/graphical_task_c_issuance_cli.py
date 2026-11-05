@@ -9,6 +9,7 @@ fresh human operator confirmation before any operator signature.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -165,6 +166,9 @@ def run(argv=None):
     ev.add_argument("--webhook", required=True)
     ev.add_argument("--webhook-signature", required=True)
     ev.add_argument("--delivery-id", required=True)
+    captured = commands.add_parser("event-from-capture")
+    captured.add_argument("--manifest", required=True)
+    captured.add_argument("--capture", required=True)
     purpose = commands.add_parser("operator-purpose")
     purpose.add_argument("--manifest", required=True)
     revoke = commands.add_parser("operator-revoke")
@@ -189,7 +193,7 @@ def run(argv=None):
             pinned_operator_public=pub)
         return _publish("operator-registry", id_, result)
 
-    if opts.action == "event-from-webhook":
+    if opts.action in ("event-from-webhook", "event-from-capture"):
         signer, pub = _key("event")
         secret = _read(WEBHOOK_SECRET, size=512, mode=0o400)
         required = {"registry", "operator_public_hex",
@@ -202,22 +206,49 @@ def run(argv=None):
             _deny()
         registry = taskc.ProtectedOriginalRegistry(
             m["registry"], pinned_operator_public_key=operator_public)
-        event = _read(opts.webhook, size=issue.EVENT_LIMIT, mode=0o600)
-        signature = _read(opts.webhook_signature, size=80, mode=0o600)
-        _claim("github-event", opts.delivery_id)
+        if opts.action == "event-from-capture":
+            captured = _input(opts.capture)
+            fields = {"schema", "event_sha256", "original_request_sha256",
+                      "delivery_id", "repository_id", "actor_id",
+                      "issue_number", "request_id", "observed_at",
+                      "raw_event_base64", "signature_header"}
+            if (set(captured) != fields
+                    or captured["schema"] !=
+                      "zog-task-c-original-github-webhook-capture-v1"
+                    or captured["repository_id"] != m["repository_id"]
+                    or captured["actor_id"] != m["actor_id"]
+                    or type(captured["observed_at"]) is not int
+                    or not captured["observed_at"] <= now <=
+                        captured["observed_at"] + issue.WEBHOOK_LIFETIME):
+                _deny()
+            try:
+                event = base64.b64decode(
+                    captured["raw_event_base64"], validate=True)
+            except (ValueError, TypeError):
+                _deny()
+            if issue.sha(event) != captured["event_sha256"]:
+                _deny()
+            signature = captured["signature_header"]
+            delivery_id = captured["delivery_id"]
+        else:
+            event = _read(opts.webhook, size=issue.EVENT_LIMIT, mode=0o600)
+            signature = _read(opts.webhook_signature, size=80, mode=0o600
+                              ).decode("ascii").strip()
+            delivery_id = opts.delivery_id
+        _claim("github-event", delivery_id)
         # A delivery ID substitution cannot turn identical original bytes
         # into a new issuance if an old acknowledgement was lost.
         _claim("github-event-content", issue.sha(event)[7:])
         result = issue.attest_original_github_event(
-            event_raw=event, signature_header=signature.decode("ascii").strip(),
-            delivery_id=opts.delivery_id, secret=secret,
+            event_raw=event, signature_header=signature,
+            delivery_id=delivery_id, secret=secret,
             registry=registry, authorized_actor=m["authorized_actor"],
             expected_repository_id=m["repository_id"],
             expected_actor_id=m["actor_id"],
             original_commit_sha=m["original_commit_sha"],
             issued_at=now, expires_at=m["expires_at"],
             pinned_issuer_public=pub, sign_issuer=signer)
-        return _publish("github-event", opts.delivery_id, result)
+        return _publish("github-event", delivery_id, result)
 
     if opts.action == "operator-purpose":
         signer, pub = _key("operator")
