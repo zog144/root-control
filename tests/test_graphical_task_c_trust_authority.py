@@ -136,6 +136,15 @@ def setup():
             "role_arn": "arn:aws:iam::123456789012:role/OriginalSsmSender"
         },
     }
+    broker_config = {
+        "schema": "zog-task-c-readonly-broker-native-selection-v1",
+        "broker_source_revision": authority.BROKER_SOURCE,
+        "root_source_revision": authority.OWNER_SOURCE,
+        "gateway_uid": 15310, "gateway_gid": 15311,
+        "gateway_cgroup": "/system.slice/zog-graphical-gateway.service",
+        "gateway_executable_sha256": "sha256:" + "8"*64,
+        "boot_id": "synthetic-not-current-boot",
+    }
     approval_body = {
         "schema": authority.PURPOSE_SCHEMA,
         "pin_sha256": authority.digest_bytes(owner.canonical(pin)),
@@ -152,7 +161,12 @@ def setup():
         "host_id": record["host_id"],
         "installation_id": record["installation_id"],
         "state_volume_id": record["state_volume_id"],
-        "scope_sha256": scope, "expires_at": 450,
+        "scope_sha256": scope,
+        "gateway_uid": broker_config["gateway_uid"],
+        "gateway_gid": broker_config["gateway_gid"],
+        "gateway_cgroup": broker_config["gateway_cgroup"],
+        "gateway_executable_sha256": broker_config["gateway_executable_sha256"],
+        "expires_at": 450,
     }
     approval = {
         **approval_body, "signature_ed25519": base64.b64encode(
@@ -161,6 +175,7 @@ def setup():
     }
     return dict(
         record=record, record_sha=record_sha, root_row=root_row,
+        broker_config=broker_config,
         registry=registry, evidence=evidence, operator_key=public(operator),
         issuer_key=public(issuer),
         observation_public=bytes.fromhex(pin["owner_observation_public_key"]),
@@ -186,6 +201,7 @@ def test_original_operator_issuer_pin_and_3_distinct_roles_selected():
     "operator", "broker", "owner_key", "session_role",
     "same_role", "record_sha", "wrong_source", "expired", "approval_sig",
     "origin_event", "wrong_host", "pin_replacement",
+    "gateway_uid", "gateway_executable", "gateway_cgroup",
 ))
 def test_no_substitution_and_no_fabricated_authority(tamper):
     row = setup()
@@ -225,6 +241,12 @@ def test_no_substitution_and_no_fabricated_authority(tamper):
         row["root_row"]["host_id"] = "0"*64
     elif tamper == "pin_replacement":
         row["pin"]["original_checkpoint_sha256"] = "sha256:"+"c"*64
+    elif tamper == "gateway_uid":
+        row["broker_config"]["gateway_uid"] += 1
+    elif tamper == "gateway_executable":
+        row["broker_config"]["gateway_executable_sha256"] = "sha256:"+"0"*64
+    elif tamper == "gateway_cgroup":
+        row["broker_config"]["gateway_cgroup"] = "/system.slice/swap.service"
     with pytest.raises(owner.OperationDenied):
         review(row)
 
