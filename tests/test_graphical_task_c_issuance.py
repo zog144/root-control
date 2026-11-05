@@ -46,8 +46,23 @@ def sample():
             "origin_trigger_actor":"zog144", "operation_id":stage["operation_id"],
             "stage":"submit", "ordinal":0,
             "binding_sha256":"a"*64, "remote_request_sha256":"b"*64}
+    checkpoint = {
+        "schema":trust.ORIGINAL_SCHEMA,
+        "host_id":stage["host_id"],
+        "installation_id":stage["installation_id"],
+        "state_volume_id":stage["state_volume_id"],
+        "checkpoint_account_id":"123456789012",
+        "checkpoint_region":"us-east-1",
+        "checkpoint_bucket":"synthetic-original-bucket",
+        "checkpoint_prefix":"synthetic/original/",
+        "checkpoint_scope_sha256":owner.digest(owner.scope_from_request(stage)),
+        "checkpoint_genesis_sha256":"sha256:"+"e"*64,
+        "checkpoint_role_arn":"arn:aws:iam::123456789012:role/SyntheticOriginalWriter",
+        "root_source_revision":trust.OWNER_SOURCE,
+    }
     records = issuer.issue_original_registry(
         stage_request=stage, preflight_request=pre, stage_original=orig,
+        original_checkpoint=checkpoint,
         approval_ids={stage["operation_id"]:"c"*32, pre["operation_id"]:"d"*32},
         expires_at=480, now=400,
         sign_operator=operator.sign, pinned_operator_public=pub(operator))
@@ -131,8 +146,22 @@ def test_forged_or_stale_webhook_does_not_issue(fault):
 def test_operator_mapping_rejects_wrong_selected_authority(fault):
     operator,_,stage,pre,registry,_ = sample()
     original = registry[stage["operation_id"]]["mapping"]["original"]
+    checkpoint = {
+        "schema":trust.ORIGINAL_SCHEMA,
+        "host_id":stage["host_id"],
+        "installation_id":stage["installation_id"],
+        "state_volume_id":stage["state_volume_id"],
+        "checkpoint_account_id":"123456789012",
+        "checkpoint_region":"us-east-1",
+        "checkpoint_bucket":"synthetic-original-bucket",
+        "checkpoint_prefix":"synthetic/original/",
+        "checkpoint_scope_sha256":owner.digest(owner.scope_from_request(stage)),
+        "checkpoint_genesis_sha256":"sha256:"+"e"*64,
+        "checkpoint_role_arn":"arn:aws:iam::123456789012:role/SyntheticOriginalWriter",
+        "root_source_revision":trust.OWNER_SOURCE,
+    }
     args = {"stage_request":stage, "preflight_request":pre,
-            "stage_original":original, "approval_ids":{
+            "stage_original":original, "original_checkpoint":checkpoint, "approval_ids":{
                 stage["operation_id"]:"c"*32, pre["operation_id"]:"d"*32},
             "expires_at":480,"now":400,
             "sign_operator":operator.sign,
@@ -187,3 +216,37 @@ def test_manual_cli_does_not_generate_keys_or_enable_sender():
     assert "os.O_EXCL" in code
     assert cli.ROLE_NAMES["operator"] != cli.ROLE_NAMES["event"]
     assert cli.ROOT != cli.OUTPUT
+
+
+@pytest.mark.parametrize("field,value",(
+    ("host_id","f"*64),
+    ("state_volume_id","d"*64),
+    ("checkpoint_scope_sha256","sha256:"+"0"*64),
+    ("checkpoint_genesis_sha256","missing"),
+    ("checkpoint_role_arn","arn:aws:iam::999999999999:role/ForgedWriter"),
+    ("root_source_revision","0"*40),
+))
+def test_operator_rejects_forged_checkpoint_before_signing(field,value):
+    op,_,stage,pre,registry,_=sample()
+    original=registry[stage["operation_id"]]["mapping"]["original"]
+    record={
+        "schema":trust.ORIGINAL_SCHEMA,
+        "host_id":stage["host_id"],"installation_id":stage["installation_id"],
+        "state_volume_id":stage["state_volume_id"],
+        "checkpoint_account_id":"123456789012",
+        "checkpoint_region":"us-east-1",
+        "checkpoint_bucket":"synthetic-original-bucket",
+        "checkpoint_prefix":"synthetic/original/",
+        "checkpoint_scope_sha256":owner.digest(owner.scope_from_request(stage)),
+        "checkpoint_genesis_sha256":"sha256:"+"e"*64,
+        "checkpoint_role_arn":"arn:aws:iam::123456789012:role/SyntheticOriginalWriter",
+        "root_source_revision":trust.OWNER_SOURCE,
+    }
+    record[field]=value
+    with pytest.raises((issuer.IssuanceDenied,owner.OperationDenied)):
+        issuer.issue_original_registry(
+            stage_request=stage,preflight_request=pre,stage_original=original,
+            original_checkpoint=record,
+            approval_ids={stage["operation_id"]:"c"*32,pre["operation_id"]:"d"*32},
+            expires_at=480,now=400,sign_operator=op.sign,
+            pinned_operator_public=pub(op))
