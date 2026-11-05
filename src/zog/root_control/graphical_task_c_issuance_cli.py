@@ -1,16 +1,11 @@
-"""Manually invoked, disabled-by-default Task C original issuance CLI.
+"""Prospective manually invoked Task C signing; never bootstraps authority.
 
-Install on *separate* offline/protected signing hosts: operator and GitHub
-event issuer. There is no key generation, source-controlled private key,
-automatic network listener, background sign, AWS write or SSM authority.
-This program requires pre-existing pins, keys, claim directories and a
-fresh human operator confirmation before any operator signature.
+Operator and GitHub event issuer run on separate protected signing hosts.
+Their 32-byte Ed25519 seeds and independently installed *counterparty* public
+pins must already exist. No key, S3 history or service is created here.
 """
-from __future__ import annotations
-
 import argparse
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,7 +15,6 @@ import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
-
 from . import graphical_task_c_issuance as issue
 from . import graphical_task_c_owner as taskc
 from . import graphical_operation_owner_source as owner
@@ -28,275 +22,244 @@ from . import graphical_operation_owner_source as owner
 ROOT = Path("/etc/zog/graphical-task-c-issuance")
 OUTPUT = Path("/var/lib/zog/graphical-task-c-issuance")
 ROLE_NAMES = {
-    "operator": (ROOT / "operator.private", ROOT / "operator.public"),
-    "event": (ROOT / "event.private", ROOT / "event.public"),
+    "operator": (ROOT/"operator.private", ROOT/"operator.public"),
+    "event": (ROOT/"event.private", ROOT/"event.public"),
 }
-WEBHOOK_SECRET = ROOT / "github-webhook.hmac"
-MAX = 131072
+PINNED_OPERATOR_FOR_EVENT = ROOT/"accepted-operator.public"
+PINNED_EVENT_FOR_OPERATOR = ROOT/"accepted-event-issuer.public"
+WEBHOOK_SECRET = ROOT/"github-webhook.hmac"
 
 
-def _deny():
+def deny():
     issue.hold()
 
 
-def _protected_dir(path):
-    current = path
+def protected(directory):
+    p = Path(directory)
     while True:
-        info = os.lstat(current)
-        if (not stat.S_ISDIR(info.st_mode) or
-                info.st_uid != 0 or info.st_mode & 0o022):
-            _deny()
-        if str(current) == "/":
+        st = os.lstat(p)
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or
+                st.st_mode & 0o022):
+            deny()
+        if str(p) == "/":
             return
-        current = current.parent
+        p = p.parent
 
 
-def _read(path, *, size=MAX, mode=0o600):
+def read(path, *, limit=65536, mode=0o600):
     p = Path(path)
     if not p.is_absolute() or p.is_symlink():
-        _deny()
-    _protected_dir(p.parent)
+        deny()
+    protected(p.parent)
     fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != mode
-                or not 1 <= info.st_size <= size):
-            _deny()
-        raw = os.read(fd, size + 1)
-        if len(raw) != info.st_size:
-            _deny()
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or
+                st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != mode or
+                not 1 <= st.st_size <= limit):
+            deny()
+        raw = os.read(fd,limit+1)
+        if len(raw) != st.st_size:
+            deny()
         return raw
     finally:
         os.close(fd)
 
 
-def _key(role):
-    private, pubpath = ROLE_NAMES[role]
-    raw = _read(private, size=32, mode=0o400)
-    pin = _read(pubpath, size=32, mode=0o600)
-    if len(raw) != 32 or len(pin) != 32:
-        _deny()
-    key = Ed25519PrivateKey.from_private_bytes(raw)
-    derived = key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    if derived != pin:
-        _deny()
-    # Only return the scoped caller's key and separately installed pin.
-    return key.sign, pin
+def key(role):
+    secret, public_path = ROLE_NAMES[role]
+    raw = read(secret,limit=32,mode=0o400)
+    pinned = read(public_path,limit=32)
+    if len(raw) != 32 or len(pinned) != 32:
+        deny()
+    k = Ed25519PrivateKey.from_private_bytes(raw)
+    derived = k.public_key().public_bytes(
+        serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+    if derived != pinned:
+        deny()
+    return k.sign, pinned
 
 
-def _human_confirm(label, value):
-    """No approval from argv, env, file, or gateway; physical tty required."""
-    digest = issue.sha(owner.canonical(value))
-    with open("/dev/tty", "r+", encoding="ascii") as terminal:
-        terminal.write(f"Task C {label} SHA-256: {digest}\n")
-        terminal.write("Review original Host/install/STATE, S3 genesis, issue/actor,\n"
-                       "operation and expiry from the *independent* source.\n")
-        terminal.write(f"Type exactly APPROVE {digest} to sign: ")
-        terminal.flush()
-        reply = terminal.readline(128).strip()
-    if reply != "APPROVE " + digest:
-        _deny()
+def confirm(label, body):
+    digest = issue.sha(owner.canonical(body))
+    with open("/dev/tty","r+",encoding="ascii") as tty:
+        tty.write("Task C " + label + " SHA-256: " + digest + "\n")
+        tty.write("Independently inspect original Host, STATE, operator, "
+                  "event, S3 genesis, source and expiry.\n")
+        tty.write("Type APPROVE " + digest + " to sign: ")
+        tty.flush()
+        accepted = tty.readline(128).strip()
+    if accepted != "APPROVE " + digest:
+        deny()
 
 
-def _claim(kind, unique):
-    """Never reopen an issuance claim after crash or uncertain write."""
-    if (type(unique) is not str or not unique or
-            not all(x.isalnum() or x in "-_" for x in unique)
-            or len(unique) > 128):
-        _deny()
-    directory = OUTPUT / "claims" / kind
-    _protected_dir(directory)
-    name = directory / (unique + ".claimed")
-    fd = os.open(str(name), os.O_CREAT | os.O_EXCL | os.O_WRONLY |
-                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def create_only(path, raw):
+    p = Path(path)
+    protected(p.parent)
+    fd = os.open(str(p),os.O_WRONLY|os.O_CREAT|os.O_EXCL|
+                 os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(owner.canonical({
-                "kind": kind, "id": unique, "status": "irrevocably-reserved"
-            }) + b"\n")
-            f.flush()
-            os.fsync(f.fileno())
-        d = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+        with os.fdopen(fd,"wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        fd_dir = os.open(str(p.parent),os.O_RDONLY|os.O_DIRECTORY)
         try:
-            os.fsync(d)
+            os.fsync(fd_dir)
         finally:
-            os.close(d)
+            os.close(fd_dir)
     except BaseException:
-        # Do NOT unlink, rename or retry an ambiguous reservation.
+        # Lost acknowledgement or short write is uncertain; never unlink.
         raise
 
 
-def _publish(kind, unique, result):
-    dest = OUTPUT / "receipts" / kind / (unique + ".json")
-    _protected_dir(dest.parent)
-    content = owner.canonical(result) + b"\n"
-    fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        parent = os.open(str(dest.parent), os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
-    except BaseException:
-        # No cleanup on uncertain publication.
-        raise
-    return {"status": "receipt-written-not-installed",
-            "sha256": issue.sha(content.rstrip(b"\n")),
-            "kind": kind, "id": unique}
+def claimed(kind, identity):
+    if (type(identity) is not str or not 1 <= len(identity) <= 128 or
+            not all(x.isalnum() or x in "-_" for x in identity)):
+        deny()
+    create_only(OUTPUT/"claims"/kind/(identity+".claimed"),
+                owner.canonical({"schema":"zog-issuance-claim-v1",
+                                 "kind":kind,"id":identity})+b"\n")
 
 
-def _input(path):
-    return issue.strict(_read(path, mode=0o600))
+def published(kind, identity, envelope):
+    canonical = owner.canonical(envelope)
+    create_only(OUTPUT/"receipts"/kind/(identity+".json"), canonical+b"\n")
+    return {"status":"receipt-written-not-installed",
+            "kind":kind,"identity":identity,"sha256":issue.sha(canonical)}
+
+
+def manifest(path):
+    return issue.strict(read(path))
+
+
+def require_peer_key(path, from_manifest, own_key):
+    peer = read(path, limit=32)
+    if (len(peer) != 32 or from_manifest != peer.hex() or peer == own_key):
+        deny()
+    return peer
 
 
 def run(argv=None):
-    parser = argparse.ArgumentParser()
-    commands = parser.add_subparsers(dest="action", required=True)
-    op = commands.add_parser("operator-registry")
-    op.add_argument("--manifest", required=True)
-    ev = commands.add_parser("event-from-webhook")
-    ev.add_argument("--manifest", required=True)
-    ev.add_argument("--webhook", required=True)
-    ev.add_argument("--webhook-signature", required=True)
-    ev.add_argument("--delivery-id", required=True)
-    captured = commands.add_parser("event-from-capture")
-    captured.add_argument("--manifest", required=True)
-    captured.add_argument("--capture", required=True)
-    purpose = commands.add_parser("operator-purpose")
-    purpose.add_argument("--manifest", required=True)
-    revoke = commands.add_parser("operator-revoke")
-    revoke.add_argument("--manifest", required=True)
-    opts = parser.parse_args(argv)
+    parser=argparse.ArgumentParser()
+    sub=parser.add_subparsers(dest="action",required=True)
+    for name in ("operator-registry","operator-purpose","operator-revoke",
+                 "event-from-webhook","event-from-capture"):
+        p=sub.add_parser(name)
+        p.add_argument("--manifest",required=True)
+        if name == "event-from-webhook":
+            for arg in ("webhook","webhook-signature","delivery-id"):
+                p.add_argument("--"+arg,required=True)
+        if name == "event-from-capture":
+            p.add_argument("--capture",required=True)
+    a=parser.parse_args(argv)
     if os.geteuid() != 0 or os.getuid() != 0:
-        _deny()
+        deny()
     os.umask(0o077)
-    m = _input(opts.manifest)
-    now = int(time.time())
-    if opts.action == "operator-registry":
-        signer, pub = _key("operator")
-        required = {"stage_request", "preflight_request", "stage_original",
-                    "original_checkpoint", "approval_ids", "expires_at"}
-        if set(m) != required:
-            _deny()
-        _human_confirm("original preflight and stage", m)
-        id_ = m["stage_request"]["operation_id"]
-        _claim("operator-registry", id_)
-        result = issue.issue_original_registry(
-            **m, now=now, sign_operator=signer,
-            pinned_operator_public=pub)
-        return _publish("operator-registry", id_, result)
+    m=manifest(a.manifest)
+    now=int(time.time())
 
-    if opts.action in ("event-from-webhook", "event-from-capture"):
-        signer, pub = _key("event")
-        secret = _read(WEBHOOK_SECRET, size=512, mode=0o400)
-        required = {"registry", "operator_public_hex",
-                    "authorized_actor", "repository_id", "actor_id",
-                    "original_commit_sha", "expires_at"}
-        if set(m) != required:
-            _deny()
-        operator_public = bytes.fromhex(m["operator_public_hex"])
-        if operator_public == pub:
-            _deny()
-        registry = taskc.ProtectedOriginalRegistry(
-            m["registry"], pinned_operator_public_key=operator_public)
-        if opts.action == "event-from-capture":
-            captured = _input(opts.capture)
-            fields = {"schema", "event_sha256", "original_request_sha256",
-                      "delivery_id", "repository_id", "actor_id",
-                      "issue_number", "request_id", "observed_at",
-                      "raw_event_base64", "signature_header"}
-            if (set(captured) != fields
-                    or captured["schema"] !=
-                      "zog-task-c-original-github-webhook-capture-v1"
-                    or captured["repository_id"] != m["repository_id"]
-                    or captured["actor_id"] != m["actor_id"]
-                    or type(captured["observed_at"]) is not int
-                    or not captured["observed_at"] <= now <=
-                        captured["observed_at"] + issue.WEBHOOK_LIFETIME):
-                _deny()
-            try:
-                event = base64.b64decode(
-                    captured["raw_event_base64"], validate=True)
-            except (ValueError, TypeError):
-                _deny()
-            if issue.sha(event) != captured["event_sha256"]:
-                _deny()
-            signature = captured["signature_header"]
-            delivery_id = captured["delivery_id"]
+    if a.action == "operator-registry":
+        signer,pub=key("operator")
+        if set(m) != {"stage_request","preflight_request","stage_original",
+                       "original_checkpoint","approval_ids","expires_at"}:
+            deny()
+        confirm("original preflight + stage",m)
+        identity=m["stage_request"]["operation_id"]
+        claimed("operator-registry",identity)
+        result=issue.issue_original_registry(
+            **m,now=now,sign_operator=signer,pinned_operator_public=pub)
+        return published("operator-registry",identity,result)
+
+    if a.action in ("event-from-webhook","event-from-capture"):
+        signer,pub=key("event")
+        if set(m) != {"registry","operator_public_hex","authorized_actor",
+                       "repository_id","actor_id","original_commit_sha",
+                       "expires_at"}:
+            deny()
+        operator_pin=require_peer_key(
+            PINNED_OPERATOR_FOR_EVENT,m["operator_public_hex"],pub)
+        registry=taskc.ProtectedOriginalRegistry(
+            m["registry"],pinned_operator_public_key=operator_pin)
+        if a.action=="event-from-capture":
+            c=manifest(a.capture)
+            if (set(c) != {"schema","event_sha256","original_request_sha256",
+                           "delivery_id","repository_id","actor_id",
+                           "issue_number","request_id","observed_at",
+                           "raw_event_base64","signature_header"} or
+                    c["schema"]!="zog-task-c-original-github-webhook-capture-v1"
+                    or c["repository_id"]!=m["repository_id"] or
+                    c["actor_id"]!=m["actor_id"] or
+                    type(c["observed_at"]) is not int or
+                    not c["observed_at"]<=now<=c["observed_at"]+issue.WEBHOOK_LIFETIME):
+                deny()
+            raw=base64.b64decode(c["raw_event_base64"],validate=True)
+            if issue.sha(raw)!=c["event_sha256"]:
+                deny()
+            signature=c["signature_header"]
+            delivery=c["delivery_id"]
         else:
-            event = _read(opts.webhook, size=issue.EVENT_LIMIT, mode=0o600)
-            signature = _read(opts.webhook_signature, size=80, mode=0o600
-                              ).decode("ascii").strip()
-            delivery_id = opts.delivery_id
-        _claim("github-event", delivery_id)
-        # A delivery ID substitution cannot turn identical original bytes
-        # into a new issuance if an old acknowledgement was lost.
-        _claim("github-event-content", issue.sha(event)[7:])
-        result = issue.attest_original_github_event(
-            event_raw=event, signature_header=signature,
-            delivery_id=delivery_id, secret=secret,
-            registry=registry, authorized_actor=m["authorized_actor"],
+            raw=read(a.webhook,limit=issue.EVENT_LIMIT)
+            signature=read(a.webhook_signature,limit=80).decode("ascii").strip()
+            delivery=a.delivery_id
+        claimed("github-event",delivery)
+        claimed("github-event-content",issue.sha(raw)[7:])
+        envelope=issue.attest_original_github_event(
+            event_raw=raw,signature_header=signature,delivery_id=delivery,
+            secret=read(WEBHOOK_SECRET,limit=512,mode=0o400),
+            registry=registry,authorized_actor=m["authorized_actor"],
             expected_repository_id=m["repository_id"],
             expected_actor_id=m["actor_id"],
             original_commit_sha=m["original_commit_sha"],
-            issued_at=now, expires_at=m["expires_at"],
-            pinned_issuer_public=pub, sign_issuer=signer)
-        return _publish("github-event", delivery_id, result)
+            issued_at=now,expires_at=m["expires_at"],
+            pinned_issuer_public=pub,sign_issuer=signer)
+        return published("github-event",delivery,envelope)
 
-    if opts.action == "operator-purpose":
-        signer, pub = _key("operator")
-        required = {"record", "registry", "origin_evidence",
-                    "issuer_public_hex", "pin", "broker_config",
-                    "root_row", "readonly_role_arn", "expires_at"}
-        if set(m) != required:
-            _deny()
-        issuer_pub = bytes.fromhex(m["issuer_public_hex"])
-        registry = taskc.ProtectedOriginalRegistry(
-            m["registry"], pinned_operator_public_key=pub)
-        body = issue.prepare_broker_purpose(
-            record=m["record"], registry=registry,
+    if a.action=="operator-purpose":
+        signer,pub=key("operator")
+        if set(m) != {"record","registry","origin_evidence","issuer_public_hex",
+                       "pin","broker_config","root_row","readonly_role_arn",
+                       "expires_at"}:
+            deny()
+        issuer_pin=require_peer_key(
+            PINNED_EVENT_FOR_OPERATOR,m["issuer_public_hex"],pub)
+        registry=taskc.ProtectedOriginalRegistry(
+            m["registry"],pinned_operator_public_key=pub)
+        body=issue.prepare_broker_purpose(
+            record=m["record"],registry=registry,
             origin_evidence=m["origin_evidence"],
-            operator_public=pub, issuer_public=issuer_pub,
-            pin=m["pin"], broker_config=m["broker_config"],
-            root_row=m["root_row"], readonly_role_arn=m["readonly_role_arn"],
-            expires_at=m["expires_at"], now=now)
-        _human_confirm("broker read-only purpose", body)
-        id_ = body["pin_sha256"][7:]
-        _claim("operator-purpose", id_)
-        result = issue.issue_broker_purpose(
-            body=body, sign_operator=signer, pinned_operator_public=pub)
-        return _publish("operator-purpose", id_, result)
+            operator_public=pub,issuer_public=issuer_pin,
+            pin=m["pin"],broker_config=m["broker_config"],
+            root_row=m["root_row"],readonly_role_arn=m["readonly_role_arn"],
+            expires_at=m["expires_at"],now=now)
+        confirm("broker read-only purpose",body)
+        identity=body["pin_sha256"][7:]
+        claimed("operator-purpose",identity)
+        envelope=issue.issue_broker_purpose(
+            body=body,sign_operator=signer,pinned_operator_public=pub)
+        return published("operator-purpose",identity,envelope)
 
-    if opts.action == "operator-revoke":
-        signer, pub = _key("operator")
-        if set(m) != {"approved_scope", "approval_id", "expires_at"}:
-            _deny()
-        _human_confirm("irrevocable scope revocation", m)
-        _claim("operator-revoke", m["approval_id"])
-        result = issue.issue_revocation(
-            **m, now=now, sign_operator=signer,
-            pinned_operator_public=pub)
-        return _publish("operator-revoke", m["approval_id"], result)
-    _deny()
+    if a.action=="operator-revoke":
+        signer,pub=key("operator")
+        if set(m)!={"approved_scope","approval_id","expires_at"}:
+            deny()
+        confirm("irrevocable scope revocation",m)
+        claimed("operator-revoke",m["approval_id"])
+        result=issue.issue_revocation(
+            **m,now=now,sign_operator=signer,pinned_operator_public=pub)
+        return published("operator-revoke",m["approval_id"],result)
+    deny()
 
 
 def main():
     try:
-        status = run()
-        print(json.dumps(status, sort_keys=True))
-    except (issue.IssuanceDenied, owner.OperationDenied, OSError,
-            ValueError, TypeError, KeyError):
-        # No secret values and no raw event are emitted on failure.
-        print("Task C authority issuance held; no accepted receipt", file=sys.stderr)
+        print(json.dumps(run(),sort_keys=True))
+    except (issue.IssuanceDenied,owner.OperationDenied,OSError,ValueError,
+            TypeError,KeyError):
+        print("Task C original authority issuance held; no accepted receipt",
+              file=sys.stderr)
         raise SystemExit(2)
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
