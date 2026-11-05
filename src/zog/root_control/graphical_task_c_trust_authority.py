@@ -178,8 +178,19 @@ def verify_original_selection(
                 "owner_request"]))
     except (StopIteration, KeyError, TypeError):
         hold()
-    if record["checkpoint_scope_sha256"] != source:
+    if (record["checkpoint_scope_sha256"] != source
+            or type(root_row.get("checkpoint")) is not dict
+            or type(root_row.get("ssm")) is not dict):
         hold()
+    # Even a signed registry may contain several individually signed entries;
+    # an installed broker must not combine different Host/STATE/scope epochs.
+    for selected in registry.entries.values():
+        req = selected["owner_request"]
+        if (original.digest(original.scope_from_request(req)) != source
+                or req["host_id"] != record["host_id"]
+                or req["installation_id"] != record["installation_id"]
+                or req["state_volume_id"] != record["state_volume_id"]):
+            hold()
 
     expected_public = broker_signer.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
