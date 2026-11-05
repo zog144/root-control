@@ -6,6 +6,7 @@ on:
     paths:
       - src/zog/root_control/graphical_task_c_trust_authority.py
       - tests/test_graphical_task_c_trust_authority.py
+      - docs/graphical-task-c-readonly-trust-authority-2026-11-05.md
       - .github/workflows/graphical-task-c-readonly-trust.yml
 permissions:
   contents: read
