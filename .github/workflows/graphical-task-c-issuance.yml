@@ -8,6 +8,7 @@ on:
       - src/zog/root_control/graphical_task_c_issuance_cli.py
       - src/zog/root_control/graphical_task_c_webhook_capture.py
       - tests/test_graphical_task_c_issuance.py
+      - tests/test_graphical_task_c_issuance_peer_pin.py
       - tests/test_graphical_task_c_webhook_capture.py
       - docs/graphical-task-c-original-authority-issuance-2026-11-05.md
       - .github/workflows/graphical-task-c-issuance.yml
@@ -42,6 +43,7 @@ jobs:
           test "$(git -C companions/host-deploy rev-parse HEAD)" = 0ea6d583fa441527f45dabbbf542731560644a72
           python -m pytest -q -rs \
             tests/test_graphical_task_c_issuance.py \
+            tests/test_graphical_task_c_issuance_peer_pin.py \
             tests/test_graphical_task_c_webhook_capture.py \
             tests/test_graphical_task_c_origin.py \
             tests/test_graphical_task_c_owner.py \
