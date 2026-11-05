@@ -33,7 +33,7 @@ from .graphical_task_c_native import _session
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
 
 OWNER_SOURCE = "5ad7d5ed72d1b72edc767a658de28506791a74d4"
-BROKER_SOURCE = "76416b9d7ef64aac17b75b6ce06b98244fd487e0"
+BROKER_SOURCE = "0ea6d583fa441527f45dabbbf542731560644a72"
 PURPOSE_SCHEMA = "zog-task-c-original-readonly-broker-approval-v1"
 PURPOSE_DOMAIN = b"zog-task-c-original-readonly-broker-approval-v1\0"
 ORIGINAL_SCHEMA = "zog-task-c-original-checkpoint-installation-v1"
