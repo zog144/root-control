@@ -1,6 +1,6 @@
 # Task C read-only broker authority source review — 2026-11-05
 
-Selected upstream source: root-control PR #39 `5ad7d5ed72d1b72edc767a658de28506791a74d4` retains the *original* S3 checkpoint identity; host-deploy PR #26 broker candidate `76416b9d7ef64aac17b75b6ce06b98244fd487e0`. The new root-control trust-provider source is a **separate consumer** and does not change the original checkpoint record's `root_source_revision`. Retained account, region, bucket, prefix, scope, genesis, and **writer role ARN** must remain invariant.
+Selected upstream source: root-control PR #39 `5ad7d5ed72d1b72edc767a658de28506791a74d4` retains the *original* S3 checkpoint identity; host-deploy PR #26 broker candidate `0ea6d583fa441527f45dabbbf542731560644a72`. The new root-control trust-provider source is a **separate consumer** and does not change the original checkpoint record's `root_source_revision`. Retained account, region, bucket, prefix, scope, genesis, and **writer role ARN** must remain invariant.
 
 ## Independent native selector
 
