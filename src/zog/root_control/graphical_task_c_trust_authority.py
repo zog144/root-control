@@ -51,7 +51,8 @@ APPROVAL_FIELDS = frozenset((
     "owner_source_revision", "broker_source_revision",
     "readonly_role_arn", "writer_role_arn", "ssm_role_arn",
     "host_id", "installation_id", "state_volume_id", "scope_sha256",
-    "expires_at", "signature_ed25519",
+    "gateway_uid", "gateway_gid", "gateway_cgroup",
+    "gateway_executable_sha256", "expires_at", "signature_ed25519",
 ))
 ROLE = re.compile(r"arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9_+=,.@-]{1,64}\Z")
 S3_CONFIG = Config(connect_timeout=5, read_timeout=15,
@@ -114,7 +115,7 @@ def read_original_record():
 
 
 def verify_original_selection(
-    *, record, record_sha, root_row, registry, evidence,
+    *, record, record_sha, root_row, broker_config, registry, evidence,
     operator_key, issuer_key, observation_public, pin,
     pin_sha, approval, broker_signer, selected_broker_sha, now,
 ):
@@ -132,6 +133,23 @@ def verify_original_selection(
             or record_sha != digest_bytes(original.canonical(record))
             or not isinstance(registry, taskc.ProtectedOriginalRegistry)
             or type(root_row) is not dict
+            or type(broker_config) is not dict
+            or set(broker_config) != {
+                "schema", "broker_source_revision", "root_source_revision",
+                "gateway_uid", "gateway_gid", "gateway_cgroup",
+                "gateway_executable_sha256", "boot_id"}
+            or broker_config["schema"] !=
+                "zog-task-c-readonly-broker-native-selection-v1"
+            or broker_config["broker_source_revision"] != BROKER_SOURCE
+            or broker_config["root_source_revision"] != OWNER_SOURCE
+            or type(broker_config["gateway_uid"]) is not int
+            or broker_config["gateway_uid"] < 1000
+            or type(broker_config["gateway_gid"]) is not int
+            or broker_config["gateway_gid"] <= 0
+            or type(broker_config["gateway_cgroup"]) is not str
+            or not broker_config["gateway_cgroup"].startswith("/system.slice/")
+            or not broker_config["gateway_cgroup"].endswith(".service")
+            or not original.match(broker_config["gateway_executable_sha256"], original.SHA)
             or root_row.get("schema") !=
                 "zog-protected-task-c-installed-runtime-v2"
             or type(operator_key) is not bytes or len(operator_key) != 32
@@ -192,6 +210,10 @@ def verify_original_selection(
         "installation_id": record["installation_id"],
         "state_volume_id": record["state_volume_id"],
         "scope_sha256": source,
+        "gateway_uid": broker_config["gateway_uid"],
+        "gateway_gid": broker_config["gateway_gid"],
+        "gateway_cgroup": broker_config["gateway_cgroup"],
+        "gateway_executable_sha256": broker_config["gateway_executable_sha256"],
         "expires_at": approval["expires_at"],
     }
     if (not original.match(approval["pin_sha256"], original.SHA)
@@ -317,7 +339,8 @@ def installed_readonly_authority():
         root_row["originals"], pinned_operator_public_key=operator_key)
     readonly_role, scope = verify_original_selection(
         record=record, record_sha=record_sha, root_row=root_row,
-        registry=registry, evidence=evidence, operator_key=operator_key,
+        broker_config=config, registry=registry, evidence=evidence,
+        operator_key=operator_key,
         issuer_key=issuer_key, observation_public=observation_public,
         pin=pin, pin_sha=digest_bytes(pin_raw), approval=approval,
         broker_signer=signer,
