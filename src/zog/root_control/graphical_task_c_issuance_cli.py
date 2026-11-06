@@ -28,6 +28,8 @@ ROLE_NAMES = {
 PINNED_OPERATOR_FOR_EVENT = ROOT/"accepted-operator.public"
 PINNED_EVENT_FOR_OPERATOR = ROOT/"accepted-event-issuer.public"
 WEBHOOK_SECRET = ROOT/"github-webhook.hmac"
+ACCEPTED_ORIGINAL = ROOT/"accepted-original-checkpoint.sha256"
+ACCEPTED_DISPATCH = ROOT/"accepted-dispatch-revision.commit"
 
 
 def deny():
@@ -68,6 +70,11 @@ def read(path, *, limit=65536, mode=0o600):
 
 def key(role):
     secret, public_path = ROLE_NAMES[role]
+    other_private = ROLE_NAMES["event" if role == "operator" else "operator"][0]
+    if os.path.lexists(str(other_private)):
+        deny()
+    if role == "operator" and os.path.lexists(str(WEBHOOK_SECRET)):
+        deny()
     raw = read(secret,limit=32,mode=0o400)
     pinned = read(public_path,limit=32)
     if len(raw) != 32 or len(pinned) != 32:
@@ -81,17 +88,21 @@ def key(role):
 
 
 def confirm(label, body):
-    digest = issue.sha(owner.canonical(body))
-    with open("/dev/tty","r+",encoding="ascii") as tty:
+    canonical = owner.canonical(body)
+    if len(canonical) > 65536:
+        deny()
+    digest = issue.sha(canonical)
+    with open("/dev/tty", "r+", encoding="ascii") as tty:
         tty.write("Task C " + label + " SHA-256: " + digest + "\n")
-        tty.write("Independently inspect original Host, STATE, operator, "
-                  "event, S3 genesis, source and expiry.\n")
+        tty.write("Exact canonical candidate (compare against independent records):\n")
+        tty.write(canonical.decode("ascii") + "\n")
+        tty.write("Verify original Host, installation, STATE, GitHub actor/issue, "
+                  "checkpoint genesis/roles, source and expiry before approving.\n")
         tty.write("Type APPROVE " + digest + " to sign: ")
         tty.flush()
         accepted = tty.readline(128).strip()
     if accepted != "APPROVE " + digest:
         deny()
-
 
 def create_only(path, raw):
     p = Path(path)
@@ -140,6 +151,21 @@ def require_peer_key(path, from_manifest, own_key):
     return peer
 
 
+def require_selected_original(record):
+    digest = issue.sha(owner.canonical(record))
+    if read(ACCEPTED_ORIGINAL, limit=72) != (digest + "\n").encode("ascii"):
+        deny()
+    return digest
+
+
+def require_selected_dispatch(commit):
+    if not owner.match(commit, owner.H40):
+        deny()
+    if read(ACCEPTED_DISPATCH, limit=41) != (commit + "\n").encode("ascii"):
+        deny()
+    return commit
+
+
 def run(argv=None):
     parser=argparse.ArgumentParser()
     sub=parser.add_subparsers(dest="action",required=True)
@@ -164,6 +190,8 @@ def run(argv=None):
         if set(m) != {"stage_request","preflight_request","stage_original",
                        "original_checkpoint","approval_ids","expires_at"}:
             deny()
+        issue.check_original_checkpoint(m["original_checkpoint"], m["stage_request"])
+        require_selected_original(m["original_checkpoint"])
         confirm("original preflight + stage",m)
         identity=m["stage_request"]["operation_id"]
         claimed("operator-registry",identity)
@@ -179,6 +207,7 @@ def run(argv=None):
             deny()
         operator_pin=require_peer_key(
             PINNED_OPERATOR_FOR_EVENT,m["operator_public_hex"],pub)
+        require_selected_dispatch(m["original_commit_sha"])
         registry=taskc.ProtectedOriginalRegistry(
             m["registry"],pinned_operator_public_key=operator_pin)
         if a.action=="event-from-capture":
@@ -223,6 +252,7 @@ def run(argv=None):
             deny()
         issuer_pin=require_peer_key(
             PINNED_EVENT_FOR_OPERATOR,m["issuer_public_hex"],pub)
+        require_selected_original(m["record"])
         registry=taskc.ProtectedOriginalRegistry(
             m["registry"],pinned_operator_public_key=pub)
         body=issue.prepare_broker_purpose(
