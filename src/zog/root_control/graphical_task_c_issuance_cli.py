@@ -28,6 +28,8 @@ ROLE_NAMES = {
 PINNED_OPERATOR_FOR_EVENT = ROOT/"accepted-operator.public"
 PINNED_EVENT_FOR_OPERATOR = ROOT/"accepted-event-issuer.public"
 WEBHOOK_SECRET = ROOT/"github-webhook.hmac"
+ACCEPTED_ORIGINAL = ROOT/"accepted-original-checkpoint.sha256"
+ACCEPTED_DISPATCH = ROOT/"accepted-dispatch-revision.commit"
 
 
 def deny():
