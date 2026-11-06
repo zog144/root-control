@@ -51,7 +51,7 @@ def test_original_source_review_does_not_claim_remote_history_or_native_authorit
     ("state_volume_id","f"*64),("installation_id","f"*64)])
 def test_original_substitutions_denied(field,new):
     row,record=fixture();row[field]=new
-    with pytest.raises(ValueError):
+    with pytest.raises(o.OperationDenied):
         s.assess_checkpoint_origin(row,original_record=record,
             independently_retained_record_digest=o.digest(record))
 
@@ -60,7 +60,7 @@ def test_original_missing_or_ambiguous_history_is_not_new_genesis():
     for kwargs in ({},{ "original_record":record },
                    {"original_record":record,
                     "independently_retained_record_digest":"sha256:"+"0"*64}):
-        with pytest.raises(ValueError):
+        with pytest.raises(o.OperationDenied):
             s.assess_checkpoint_origin(row,**kwargs)
 
 def test_new_scope_distinct_and_not_historical_continuation():
@@ -70,15 +70,15 @@ def test_new_scope_distinct_and_not_historical_continuation():
     found=s.assess_checkpoint_origin(row)
     assert found["classification"]=="NEW_SCOPE_SEPARATE_AUTHORIZATION_REQUIRED"
     assert found["native_accepted"] is False
-    with pytest.raises(ValueError):
+    with pytest.raises(o.OperationDenied):
         s.assess_checkpoint_origin(row,original_record=record)
-    with pytest.raises(ValueError):
+    with pytest.raises(o.OperationDenied):
         s.assess_checkpoint_origin(row,independently_retained_record_digest=o.digest(record))
 
 @pytest.mark.parametrize("key",["external_genesis_verified","external_chain_verified",
     "original_operator_authorization_verified","independent_anchor_verified"])
 def test_caller_asserted_verification_cannot_issue_proof(key):
     row,record=fixture();row[key]=True
-    with pytest.raises(ValueError):
+    with pytest.raises(o.OperationDenied):
         s.assess_checkpoint_origin(row,original_record=record,
             independently_retained_record_digest=o.digest(record))
