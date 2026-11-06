@@ -70,6 +70,11 @@ def read(path, *, limit=65536, mode=0o600):
 
 def key(role):
     secret, public_path = ROLE_NAMES[role]
+    other_private = ROLE_NAMES["event" if role == "operator" else "operator"][0]
+    if os.path.lexists(str(other_private)):
+        deny()
+    if role == "operator" and os.path.lexists(str(WEBHOOK_SECRET)):
+        deny()
     raw = read(secret,limit=32,mode=0o400)
     pinned = read(public_path,limit=32)
     if len(raw) != 32 or len(pinned) != 32:
