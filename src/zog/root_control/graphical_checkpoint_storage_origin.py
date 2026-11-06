@@ -134,7 +134,7 @@ def verify_separate_new_scope_approval(proposal, signed_approval, *,
             or not now <= signed_approval["expires_at"] <= now + 900
             or not _sha(signed_approval["retention_disposition_sha256"])
             or signed_approval["retention_disposition_sha256"] !=
-                proposal["external_authorization_sha256"]
+                proposal["authorization_sha256"]
             or signed_approval["operator_public_sha256"] !=
                 "sha256:" + hashlib.sha256(independently_pinned_operator_public).hexdigest()
             or any(signed_approval.get(k) != proposal.get(k) for k in (
