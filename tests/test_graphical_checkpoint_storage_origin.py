@@ -3,7 +3,6 @@ import copy
 import pytest
 from zog.root_control import graphical_checkpoint_storage_origin as s
 from zog.root_control import graphical_operation_owner_source as o
-from zog.root_control.graphical_native_owner import NativeHold
 
 def original():
     return {
