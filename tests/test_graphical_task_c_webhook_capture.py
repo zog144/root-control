@@ -81,3 +81,18 @@ def test_capture_does_not_sign_event_or_expose_keys(tmp_path):
     assert "signature_ed25519" not in json.loads(
         (root/(args["delivery_id"]+".json")).read_text())
     assert "sign_issuer" not in capture.publish_capture.__code__.co_varnames
+
+
+def test_direct_capture_publication_rejects_directory_escape(tmp_path):
+    _,_,_,_,_,args=sample()
+    root=tmp_path/"spool"
+    root.mkdir(mode=0o700)
+    incoming=capture.validate_delivery(
+        args["event_raw"],signature=args["signature_header"],
+        delivery_id=args["delivery_id"],webhook_secret=args["secret"],
+        expected_repository_id=98123,expected_actor_id=3456,
+        authorized_actor="zog144",observed_at=400)
+    for forged in ("../escaped","../../outside","bad/slash",""):
+        with pytest.raises(capture.CaptureDenied):
+            capture.publish_capture({**incoming,"delivery_id":forged},root)
+    assert not list(root.iterdir())
