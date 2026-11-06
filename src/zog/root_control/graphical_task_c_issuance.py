@@ -264,6 +264,16 @@ def attest_original_github_event(
     stage_id = stage_ids[0]
     selected = registry.entries[stage_id]
     original = selected["original"]
+    selected_request = selected["owner_request"]
+    # A correctly authenticated issue is not authority for a *different*
+    # Fonts catalogue task, pipeline lane, or source revision. Compare the
+    # original signed operation to the actual GitHub issue-opened intent.
+    if (request["operation"] != "build.submit"
+            or request["parameters"]["lane"] != selected_request["lane"]
+            or request["parameters"]["task"] != selected_request["task"]
+            or request["source"]["repository"] != "zog144/image-build"
+            or request["source"]["commit"] != selected_request["source_revision"]):
+        hold()
     if (original["origin_repository"] != request["origin"]["repository"]
             or original["origin_issue_number"] != issue["number"]
             or original["origin_trigger_actor"] != authorized_actor
