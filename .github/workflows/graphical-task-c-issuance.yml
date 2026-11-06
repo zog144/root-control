@@ -17,6 +17,7 @@ on:
       - tests/test_graphical_task_c_capture_to_issuer_integration.py
       - tests/test_graphical_task_c_capture_deployment_boundary.py
       - docs/graphical-task-c-original-authority-issuance-2026-11-05.md
+      - docs/graphical-task-c-prospective-native-issuance-readiness-2026-11-06.md
       - .github/workflows/graphical-task-c-issuance.yml
 permissions:
   contents: read
