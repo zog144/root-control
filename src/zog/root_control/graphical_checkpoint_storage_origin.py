@@ -6,8 +6,13 @@ No checkpoint creation, AWS operations, signer issuance, or native approval here
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import time
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .graphical_native_owner import hold
 from . import graphical_operation_owner_source as origin
@@ -97,3 +102,58 @@ def assess_checkpoint_origin(proposal, *, original_record=None,
         "broker_activation_authorized": False,
         "ssm_authorized": False,
     }
+
+NEW_APPROVAL_SCHEMA = "zog-task-c-separately-authorized-new-scope-v1"
+NEW_APPROVAL_DOMAIN = b"zog-task-c-separately-authorized-new-scope-v1\\0"
+NEW_APPROVAL_FIELDS = frozenset((
+    "schema", "host_id", "installation_id", "state_volume_id",
+    "scope_sha256", "account_id", "region", "bucket", "prefix",
+    "genesis_sha256", "writer_role_arn", "retention_disposition_sha256",
+    "operator_public_sha256", "expires_at", "signature_ed25519",
+))
+
+def verify_separate_new_scope_approval(proposal, signed_approval, *,
+                                       independently_pinned_operator_public,
+                                       now):
+    """Verify separately signed authorization bytes, not native provisioning.
+
+    The authorization signature binds a deliberately distinct proposed scope
+    and an independent disposition of the unauthenticated original history.
+    Work must authenticate the operator key custody and the disposition
+    separately; a valid source-fixture signature is not installation approval.
+    """
+    review = assess_checkpoint_origin(proposal)
+    if (review["classification"] != "NEW_SCOPE_SEPARATE_AUTHORIZATION_REQUIRED"
+            or type(signed_approval) is not dict
+            or set(signed_approval) != NEW_APPROVAL_FIELDS
+            or signed_approval.get("schema") != NEW_APPROVAL_SCHEMA
+            or type(independently_pinned_operator_public) is not bytes
+            or len(independently_pinned_operator_public) != 32
+            or type(now) is not int
+            or type(signed_approval["expires_at"]) is not int
+            or not now <= signed_approval["expires_at"] <= now + 900
+            or not _sha(signed_approval["retention_disposition_sha256"])
+            or signed_approval["retention_disposition_sha256"] !=
+                proposal["external_authorization_sha256"]
+            or signed_approval["operator_public_sha256"] !=
+                "sha256:" + hashlib.sha256(independently_pinned_operator_public).hexdigest()
+            or any(signed_approval.get(k) != proposal.get(k) for k in (
+                "host_id", "installation_id", "state_volume_id", "scope_sha256",
+                "account_id", "region", "bucket", "prefix", "genesis_sha256",
+                "writer_role_arn"))):
+        _deny()
+    body = {k:v for k,v in signed_approval.items() if k != "signature_ed25519"}
+    try:
+        encoded = signed_approval["signature_ed25519"]
+        if type(encoded) is not str:
+            _deny()
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) != 64 or base64.b64encode(raw).decode("ascii") != encoded:
+            _deny()
+        Ed25519PublicKey.from_public_bytes(independently_pinned_operator_public).verify(
+            raw, NEW_APPROVAL_DOMAIN + _canonical(body))
+    except (InvalidSignature, ValueError, TypeError, OverflowError):
+        _deny()
+    return {"status":"NEW_SCOPE_SIGNED_SOURCE_ONLY_NOT_NATIVE_ACCEPTED",
+            "new_scope_authorized":False, "native_accepted":False,
+            "original_history_accepted":False, "ssm_authorized":False}
