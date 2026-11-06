@@ -91,8 +91,9 @@ class CaptureApplication:
 
 
 def create_app():
-    policy = json.loads(protected_read('/etc/zog/github-capture/policy.json',
-                                      owner=0, max_size=4096))
+    credentials = Path(os.environ['CREDENTIALS_DIRECTORY'])
+    policy = json.loads(protected_read(credentials / 'policy.json',
+                                      owner=os.geteuid(), max_size=4096))
     secret = protected_read(Path(os.environ['CREDENTIALS_DIRECTORY']) / 'webhook.hmac',
                             owner=os.geteuid(), max_size=512)
     return CaptureApplication(policy, secret, '/var/lib/zog-github-capture')

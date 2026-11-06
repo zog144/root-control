@@ -22,7 +22,8 @@ service account, installs a root-owned non-writable policy JSON at
 `/etc/zog/github-capture/policy.json` containing exactly `repository_id`,
 `actor_id`, and `actor`, and installs the existing authentic issuer HMAC at
 `/etc/zog/github-capture/webhook.hmac` (0400). systemd LoadCredential delivers
-that secret to the service. Do not put it in argv, source, environment or logs.
+both the policy and secret to the service, without opening parent configuration
+directories to the service account. Do not put it in argv, source, environment or logs.
 
 StateDirectory is owned by the capture identity, mode0700. Publication uses a
 nonblocking interprocess lock and refuses storage beyond4096 records or64MiB

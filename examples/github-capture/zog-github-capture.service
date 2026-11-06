@@ -8,6 +8,7 @@ Type=simple
 User=zog-github-capture
 Group=nginx
 UMask=0077
+LoadCredential=policy.json:/etc/zog/github-capture/policy.json
 LoadCredential=webhook.hmac:/etc/zog/github-capture/webhook.hmac
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=AWS_EC2_METADATA_DISABLED=true
