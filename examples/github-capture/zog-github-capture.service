@@ -1,0 +1,47 @@
+# Copyright (c) 2026 Alex Black.
+[Unit]
+Description=Zog original GitHub webhook capture (no signing or submission)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=zog-github-capture
+Group=nginx
+UMask=0077
+LoadCredential=policy.json:/etc/zog/github-capture/policy.json
+LoadCredential=webhook.hmac:/etc/zog/github-capture/webhook.hmac
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=AWS_EC2_METADATA_DISABLED=true
+Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
+Environment=AWS_CONFIG_FILE=/dev/null
+Environment=PYTHONPATH=/opt/zog/github-capture/root-control/src:/opt/zog/github-capture/host-deploy/src
+ExecStart=/opt/zog/github-capture/venv/bin/python -m gunicorn --bind unix:/run/zog-github-capture/capture.sock --umask 007 --workers 1 --threads 2 --timeout 15 --graceful-timeout 5 --limit-request-line 2048 --limit-request-fields 32 --limit-request-field_size 4096 zog.root_control.graphical_task_c_capture_app:create_app()
+RuntimeDirectory=zog-github-capture
+RuntimeDirectoryMode=0750
+StateDirectory=zog-github-capture
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+MemoryMax=256M
+TasksMax=32
+CPUQuota=50%
+LimitCORE=0
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=50
+
+[Install]
+WantedBy=multi-user.target
