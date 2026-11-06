@@ -186,6 +186,8 @@ def run(argv=None):
         if set(m) != {"stage_request","preflight_request","stage_original",
                        "original_checkpoint","approval_ids","expires_at"}:
             deny()
+        issue.check_original_checkpoint(m["original_checkpoint"], m["stage_request"])
+        require_selected_original(m["original_checkpoint"])
         confirm("original preflight + stage",m)
         identity=m["stage_request"]["operation_id"]
         claimed("operator-registry",identity)
@@ -201,6 +203,7 @@ def run(argv=None):
             deny()
         operator_pin=require_peer_key(
             PINNED_OPERATOR_FOR_EVENT,m["operator_public_hex"],pub)
+        require_selected_dispatch(m["original_commit_sha"])
         registry=taskc.ProtectedOriginalRegistry(
             m["registry"],pinned_operator_public_key=operator_pin)
         if a.action=="event-from-capture":
@@ -245,6 +248,7 @@ def run(argv=None):
             deny()
         issuer_pin=require_peer_key(
             PINNED_EVENT_FOR_OPERATOR,m["issuer_public_hex"],pub)
+        require_selected_original(m["record"])
         registry=taskc.ProtectedOriginalRegistry(
             m["registry"],pinned_operator_public_key=pub)
         body=issue.prepare_broker_purpose(
