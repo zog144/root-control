@@ -15,6 +15,7 @@ on:
       - tests/test_graphical_task_c_webhook_capture.py
       - tests/test_graphical_task_c_capture_app.py
       - tests/test_graphical_task_c_capture_to_issuer_integration.py
+      - tests/test_graphical_task_c_capture_deployment_boundary.py
       - docs/graphical-task-c-original-authority-issuance-2026-11-05.md
       - .github/workflows/graphical-task-c-issuance.yml
 permissions:
@@ -53,6 +54,7 @@ jobs:
             tests/test_graphical_task_c_webhook_capture.py \
             tests/test_graphical_task_c_capture_app.py \
             tests/test_graphical_task_c_capture_to_issuer_integration.py \
+            tests/test_graphical_task_c_capture_deployment_boundary.py \
             tests/test_graphical_task_c_origin.py \
             tests/test_graphical_task_c_owner.py \
             tests/test_graphical_task_c_trust_authority.py
