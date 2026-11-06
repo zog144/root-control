@@ -147,6 +147,21 @@ def require_peer_key(path, from_manifest, own_key):
     return peer
 
 
+def require_selected_original(record):
+    digest = issue.sha(owner.canonical(record))
+    if read(ACCEPTED_ORIGINAL, limit=72) != (digest + "\n").encode("ascii"):
+        deny()
+    return digest
+
+
+def require_selected_dispatch(commit):
+    if not owner.match(commit, owner.H40):
+        deny()
+    if read(ACCEPTED_DISPATCH, limit=41) != (commit + "\n").encode("ascii"):
+        deny()
+    return commit
+
+
 def run(argv=None):
     parser=argparse.ArgumentParser()
     sub=parser.add_subparsers(dest="action",required=True)
