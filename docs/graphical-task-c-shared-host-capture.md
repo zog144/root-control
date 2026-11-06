@@ -2,17 +2,24 @@
 
 Copyright (c) 2026 Alex Black.
 
-This deployment option trusts the entire intake host and its administrators,
-including the gateway, with request intake and direct compiler execution. It
-supersedes gateway-no-direct-SSM and separate capture-machine requirements only
-when explicitly selected by the operator. It does not claim to withstand a
-compromised intake host. The normal owner path retains approval, immutable
-identity, claims, cancellation, revocation and original-history checks.
+This selected deployment model trusts the administrative Host, including the
+administrator's ability to reach its SSM authority. It does not require
+physically separate machines or a proof that root on the shared Host cannot
+reach SSM. This does **not** alter the normal graphical execution route:
+validated GitHub request → SQS → host-deploy gateway → protected owner IPC →
+approved original claims, revocation and history checks → SSM. Fail-closed
+guards against accidental bypass through legacy gateway code remain. A
+separate gateway *service identity* can have defense-in-depth IAM denial, but
+that is not evidence of administrator isolation. A compromised trusted Host
+is outside this model's protection. GitHub Actions OIDC remains SQS-only.
+See [the cross-owner trust contract](graphical-task-c-shared-host-trust-model-2026-11-06.md).
 
-The capture service holds only the webhook HMAC secret, not Ed25519 signing
-keys. An independently deployed event signer rechecks the preserved raw body.
-A trusted intake host with the HMAC secret could forge such evidence; physical
-separation of the signer does not remove this accepted trust assumption.
+The capture service is configured to hold only the webhook HMAC secret, not
+Ed25519 signing keys. An independently selected **logical signing role** may
+run on the same trusted Host with distinct keys, per-role credential views and
+verifiable signatures. The signer rechecks the preserved raw body. The trusted
+administrator could replace inputs or retrieve the secret; physical separation
+is not a requirement or a property proved by source fixtures.
 
 The bounded WSGI factory is
 `zog.root_control.graphical_task_c_capture_app:create_app()`. The examples use
