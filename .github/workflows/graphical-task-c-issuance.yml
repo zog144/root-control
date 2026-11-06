@@ -1,16 +1,20 @@
 name: Task C original authority issuer source verification
 on:
   push:
-    branches: [regular/task-c-original-authority-issuance-20261105, regular/task-c-issuer-independent-review-20261106]
+    branches: [regular/task-c-original-authority-issuance-20261105, regular/task-c-issuer-independent-review-20261106, regular/task-c-prospective-issuer-capture-integration-20261106]
   pull_request:
     paths:
       - src/zog/root_control/graphical_task_c_issuance.py
       - src/zog/root_control/graphical_task_c_issuance_cli.py
       - src/zog/root_control/graphical_task_c_webhook_capture.py
+      - src/zog/root_control/graphical_task_c_capture_app.py
+      - examples/github-capture/**
       - tests/test_graphical_task_c_issuance.py
       - tests/test_graphical_task_c_issuance_peer_pin.py
       - tests/test_graphical_task_c_issuance_independent_review.py
       - tests/test_graphical_task_c_webhook_capture.py
+      - tests/test_graphical_task_c_capture_app.py
+      - tests/test_graphical_task_c_capture_to_issuer_integration.py
       - docs/graphical-task-c-original-authority-issuance-2026-11-05.md
       - .github/workflows/graphical-task-c-issuance.yml
 permissions:
@@ -47,6 +51,8 @@ jobs:
             tests/test_graphical_task_c_issuance_peer_pin.py \
             tests/test_graphical_task_c_issuance_independent_review.py \
             tests/test_graphical_task_c_webhook_capture.py \
+            tests/test_graphical_task_c_capture_app.py \
+            tests/test_graphical_task_c_capture_to_issuer_integration.py \
             tests/test_graphical_task_c_origin.py \
             tests/test_graphical_task_c_owner.py \
             tests/test_graphical_task_c_trust_authority.py
