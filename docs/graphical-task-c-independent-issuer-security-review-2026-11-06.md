@@ -8,7 +8,8 @@
 2. **Source selection:** PR #41 accepted the event manifest's `original_commit_sha` as a syntactically valid Git SHA. PR #42 additionally requires the separately installed `accepted-dispatch-revision.commit`. Work must verify this Git commit belongs to the genuine repository and was independently approved; the GitHub issue-opened event itself does not prove a selected commit.
 3. **Signer custody:** the two signers must occupy distinct protected authorities. PR #42 refuses opposite-role private signing material, and refuses the GitHub webhook secret on the operator signer. Independent key enrollment, protected public pins and denial from the gateway remain native Work requirements.
 4. **Operator intent:** a terminal digest alone is insufficient to verify a candidate. PR #42 displays the full canonical approval content, including original identity, before requiring the human to confirm its digest. Work still has to corroborate each displayed field from independent records.
-5. **Missing historical source:** there is no identified accepted original event, signing custodian or immutable S3 genesis in the inspected native handoff. Do not replace, reconstruct, backdate or claim these existed.
+5. **Event-operation cross-binding:** a correctly authenticated issue must agree with the separately operator-signed original Fonts task, lane and image-build source revision. The candidate now denies a different source/task/lane even if both signatures would otherwise verify independently; it also rejects path-escaping capture delivery IDs.
+6. **Missing historical source:** there is no identified accepted original event, signing custodian or immutable S3 genesis in the inspected native handoff. Do not replace, reconstruct, backdate or claim these existed.
 
 ## Native sequence for root-control Work
 
