@@ -94,12 +94,12 @@ def test_separate_new_scope_requires_real_domain_bound_operator_signature():
     row,record=fixture()
     row.update(mode=s.NEW,original_record_sha256=None,anchor_identity_sha256=None,
                scope_sha256="sha256:"+"8"*64,genesis_sha256="sha256:"+"9"*64)
-    row["external_authorization_sha256"]="sha256:"+"7"*64
+    row["authorization_sha256"]="sha256:"+"7"*64
     body = {k:row[k] for k in (
         "host_id","installation_id","state_volume_id","scope_sha256",
         "account_id","region","bucket","prefix","genesis_sha256","writer_role_arn")}
     body.update(schema=s.NEW_APPROVAL_SCHEMA,
-        retention_disposition_sha256=row["external_authorization_sha256"],
+        retention_disposition_sha256=row["authorization_sha256"],
         operator_public_sha256="sha256:"+hashlib.sha256(public).hexdigest(),
         expires_at=450)
     approval={**body,"signature_ed25519":base64.b64encode(
