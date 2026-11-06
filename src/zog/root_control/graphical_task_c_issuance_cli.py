@@ -88,17 +88,21 @@ def key(role):
 
 
 def confirm(label, body):
-    digest = issue.sha(owner.canonical(body))
-    with open("/dev/tty","r+",encoding="ascii") as tty:
+    canonical = owner.canonical(body)
+    if len(canonical) > 65536:
+        deny()
+    digest = issue.sha(canonical)
+    with open("/dev/tty", "r+", encoding="ascii") as tty:
         tty.write("Task C " + label + " SHA-256: " + digest + "\n")
-        tty.write("Independently inspect original Host, STATE, operator, "
-                  "event, S3 genesis, source and expiry.\n")
+        tty.write("Exact canonical candidate (compare against independent records):\n")
+        tty.write(canonical.decode("ascii") + "\n")
+        tty.write("Verify original Host, installation, STATE, GitHub actor/issue, "
+                  "checkpoint genesis/roles, source and expiry before approving.\n")
         tty.write("Type APPROVE " + digest + " to sign: ")
         tty.flush()
         accepted = tty.readline(128).strip()
     if accepted != "APPROVE " + digest:
         deny()
-
 
 def create_only(path, raw):
     p = Path(path)
