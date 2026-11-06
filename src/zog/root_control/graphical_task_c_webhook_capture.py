@@ -98,6 +98,10 @@ def publish_capture(envelope, directory):
     if type(envelope) is not dict or envelope.get("schema") != (
             "zog-task-c-original-github-webhook-capture-v1"):
         deny()
+    delivery = envelope.get("delivery_id")
+    if (type(delivery) is not str or not 1 <= len(delivery) <= 128
+            or not all(ch.isalnum() or ch in "-_" for ch in delivery)):
+        deny()
     p = Path(directory)
     if not p.is_absolute() or p.is_symlink():
         deny()
