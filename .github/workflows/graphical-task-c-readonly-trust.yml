@@ -5,7 +5,9 @@ on:
   pull_request:
     paths:
       - src/zog/root_control/graphical_task_c_trust_authority.py
+      - src/zog/root_control/graphical_checkpoint_storage_origin.py
       - tests/test_graphical_task_c_trust_authority.py
+      - tests/test_graphical_checkpoint_storage_origin.py
       - docs/graphical-task-c-readonly-trust-authority-2026-11-05.md
       - .github/workflows/graphical-task-c-readonly-trust.yml
 permissions:
@@ -38,6 +40,7 @@ jobs:
           PYTHONPATH="${{ github.workspace }}/src:${{ github.workspace }}/companions/host-deploy/src" \
           python -m pytest -q -rs \
             tests/test_graphical_task_c_trust_authority.py \
+            tests/test_graphical_checkpoint_storage_origin.py \
             tests/test_graphical_task_c_origin.py \
             tests/test_graphical_s3_checkpoint.py
       - if: always()
