@@ -44,3 +44,19 @@ remain native acceptance gates, not inferred from a listening endpoint.
 This service does not install owner authority, create S3 genesis, sign grants,
 submit builds, or alter any existing native-admission hard flag. Broker-specific
 GetObject-only credential and authenticated peer/history checks remain intact.
+
+## Runtime access
+
+Keep the capture runtime root-owned. When preparing it under umask077, give
+only the dedicated zog-github-capture group read/traverse access to its venv
+and selected source import trees, and traverse access to their parent
+directories. Do not recursively open /etc/zog, receipts, secrets or unrelated
+program trees. Install the runtime-access.conf example as a service drop-in;
+nginx remains the socket group, while the supplementary group reads code.
+
+The example requirements.lock pins the runtime wheels used in this pass,
+including their SHA256 hashes. It is an exact tested deployment selection,
+not a replacement for the component's normal dependency declarations. Source
+repositories and dependency wheels must be acquired separately; do not vendor
+their contents into consumers. Native installed source and dependency RECORD
+verification are required in addition to fixture tests.
