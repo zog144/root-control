@@ -21,7 +21,7 @@ from test_graphical_installation_storage_authority import selected as installed
 
 
 def selected():
-    test = old()
+    test = old(signing_fixture=True)
     source = installed()
     record = source["authority"]
     commit = {"schema":"synthetic-install-commit",
