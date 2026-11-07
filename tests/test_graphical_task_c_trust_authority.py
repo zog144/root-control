@@ -184,7 +184,8 @@ def setup(*, signing_fixture=False):
         selected_broker_sha=broker_sha, now=400,
     )
     if signing_fixture:
-        details.update(operator_private=operator, issuer_private=issuer)
+        details.update(operator_private=operator, issuer_private=issuer,
+                       original_records=records)
     return details
 
 
