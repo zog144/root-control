@@ -117,3 +117,27 @@ def test_corrupt_or_ambiguous_installation_history_denied(failure):
         return
     with pytest.raises(op.OperationDenied):
         ctor().inspect_claim(scope,a["operation_id"],op.digest(a))
+
+
+def test_later_request_can_scan_older_immutable_scopes_after_runtime_restart():
+    remote,ctor,(first,a),(second,b)=setup_remote()
+    previous=ctor()
+    previous.claim_once(first,a["operation_id"],op.digest(a))
+    previous.revoke(first)
+    # A later owner's installed registry contains only its *new* separately
+    # signed operation. It must not need expired old approvals to validate
+    # old immutable chain links, but it must still reject duplicate IDs.
+    later=S3InstallationCheckpoint(
+        remote,bucket="synthetic-accepted-new",
+        prefix="new/installation/",account_id="123456789012",
+        installation_scope_sha256=previous.scope,
+        registry_sha256=previous.registry_sha,
+        genesis_sha256=previous.genesis_sha,
+        approved={second:{b["operation_id"]:op.digest(b)}})
+    later.claim_once(second,b["operation_id"],op.digest(b))
+    assert later.inspect_current(second)=={"revoked":False}
+    assert later.inspect_claim(second,b["operation_id"],op.digest(b))[
+        "request_sha256"]==op.digest(b)
+    with pytest.raises(op.OperationDenied):
+        later.claim_once(second,b["operation_id"],op.digest(b))
+    assert remote.puts==3
