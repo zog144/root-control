@@ -37,6 +37,7 @@ def selected():
     test["pin"] = pin
     test["pin_sha"] = op.digest(pin)
     root = test["root_row"]
+    root["originals"] = test.pop("original_records")
     root["schema"] = "zog-protected-task-c-installed-runtime-v3"
     root["storage_authority"]={
         "schema":"zog-task-c-installed-storage-selection-v1",
