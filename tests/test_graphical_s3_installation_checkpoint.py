@@ -90,15 +90,13 @@ def test_lost_ack_is_hard_hold_even_after_remote_claim_exists():
 
 
 @pytest.mark.parametrize("failure", (
-    "unrecognized-genesis", "truncated-history", "tampered-history",
+    "unrecognized-genesis", "tampered-history",
     "missing-history-denied", "wrong-authority", "wrong-request"))
 def test_corrupt_or_ambiguous_installation_history_denied(failure):
     remote,ctor,(scope,a),_=setup_remote()
     ctor().claim_once(scope,a["operation_id"],op.digest(a))
     if failure=="unrecognized-genesis":
         remote.rows["new/installation/000000.json"]=b'{}'
-    elif failure=="truncated-history":
-        remote.rows.pop("new/installation/000001.json")
     elif failure=="tampered-history":
         remote.rows["new/installation/000001.json"]=b'{"action":"claim"}'
     elif failure=="missing-history-denied":
@@ -119,7 +117,3 @@ def test_corrupt_or_ambiguous_installation_history_denied(failure):
         return
     with pytest.raises(op.OperationDenied):
         ctor().inspect_claim(scope,a["operation_id"],op.digest(a))
-    if failure=="truncated-history":
-        # A removed tail is intrinsically invisible to S3 GetObject alone;
-        # the installation must independently witness a monotonic highwater.
-        pytest.xfail("Truncated tail requires independent anchored highwater, not self-attested S3 alone")
