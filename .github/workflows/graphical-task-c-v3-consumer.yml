@@ -7,6 +7,7 @@ on:
       - src/zog/root_control/graphical_task_c_v3_readonly.py
       - src/zog/root_control/graphical_task_c_trust_authority.py
       - tests/test_graphical_task_c_v3_readonly.py
+      - tests/test_graphical_task_c_v3_native_broker.py
       - .github/workflows/graphical-task-c-v3-consumer.yml
 permissions:
   contents: read
@@ -39,6 +40,7 @@ jobs:
           test "$(git -C companions/host-deploy rev-parse HEAD)" = b498ccf8f56e44e62358225b62704d65e1b0a5f7
           python -m pytest -q -rs \
             tests/test_graphical_task_c_v3_readonly.py \
+            tests/test_graphical_task_c_v3_native_broker.py \
             tests/test_graphical_task_c_trust_authority.py \
             tests/test_graphical_installation_storage_authority.py \
             tests/test_graphical_installation_storage_commit.py \
