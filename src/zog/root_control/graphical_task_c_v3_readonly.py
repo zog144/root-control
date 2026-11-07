@@ -23,8 +23,8 @@ PURPOSE_DOMAIN = b"zog-task-c-installation-readonly-purpose-v3\0"
 PURPOSE_FIELDS = frozenset((
     "schema", "pin_sha256", "original_checkpoint_sha256",
     "original_event_sha256", "operator_public_sha256",
-    "issuer_public_sha256", "owner_source_revision",
-    "broker_source_revision", "readonly_role_arn", "writer_role_arn",
+    "issuer_public_sha256", "owner_source_sha256",
+    "broker_source_sha256", "readonly_role_arn", "writer_role_arn",
     "ssm_role_arn", "host_id", "installation_id", "state_volume_id",
     "scope_sha256", "installation_scope_sha256",
     "installation_storage_commit_sha256",
@@ -38,7 +38,7 @@ def verify_installation_broker_selection(
     *, storage_record, storage_commit, root_row, broker_config,
     registry, evidence, operator_key, issuer_key, observation_public,
     pin, pin_sha, approval, broker_signer, selected_broker_sha,
-    now,
+    selected_root_source_sha, now,
 ):
     """Pure v3 selection, requiring signed operation and fixed installation.
 
@@ -67,12 +67,13 @@ def verify_installation_broker_selection(
                 storage_record["installation_scope_sha256"]
             or type(broker_config) is not dict
             or set(broker_config) != {
-                "schema", "broker_source_revision", "root_source_revision",
+                "schema", "broker_source_sha256", "root_source_sha256",
                 "gateway_uid", "gateway_gid", "gateway_cgroup",
                 "gateway_executable_sha256", "boot_id"}
             or broker_config.get("schema") != BROKER_CONFIG_SCHEMA
-            or broker_config.get("broker_source_revision") != trust.BROKER_SOURCE
-            or broker_config.get("root_source_revision") != trust.OWNER_SOURCE
+            or not op.match(selected_root_source_sha, op.SHA)
+            or broker_config.get("broker_source_sha256") != selected_broker_sha
+            or broker_config.get("root_source_sha256") != selected_root_source_sha
             or type(operator_key) is not bytes or len(operator_key) != 32
             or type(issuer_key) is not bytes or len(issuer_key) != 32
             or operator_key == issuer_key
@@ -118,7 +119,7 @@ def verify_installation_broker_selection(
             or pin["installation_id"] != request["installation_id"]
             or pin["state_volume_id"] != request["state_volume_id"]
             or pin["original_checkpoint_sha256"] != op.digest(storage_record)
-            or pin["installed_owner_source"] != trust.OWNER_SOURCE
+            or pin["installed_owner_source"] != selected_root_source_sha[7:]
             or pin["installed_broker_source"] != selected_broker_sha[7:]
             or pin_sha != expected_pin_sha):
         hold()
@@ -129,8 +130,8 @@ def verify_installation_broker_selection(
         "original_event_sha256": op.digest(evidence),
         "operator_public_sha256": trust.digest_bytes(operator_key),
         "issuer_public_sha256": trust.digest_bytes(issuer_key),
-        "owner_source_revision": trust.OWNER_SOURCE,
-        "broker_source_revision": trust.BROKER_SOURCE,
+        "owner_source_sha256": selected_root_source_sha,
+        "broker_source_sha256": selected_broker_sha,
         "readonly_role_arn": storage_record["checkpoint_reader_role_arn"],
         "writer_role_arn": storage_record["checkpoint_writer_role_arn"],
         "ssm_role_arn": root_row.get("ssm", {}).get("role_arn"),
