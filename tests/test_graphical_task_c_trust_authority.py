@@ -182,6 +182,7 @@ def setup():
         pin=pin, pin_sha=authority.digest_bytes(owner.canonical(pin)),
         approval=approval, broker_signer=broker,
         selected_broker_sha=broker_sha, now=400,
+        operator_private=operator, issuer_private=issuer,
     )
 
 
