@@ -26,6 +26,9 @@ from . import graphical_task_c_owner as taskc
 from .graphical_native_owner import ProtectedLedger, SelectedOwner, hold, strict
 from .graphical_owner_service import FixedSSMSender, _read_root, TOKEN_SCHEMA
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
+from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
+from .graphical_installation_storage_commit import verify_installed_storage_commit
+from . import graphical_installation_storage_authority as installation_storage
 from .graphical_task_c_runtime import TaskCExecutor
 from .graphical_task_c_origin import verify_installed_evidence
 
@@ -38,6 +41,14 @@ SSM_SESSION = Path("/run/credentials/zog-graphical-owner.service/aws-session.jso
 CHECKPOINT_SESSION = Path("/run/credentials/zog-graphical-owner.service/checkpoint-session.json")
 LEDGER = Path("/var/lib/zog-graphical-owner-ledger")
 RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v2"
+INSTALLATION_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v3"
+STORAGE_REGISTRY = Path("/etc/zog/graphical-owner/registered-installation.json")
+REGISTRY_ISSUER_PIN = Path("/etc/zog/graphical-owner/registry-issuer-public.key")
+INSTALLER_PIN = Path("/etc/zog/graphical-owner/storage-installer-public.key")
+STORAGE_RECORD = LEDGER / "installation-storage-authority.json"
+STORAGE_COMMIT = LEDGER / "installation-storage-commit.json"
+STORAGE_APPROVAL = Path("/var/lib/zog-graphical-owner-authority/installation-storage-approval.json")
+STORAGE_ANCHOR = Path("/var/lib/zog-graphical-owner-authority/installation-storage-anchor.json")
 
 S3_TIMEOUT = Config(connect_timeout=5, read_timeout=15,
                     retries={"total_max_attempts": 1})
@@ -144,7 +155,11 @@ def installed_runtime():
         "observation_public_sha256", "originals", "commands", "checkpoint",
         "ssm", "origin_evidence_sha256", "origin_issuer_public_sha256",
     }
-    if (set(row) != expected or row["schema"] != RUNTIME_SCHEMA
+    installation_runtime = row.get("schema") == INSTALLATION_RUNTIME_SCHEMA
+    if installation_runtime:
+        expected = expected | {"storage_authority"}
+    if (set(row) != expected
+            or row["schema"] not in (RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA)
             or row["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or any(not contract.match(row[k], contract.H64)
                    for k in ("host_id", "installation_id", "state_volume_id"))
