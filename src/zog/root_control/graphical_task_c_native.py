@@ -26,6 +26,9 @@ from . import graphical_task_c_owner as taskc
 from .graphical_native_owner import ProtectedLedger, SelectedOwner, hold, strict
 from .graphical_owner_service import FixedSSMSender, _read_root, TOKEN_SCHEMA
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
+from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
+from .graphical_installation_storage_commit import verify_installed_storage_commit
+from . import graphical_installation_storage_authority as installation_storage
 from .graphical_task_c_runtime import TaskCExecutor
 from .graphical_task_c_origin import verify_installed_evidence
 
@@ -38,6 +41,14 @@ SSM_SESSION = Path("/run/credentials/zog-graphical-owner.service/aws-session.jso
 CHECKPOINT_SESSION = Path("/run/credentials/zog-graphical-owner.service/checkpoint-session.json")
 LEDGER = Path("/var/lib/zog-graphical-owner-ledger")
 RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v2"
+INSTALLATION_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v3"
+STORAGE_REGISTRY = Path("/etc/zog/graphical-owner/registered-installation.json")
+REGISTRY_ISSUER_PIN = Path("/etc/zog/graphical-owner/registry-issuer-public.key")
+INSTALLER_PIN = Path("/etc/zog/graphical-owner/storage-installer-public.key")
+STORAGE_RECORD = LEDGER / "installation-storage-authority.json"
+STORAGE_COMMIT = LEDGER / "installation-storage-commit.json"
+STORAGE_APPROVAL = Path("/var/lib/zog-graphical-owner-authority/installation-storage-approval.json")
+STORAGE_ANCHOR = Path("/var/lib/zog-graphical-owner-authority/installation-storage-anchor.json")
 
 S3_TIMEOUT = Config(connect_timeout=5, read_timeout=15,
                     retries={"total_max_attempts": 1})
@@ -128,6 +139,100 @@ class SSMOriginalInspector:
         hold()
 
 
+
+def _selected_installation_storage(row, selection, registry, operator, *, now):
+    """V3 installation storage requires signed registry and anchored commit.
+
+    This is a source-side readback of already installed immutable authority.
+    Actual mount UUID/PARTUUID, external S3 retention, installed wheel/RECORD,
+    and service credentials remain independent native Work acceptance gates.
+    """
+    external = STORAGE_ANCHOR.parent
+    if (not LEDGER.is_mount() or not external.is_mount()
+            or os.stat(LEDGER).st_dev == os.stat(external).st_dev):
+        hold()
+    for mount in (LEDGER, external):
+        st = os.lstat(mount)
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0
+                or st.st_mode & 0o022):
+            hold()
+    registry_record = strict(_read_root(STORAGE_REGISTRY, max_bytes=4096))
+    registry_pub = _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600)
+    installer_pub = _read_root(INSTALLER_PIN, max_bytes=32, mode=0o600)
+    storage_record = strict(_read_root(STORAGE_RECORD, max_bytes=4096))
+    approval = strict(_read_root(STORAGE_APPROVAL, max_bytes=8192))
+    accepted = strict(_read_root(STORAGE_COMMIT, max_bytes=4096))
+    anchor = strict(_read_root(STORAGE_ANCHOR, max_bytes=4096))
+    if (type(anchor) is not dict
+            or set(anchor) != {
+                "schema", "registry_sha256", "installation_scope_sha256",
+                "anchor_identity_sha256", "commit_sha256",
+                "ledger_fs_uuid", "authority_fs_uuid", "state_fs_uuid"}
+            or anchor["schema"] !=
+                "zog-task-c-installation-storage-external-anchor-v1"
+            or any(anchor[k] != accepted[k] for k in (
+                "registry_sha256", "installation_scope_sha256",
+                "anchor_identity_sha256", "ledger_fs_uuid",
+                "authority_fs_uuid", "state_fs_uuid"))
+            or type(row.get("storage_authority")) is not dict
+            or set(row["storage_authority"]) != {
+                "schema", "registry_sha256", "installation_scope_sha256",
+                "storage_authority_sha256", "storage_commit_sha256"}
+            or row["storage_authority"]["schema"] !=
+                "zog-task-c-installed-storage-selection-v1"
+            or row["storage_authority"]["registry_sha256"] !=
+                anchor["registry_sha256"]
+            or row["storage_authority"]["installation_scope_sha256"] !=
+                anchor["installation_scope_sha256"]
+            or row["storage_authority"]["storage_authority_sha256"] !=
+                contract.digest(storage_record)
+            or row["storage_authority"]["storage_commit_sha256"] !=
+                contract.digest(accepted)):
+        hold()
+    proof = verify_installed_storage_commit(
+        registered_installation=registry_record,
+        pinned_registry_public=registry_pub,
+        storage_authority=storage_record,
+        signed_storage_approval=approval,
+        pinned_operator_public=operator,
+        independently_retained_anchor_sha256=
+            anchor["anchor_identity_sha256"],
+        receipt=accepted, pinned_installer_public=installer_pub,
+        independently_retained_commit_sha256=anchor["commit_sha256"],
+        now=now)
+    if (proof["installation_scope_sha256"] !=
+            row["storage_authority"]["installation_scope_sha256"]
+            or any(registry_record[k] != row[k] for k in (
+                "host_id", "installation_id", "state_volume_id"))):
+        hold()
+    for item in registry.entries.values():
+        req = item["owner_request"]
+        scope = installation_storage.bind_operation_to_installation(
+            registry=registry_record,
+            pinned_registry_public=registry_pub,
+            request=req)
+        if (scope["installation_scope_sha256"] !=
+                proof["installation_scope_sha256"]
+                or scope["operation_scope_sha256"] != selection["identity"]
+                or scope["request_sha256"] !=
+                    selection["approved"][req["operation_id"]]):
+            hold()
+    checkpoint_policy = row["checkpoint"]
+    for key, installed_key in (
+        ("account_id", "checkpoint_account_id"),
+        ("region", "checkpoint_region"),
+        ("bucket", "checkpoint_bucket"),
+        ("prefix", "checkpoint_prefix"),
+        ("genesis_sha256", "checkpoint_genesis_sha256"),
+        ("role_arn", "checkpoint_writer_role_arn"),
+    ):
+        if checkpoint_policy.get(key) != storage_record[installed_key]:
+            hold()
+    # A signed and independently anchored installation commitment is
+    # persistent after its short-lived provisioning grant expires; this does
+    # not make it an operation grant or assert current native service GO.
+    return proof["installation_scope_sha256"], storage_record
+
 def installed_runtime():
     """Construct the ONLY candidate Task C service from root-protected bytes.
 
@@ -144,7 +249,11 @@ def installed_runtime():
         "observation_public_sha256", "originals", "commands", "checkpoint",
         "ssm", "origin_evidence_sha256", "origin_issuer_public_sha256",
     }
-    if (set(row) != expected or row["schema"] != RUNTIME_SCHEMA
+    installation_runtime = row.get("schema") == INSTALLATION_RUNTIME_SCHEMA
+    if installation_runtime:
+        expected = expected | {"storage_authority"}
+    if (set(row) != expected
+            or row["schema"] not in (RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA)
             or row["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or any(not contract.match(row[k], contract.H64)
                    for k in ("host_id", "installation_id", "state_volume_id"))
@@ -253,12 +362,27 @@ def installed_runtime():
         region=ssm_policy["region"], role_arn=ssm_policy["role_arn"])
     if checkpoint_access == ssm_access:
         hold()
-    checkpoint = S3AppendOnlyCheckpoint(
-        checkpoint_session.client("s3", config=S3_TIMEOUT),
-        bucket=checkpoint_policy["bucket"], prefix=checkpoint_policy["prefix"],
-        account_id=checkpoint_policy["account_id"],
-        scope_digest=selection["identity"],
-        genesis_sha256=checkpoint_policy["genesis_sha256"])
+    if installation_runtime:
+        stable_scope, storage_record = _selected_installation_storage(
+            row, selection, registry, operator, now=int(time.time()))
+        checkpoint = S3InstallationCheckpoint(
+            checkpoint_session.client("s3", config=S3_TIMEOUT),
+            bucket=checkpoint_policy["bucket"],
+            prefix=checkpoint_policy["prefix"],
+            account_id=checkpoint_policy["account_id"],
+            installation_scope_sha256=stable_scope,
+            registry_sha256=storage_record["registry_sha256"],
+            genesis_sha256=checkpoint_policy["genesis_sha256"],
+            approved={selection["identity"]: dict(selection["approved"])})
+    else:
+        # Historical v2 selection remains exact and unmodified. Never treat
+        # its request-bound genesis as the new installation-level genesis.
+        checkpoint = S3AppendOnlyCheckpoint(
+            checkpoint_session.client("s3", config=S3_TIMEOUT),
+            bucket=checkpoint_policy["bucket"], prefix=checkpoint_policy["prefix"],
+            account_id=checkpoint_policy["account_id"],
+            scope_digest=selection["identity"],
+            genesis_sha256=checkpoint_policy["genesis_sha256"])
     # Check genesis/current history BEFORE admitting a socket, never create it.
     if checkpoint.inspect_current(selection["identity"])["revoked"]:
         hold()
