@@ -141,3 +141,22 @@ def test_later_request_can_scan_older_immutable_scopes_after_runtime_restart():
     with pytest.raises(op.OperationDenied):
         later.claim_once(second,b["operation_id"],op.digest(b))
     assert remote.puts==3
+
+
+def test_selected_owner_never_sends_without_preinstalled_registry_genesis(tmp_path):
+    from test_graphical_native_owner import setup
+    req,selection,_,_,_,grant,owner,sender,_,_=setup(tmp_path)
+    remote=Remote()
+    parent=selected()["authority"]
+    owner.ledger.checkpoint=S3InstallationCheckpoint(
+        remote,bucket="synthetic-accepted-new",
+        prefix="new/installation/",account_id="123456789012",
+        installation_scope_sha256=parent["installation_scope_sha256"],
+        registry_sha256=parent["registry_sha256"],
+        genesis_sha256=parent["checkpoint_genesis_sha256"],
+        approved={selection["identity"]:{
+            req["operation_id"]:op.digest(req)}})
+    with pytest.raises(op.OperationDenied):
+        owner.submit(req,grant,now=400)
+    assert sender.calls==[]
+    assert remote.puts==0
