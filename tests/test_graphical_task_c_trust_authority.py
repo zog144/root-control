@@ -30,7 +30,7 @@ def public(private):
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
-def setup():
+def setup(*, signing_fixture=False):
     operator = Ed25519PrivateKey.generate()
     issuer = Ed25519PrivateKey.generate()
     broker = Ed25519PrivateKey.generate()
@@ -173,7 +173,7 @@ def setup():
             operator.sign(authority.PURPOSE_DOMAIN + owner.canonical(approval_body))
         ).decode("ascii"),
     }
-    return dict(
+    details = dict(
         record=record, record_sha=record_sha, root_row=root_row,
         broker_config=broker_config,
         registry=registry, evidence=evidence, operator_key=public(operator),
@@ -182,8 +182,10 @@ def setup():
         pin=pin, pin_sha=authority.digest_bytes(owner.canonical(pin)),
         approval=approval, broker_signer=broker,
         selected_broker_sha=broker_sha, now=400,
-        operator_private=operator, issuer_private=issuer,
     )
+    if signing_fixture:
+        details.update(operator_private=operator, issuer_private=issuer)
+    return details
 
 
 def review(rows):
