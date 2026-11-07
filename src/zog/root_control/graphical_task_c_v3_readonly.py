@@ -151,7 +151,8 @@ def verify_installation_broker_selection(
     }
     if (any(approval.get(k) != v for k,v in selected.items())
             or not op.match(approval.get("pin_sha256"), op.SHA)
-            or any(not trust.ROLE.fullmatch(approval.get(k, ""))
+            or any(type(approval.get(k)) is not str
+                   or not trust.ROLE.fullmatch(approval[k])
                    for k in ("readonly_role_arn","writer_role_arn",
                              "ssm_role_arn"))
             or len({selected[k] for k in ("readonly_role_arn",
