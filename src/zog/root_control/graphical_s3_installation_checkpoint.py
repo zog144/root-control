@@ -78,16 +78,26 @@ class S3InstallationCheckpoint(S3AppendOnlyCheckpoint):
                     or type(row["sequence"]) is not int
                     or row["sequence"] != sequence
                     or row["previous_sha256"] != previous
-                    or row["operation_scope_sha256"] not in self.approved):
+                    or not operation.match(row["operation_scope_sha256"],
+                                           operation.SHA)):
                 hold()
             scope = row["operation_scope_sha256"]
             if row["action"] == "claim":
                 op_id = row["operation_id"]
                 if (not operation.match(op_id, operation.H32)
-                        or self.approved[scope].get(op_id) !=
-                            row["request_sha256"]
+                        or not operation.match(row["request_sha256"],
+                                               operation.SHA)
+                        or (scope in self.approved and
+                            self.approved[scope].get(op_id) !=
+                                row["request_sha256"])
                         or op_id in claims or scope in revoked_scopes):
                     hold()
+                # Earlier immutable events may belong to a previously
+                # completed request no longer present in this runtime's
+                # active signed-operation registry. Still verify every old
+                # event's syntax/hash link and globally unique ID. For any
+                # *currently selected* scope also enforce its exact signed
+                # approval/request map.
                 claims[op_id] = (scope, row["request_sha256"])
             elif row["action"] == "revoke":
                 if (row["operation_id"] is not None
