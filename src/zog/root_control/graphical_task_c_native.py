@@ -362,12 +362,27 @@ def installed_runtime():
         region=ssm_policy["region"], role_arn=ssm_policy["role_arn"])
     if checkpoint_access == ssm_access:
         hold()
-    checkpoint = S3AppendOnlyCheckpoint(
-        checkpoint_session.client("s3", config=S3_TIMEOUT),
-        bucket=checkpoint_policy["bucket"], prefix=checkpoint_policy["prefix"],
-        account_id=checkpoint_policy["account_id"],
-        scope_digest=selection["identity"],
-        genesis_sha256=checkpoint_policy["genesis_sha256"])
+    if installation_runtime:
+        stable_scope, storage_record = _selected_installation_storage(
+            row, selection, registry, operator, now=int(time.time()))
+        checkpoint = S3InstallationCheckpoint(
+            checkpoint_session.client("s3", config=S3_TIMEOUT),
+            bucket=checkpoint_policy["bucket"],
+            prefix=checkpoint_policy["prefix"],
+            account_id=checkpoint_policy["account_id"],
+            installation_scope_sha256=stable_scope,
+            registry_sha256=storage_record["registry_sha256"],
+            genesis_sha256=checkpoint_policy["genesis_sha256"],
+            approved={selection["identity"]: dict(selection["approved"])})
+    else:
+        # Historical v2 selection remains exact and unmodified. Never treat
+        # its request-bound genesis as the new installation-level genesis.
+        checkpoint = S3AppendOnlyCheckpoint(
+            checkpoint_session.client("s3", config=S3_TIMEOUT),
+            bucket=checkpoint_policy["bucket"], prefix=checkpoint_policy["prefix"],
+            account_id=checkpoint_policy["account_id"],
+            scope_digest=selection["identity"],
+            genesis_sha256=checkpoint_policy["genesis_sha256"])
     # Check genesis/current history BEFORE admitting a socket, never create it.
     if checkpoint.inspect_current(selection["identity"])["revoked"]:
         hold()
