@@ -1,0 +1,40 @@
+name: Task C registered installation storage scope source checks
+on:
+  push:
+    branches: [regular/task-c-installation-storage-authority-20261107]
+  pull_request:
+    paths:
+      - src/zog/root_control/graphical_installation_storage_authority.py
+      - src/zog/root_control/graphical_s3_installation_checkpoint.py
+      - tests/test_graphical_installation_storage_authority.py
+      - tests/test_graphical_s3_installation_checkpoint.py
+      - .github/workflows/graphical-installation-storage-authority.yml
+permissions:
+  contents: read
+jobs:
+  registered-installation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install 'pytest>=8,<10' 'cryptography>=44,<49' 'boto3>=1.34,<2'
+      - name: Registry storage authority and append-only operation gates
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/tests
+        run: |
+          python -m pytest -q -rs \
+            tests/test_graphical_installation_storage_authority.py \
+            tests/test_graphical_s3_installation_checkpoint.py \
+            tests/test_graphical_s3_checkpoint.py \
+            tests/test_graphical_checkpoint_storage_origin.py
+      - if: always()
+        run: echo 'Registry scope and new checkpoint source only; no S3 genesis, protected mounts, owner role, IPC or service admission was performed.' >> "$GITHUB_STEP_SUMMARY"
