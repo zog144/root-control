@@ -81,7 +81,7 @@ def verify_installation_broker_selection(
             or type(observation_public) is not bytes or len(observation_public) != 32
             or not hasattr(broker_signer, "public_key")
             or type(pin) is not dict or set(pin) != wire.PIN_KEYS
-            or pin.get("schema") != "zog-graphical-task-c-gateway-trust-pin-v1"
+            or pin.get("schema") != wire.PIN_SCHEMA_V3
             or type(approval) is not dict or set(approval) != PURPOSE_FIELDS
             or approval.get("schema") != PURPOSE_SCHEMA
             or type(now) is not int
