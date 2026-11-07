@@ -29,7 +29,10 @@ def selected():
               "accepted_at":400}
     scope = test["record"]["checkpoint_scope_sha256"]
     pin = copy.deepcopy(test["pin"])
+    selected_root_sha = "sha256:" + "6"*64
+    selected_broker_sha = test["selected_broker_sha"]
     pin.update(schema=history.PIN_SCHEMA_V3,
+               installed_owner_source=selected_root_sha[7:],
                original_checkpoint_sha256=op.digest(record))
     test["pin"] = pin
     test["pin_sha"] = op.digest(pin)
@@ -52,6 +55,10 @@ def selected():
     }
     broker=test["broker_config"]
     broker["schema"]=v3.BROKER_CONFIG_SCHEMA
+    broker.pop("root_source_revision")
+    broker.pop("broker_source_revision")
+    broker["root_source_sha256"]=selected_root_sha
+    broker["broker_source_sha256"]=selected_broker_sha
     body={
         "schema":v3.PURPOSE_SCHEMA,
         "pin_sha256":test["pin_sha"],
@@ -59,8 +66,8 @@ def selected():
         "original_event_sha256":op.digest(test["evidence"]),
         "operator_public_sha256":trust.digest_bytes(test["operator_key"]),
         "issuer_public_sha256":trust.digest_bytes(test["issuer_key"]),
-        "owner_source_revision":trust.OWNER_SOURCE,
-        "broker_source_revision":trust.BROKER_SOURCE,
+        "owner_source_sha256":selected_root_sha,
+        "broker_source_sha256":selected_broker_sha,
         "readonly_role_arn":record["checkpoint_reader_role_arn"],
         "writer_role_arn":record["checkpoint_writer_role_arn"],
         "ssm_role_arn":root["ssm"]["role_arn"],
@@ -83,6 +90,7 @@ def selected():
     }
     for key in ("record","record_sha","operator_private","issuer_private","now"):
         test.pop(key,None)
+    test["selected_root_source_sha"]=selected_root_sha
     test["storage_record"]=record
     test["storage_commit"]=commit
     test["now"]=400
@@ -107,7 +115,7 @@ def test_installed_v3_binding_keeps_operation_scope_separate():
     "v2_pin","v2_runtime","v2_purpose","tampered_commit",
     "tampered_storage","changed_operation_scope","changed_origin",
     "changed_operator","reader_as_writer","wrong_source",
-    "wrong_signer","replaced_pin","bad_gateway",
+    "wrong_signer","replaced_pin","bad_gateway","wrong_root_digest","wrong_broker_digest",
 ))
 def test_v3_separate_signed_bindings_fail_closed(change):
     row=selected()
@@ -131,7 +139,7 @@ def test_v3_separate_signed_bindings_fail_closed(change):
         row["storage_record"]["checkpoint_reader_role_arn"]=row[
             "storage_record"]["checkpoint_writer_role_arn"]
     elif change=="wrong_source":
-        row["broker_config"]["root_source_revision"]="0"*40
+        row["broker_config"]["root_source_sha256"]="sha256:"+"0"*64
     elif change=="wrong_signer":
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         row["broker_signer"]=Ed25519PrivateKey.generate()
@@ -139,5 +147,9 @@ def test_v3_separate_signed_bindings_fail_closed(change):
         row["pin_sha"]="sha256:"+"0"*64
     elif change=="bad_gateway":
         row["broker_config"]["gateway_uid"]=0
+    elif change=="wrong_root_digest":
+        row["selected_root_source_sha"]="sha256:"+"e"*64
+    elif change=="wrong_broker_digest":
+        row["broker_config"]["broker_source_sha256"]="sha256:"+"e"*64
     with pytest.raises(op.OperationDenied):
         verify(row)
