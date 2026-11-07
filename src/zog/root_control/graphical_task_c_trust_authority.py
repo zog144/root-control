@@ -305,6 +305,29 @@ def _installed_gateway_source_digest():
     return digest_bytes(bytes(raw))
 
 
+ROOT_V3_SOURCES = (
+    "zog.root_control.graphical_task_c_trust_authority",
+    "zog.root_control.graphical_task_c_v3_readonly",
+    "zog.root_control.graphical_task_c_native",
+    "zog.root_control.graphical_installation_storage_authority",
+    "zog.root_control.graphical_installation_storage_commit",
+    "zog.root_control.graphical_s3_installation_checkpoint",
+    "zog.root_control.graphical_task_c_owner",
+)
+
+
+def _installed_v3_root_source_digest():
+    """Exact installed readable module bytes, separately pinned by installer."""
+    buf = bytearray()
+    for name in sorted(ROOT_V3_SOURCES):
+        spec = importlib.util.find_spec(name)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+            hold()
+        raw = _read_root(Path(spec.origin), max_bytes=131072, mode=0o644)
+        buf.extend(name.encode("ascii") + b"\0" + raw + b"\0")
+    return digest_bytes(bytes(buf))
+
+
 def installed_readonly_authority():
     """Read-only constructor for the *separately disabled* trust broker.
 
@@ -321,13 +344,22 @@ def installed_readonly_authority():
     selected_v3 = root_row.get("schema") == owner_native.INSTALLATION_RUNTIME_SCHEMA
     required_config_schema = (v3_readonly.BROKER_CONFIG_SCHEMA if selected_v3
                               else "zog-task-c-readonly-broker-native-selection-v1")
-    if (type(config) is not dict or
-            set(config) != {"schema", "broker_source_revision", "root_source_revision",
-                            "gateway_uid", "gateway_gid", "gateway_cgroup",
-                            "gateway_executable_sha256", "boot_id"}
+    expected_config = (
+        {"schema", "broker_source_sha256", "root_source_sha256",
+         "gateway_uid", "gateway_gid", "gateway_cgroup",
+         "gateway_executable_sha256", "boot_id"} if selected_v3 else
+        {"schema", "broker_source_revision", "root_source_revision",
+         "gateway_uid", "gateway_gid", "gateway_cgroup",
+         "gateway_executable_sha256", "boot_id"})
+    if (type(config) is not dict or set(config) != expected_config
             or config["schema"] != required_config_schema
-            or config["broker_source_revision"] != BROKER_SOURCE
-            or config["root_source_revision"] != OWNER_SOURCE
+            or (selected_v3 and (
+                config["root_source_sha256"] != _installed_v3_root_source_digest()
+                or config["broker_source_sha256"] !=
+                    _installed_gateway_source_digest()))
+            or (not selected_v3 and (
+                config["broker_source_revision"] != BROKER_SOURCE
+                or config["root_source_revision"] != OWNER_SOURCE))
             or config["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or type(config["gateway_uid"]) is not int
             or config["gateway_uid"] < 1000
@@ -386,6 +418,7 @@ def installed_readonly_authority():
             pin_sha=digest_bytes(pin_raw), approval=approval,
             broker_signer=signer,
             selected_broker_sha=_installed_gateway_source_digest(),
+            selected_root_source_sha=_installed_v3_root_source_digest(),
             now=int(time.time()))
     else:
         readonly_role, scope = verify_original_selection(
