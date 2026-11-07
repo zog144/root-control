@@ -6,8 +6,11 @@ on:
     paths:
       - src/zog/root_control/graphical_installation_storage_authority.py
       - src/zog/root_control/graphical_s3_installation_checkpoint.py
+      - src/zog/root_control/graphical_installation_storage_commit.py
+      - src/zog/root_control/graphical_task_c_native.py
       - tests/test_graphical_installation_storage_authority.py
       - tests/test_graphical_s3_installation_checkpoint.py
+      - tests/test_graphical_installation_storage_commit.py
       - .github/workflows/graphical-installation-storage-authority.yml
 permissions:
   contents: read
@@ -34,6 +37,7 @@ jobs:
           python -m pytest -q -rs \
             tests/test_graphical_installation_storage_authority.py \
             tests/test_graphical_s3_installation_checkpoint.py \
+            tests/test_graphical_installation_storage_commit.py \
             tests/test_graphical_s3_checkpoint.py \
             tests/test_graphical_checkpoint_storage_origin.py
       - if: always()
