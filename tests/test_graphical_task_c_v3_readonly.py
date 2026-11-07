@@ -116,7 +116,8 @@ def test_installed_v3_binding_keeps_operation_scope_separate():
     "v2_pin","v2_runtime","v2_purpose","tampered_commit",
     "tampered_storage","changed_operation_scope","changed_origin",
     "changed_operator","reader_as_writer","wrong_source",
-    "wrong_signer","replaced_pin","bad_gateway","wrong_root_digest","wrong_broker_digest",
+    "wrong_signer","replaced_pin","bad_gateway","wrong_root_digest",
+    "wrong_broker_digest","numeric_reader_role",
 ))
 def test_v3_separate_signed_bindings_fail_closed(change):
     row=selected()
@@ -152,5 +153,7 @@ def test_v3_separate_signed_bindings_fail_closed(change):
         row["selected_root_source_sha"]="sha256:"+"e"*64
     elif change=="wrong_broker_digest":
         row["broker_config"]["broker_source_sha256"]="sha256:"+"e"*64
+    elif change=="numeric_reader_role":
+        row["approval"]["readonly_role_arn"]=17
     with pytest.raises(op.OperationDenied):
         verify(row)
