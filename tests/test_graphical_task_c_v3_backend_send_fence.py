@@ -44,7 +44,7 @@ def proof():
         "backend":"root-directory",
         "registry_sha256":"sha256:"+"2"*64,
         "installation_scope_sha256":"sha256:"+"3"*64,
-        "native_observer_sha256":"sha256:"+"4"*64,
+        "live_snapshot_sha256":"sha256:"+"4"*64,
         "observation_sha256":"sha256:"+"5"*64,
     }
 
