@@ -51,6 +51,18 @@ def _context_observation(context, attested):
     context.recheck()
     bundle = context.bundle
     expected = bundle["bootstrap"]["state"]
+    controls = bundle["bootstrap"].get("registries")
+    authority = bundle["bootstrap"].get("control_authority")
+    # host-install may legitimately run a standalone non-resident /state with
+    # no registry. That mode MUST NOT acquire the Task C command-center
+    # authority merely because a separately signed mapping file exists.
+    if (type(controls) is not list or not controls
+            or type(authority) is not dict
+            or type(authority.get("registry_id")) is not str
+            or [r.get("registry_id") for r in controls
+                   if type(r) is dict and r.get("role") == "control"] !=
+                [authority["registry_id"]]):
+        hold()
     root = bundle["marker"]
     fdstat = os.fstat(context.fd)
     mount = context.mount
