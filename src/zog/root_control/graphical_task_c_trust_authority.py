@@ -344,7 +344,8 @@ def installed_readonly_authority():
         hold()
     _, config = _checked_json(BROKER_CONFIG, maximum=8192)
     _, root_row = _checked_json(OWNER_REGISTRY)
-    selected_v3 = root_row.get("schema") == owner_native.INSTALLATION_RUNTIME_SCHEMA
+    selected_v3 = root_row.get("schema") in (
+        owner_native.INSTALLATION_RUNTIME_SCHEMA, owner_native.LOCAL_RUNTIME_SCHEMA)
     required_config_schema = (v3_readonly.BROKER_CONFIG_SCHEMA if selected_v3
                               else "zog-task-c-readonly-broker-native-selection-v1")
     expected_config = (
@@ -407,9 +408,9 @@ def installed_readonly_authority():
                 original.digest(e["owner_request"])
             for e in registry.entries.values()
         }}
-        # Also checks two distinct protected mounts, independently pinned
-        # registrar/installer public keys, the original signed storage grant,
-        # immutable install commitment and independent anchor.
+        # Checks two independent protected mounts, existing operator-signed
+        # storage approval, immutable installer commit and external anchor.
+        # Local mode requires no invented registry or observation signer.
         _, record = owner_native._selected_installation_storage(
             root_row, selection, registry, operator_key, now=int(time.time()))
         # The root selector has now checked this fresh protected backend
@@ -473,6 +474,11 @@ def installed_readonly_authority():
         gateway_gid=config["gateway_gid"],
         gateway_executable_sha256=config["gateway_executable_sha256"],
         gateway_cgroup=config["gateway_cgroup"],
-        backend_recheck=(live_backend.require_live_backend_bound_identity
-                         if selected_v3 else None),
+        backend_recheck=(__import__("functools").partial(
+            live_backend.require_live_backend_bound_identity,
+            expected_registry=__import__("zog.root_control.graphical_native_owner",
+                fromlist=["strict"]).strict(_read_root(
+                    owner_native.STORAGE_REGISTRY, max_bytes=4096)),
+            allow_local=root_row["schema"] == owner_native.LOCAL_RUNTIME_SCHEMA)
+            if selected_v3 else None),
     )
