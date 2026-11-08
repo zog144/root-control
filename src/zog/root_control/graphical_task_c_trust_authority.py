@@ -6,6 +6,7 @@ operator-signed purpose approval, original issuer evidence and root-installed
 source/credential bytes can select a broker. Source review is not native GO.
 """
 from __future__ import annotations
+from functools import partial
 
 import base64
 import hashlib
@@ -474,10 +475,9 @@ def installed_readonly_authority():
         gateway_gid=config["gateway_gid"],
         gateway_executable_sha256=config["gateway_executable_sha256"],
         gateway_cgroup=config["gateway_cgroup"],
-        backend_recheck=(__import__("functools").partial(
+        backend_recheck=(partial(
             live_backend.require_live_backend_bound_identity,
-            expected_registry=__import__("zog.root_control.graphical_native_owner",
-                fromlist=["strict"]).strict(_read_root(
+            expected_registry=strict(_read_root(
                     owner_native.STORAGE_REGISTRY, max_bytes=4096)),
             allow_local=root_row["schema"] == owner_native.LOCAL_RUNTIME_SCHEMA)
             if selected_v3 else None),
