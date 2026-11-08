@@ -29,6 +29,7 @@ from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
 from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
 from .graphical_installation_storage_commit import verify_installed_storage_commit
 from . import graphical_installation_storage_authority as installation_storage
+from . import graphical_task_c_backend_observation as live_backend
 from .graphical_task_c_runtime import TaskCExecutor
 from .graphical_task_c_origin import verify_installed_evidence
 
@@ -228,6 +229,16 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
     ):
         if checkpoint_policy.get(key) != storage_record[installed_key]:
             hold()
+    # A static registrar signature cannot prove which STATE backend is
+    # mounted *now*. Fail before selecting any owner/SSM session if the
+    # separately pinned short-lived observation and fresh kernel descriptor
+    # readback do not agree with this exact signed registry.
+    observed = live_backend.require_live_backend_bound_identity(
+        expected_registry=registry_record)
+    if (observed["registry_sha256"] != contract.digest(registry_record)
+            or observed["installation_scope_sha256"] !=
+                proof["installation_scope_sha256"]):
+        hold()
     # A signed and independently anchored installation commitment is
     # persistent after its short-lived provisioning grant expires; this does
     # not make it an operation grant or assert current native service GO.
@@ -395,7 +406,12 @@ def installed_runtime():
     executor = TaskCExecutor(
         registry, protected_owner=owner,
         ssm_inspector=SSMOriginalInspector(ssm_session,
-                                          instance_id=ssm_policy["instance_id"]))
+                                          instance_id=ssm_policy["instance_id"]),
+        # Every selected v3 IPC invocation rechecks the *live* backend
+        # before claims or SSM. No received mapping, "native_accepted"
+        # boolean, or signed historical file can bypass this callable.
+        backend_recheck=(live_backend.require_live_backend_bound_identity
+                         if installation_runtime else None))
     return executor, row
 
 
