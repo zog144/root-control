@@ -63,9 +63,9 @@ class Context:
 
 
 def selected(monkeypatch,tmp_path,backend="root-directory"):
-    directory=tmp_path/"state"
-    directory.mkdir()
-    fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+    # Use a root-owned real descriptor for the synthetic source harness.
+    # The test never claims this is a selected native /state observation.
+    fd=os.open("/",os.O_RDONLY|os.O_DIRECTORY)
     context=Context(fd,backend)
     args,_,registrar_secret=source(backend)
     observer_secret=Ed25519PrivateKey.generate()
