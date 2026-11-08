@@ -157,3 +157,24 @@ def test_v3_separate_signed_bindings_fail_closed(change):
         row["approval"]["readonly_role_arn"]=17
     with pytest.raises(op.OperationDenied):
         verify(row)
+
+
+def test_registrar_free_task_c_runtime_requires_normal_signed_broker_purpose():
+    """Optional Task C remote grant is distinct from standalone boot/control."""
+    row=selected()
+    row["root_row"]["schema"]="zog-protected-task-c-installed-runtime-local-v1"
+    role,scope=verify(row)
+    assert role==row["storage_record"]["checkpoint_reader_role_arn"]
+    assert scope==row["pin"]["scope_sha256"]
+    # A locally selected installation cannot waive purpose/operation signing.
+    row["approval"]["signature_ed25519"]="AA=="
+    with pytest.raises(op.OperationDenied):
+        verify(row)
+
+
+def test_local_runtime_never_accepts_legacy_unprotected_broker_pin():
+    row=selected()
+    row["root_row"]["schema"]="zog-protected-task-c-installed-runtime-local-v1"
+    row["pin"]["schema"]=history.PIN_SCHEMA_V2
+    with pytest.raises(op.OperationDenied):
+        verify(row)
