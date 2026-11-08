@@ -6,6 +6,7 @@ ledger, peer identity, signer or separately-issued short-lived AWS credentials
 must deny. This module does not authorize starting the native owner unit.
 """
 from __future__ import annotations
+from functools import partial
 
 import base64
 import hashlib
@@ -420,7 +421,7 @@ def installed_runtime():
                                           instance_id=ssm_policy["instance_id"]),
         # The local mode is a protected Task C enrollment, not local boot.
         # Re-check actual /state before every claim/SSM or observation.
-        backend_recheck=(__import__("functools").partial(
+        backend_recheck=(partial(
             live_backend.require_live_backend_bound_identity,
             expected_registry=strict(_read_root(STORAGE_REGISTRY, max_bytes=4096)),
             allow_local=row["schema"] == LOCAL_RUNTIME_SCHEMA)
