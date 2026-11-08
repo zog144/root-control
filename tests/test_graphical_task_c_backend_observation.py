@@ -40,7 +40,10 @@ class Context:
             "partition_partuuid":"55555555-5555-4555-8555-555555555555",
         }
         self.bundle={
-            "bootstrap":{"state":{
+            "bootstrap":{
+                "registries":[{"registry_id":"selected-control","role":"control"}],
+                "control_authority":{"registry_id":"selected-control"},
+                "state":{
                 "storage_backend":backend,
                 "filesystem_uuid":self.marker["filesystem_uuid"],
                 "partition_partuuid":self.marker["partition_partuuid"],
@@ -136,6 +139,7 @@ def test_protected_live_backend_v2_requires_real_descriptor_recheck(
     "changed_mount","changed_marker","changed_backend","wrong_issuer",
     "missing_pin","changed_registry","signed_false_native_flag",
     "reader_unavailable","changed_witness_signature",
+    "standalone_registry_free",
 ))
 def test_static_signed_mapping_and_false_native_status_cannot_authorize(
         monkeypatch,tmp_path,attack):
@@ -169,6 +173,9 @@ def test_static_signed_mapping_and_false_native_status_cannot_authorize(
             monkeypatch.setattr(state_inspect,"inspect_live",unavailable)
         elif attack=="changed_witness_signature":
             s.files[native.OBSERVATION]["signature_ed25519"]=base64.b64encode(b"0"*64).decode()
+        elif attack=="standalone_registry_free":
+            s.context.bundle["bootstrap"]["registries"]=[]
+            s.context.bundle["bootstrap"]["control_authority"]=None
         with pytest.raises(op.OperationDenied):
             native.require_live_backend_bound_identity()
     finally:
