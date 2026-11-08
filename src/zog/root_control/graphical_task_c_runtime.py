@@ -140,7 +140,16 @@ class TaskCExecutor:
                         "installation_scope_sha256", "mapping_sha256",
                         "observation_sha256"}
                     or evidence["installation_scope_sha256"] !=
-                       self.owner.ledger.checkpoint.scope):
+                       self.owner.ledger.checkpoint.scope
+                    or evidence["registry_sha256"] !=
+                       self.owner.ledger.checkpoint.registry_sha
+                    or evidence["backend"] not in (
+                        "mounted-volume", "root-directory")
+                    or any(not contract.match(evidence[k], contract.SHA)
+                           for k in ("registry_sha256",
+                                     "installation_scope_sha256",
+                                     "mapping_sha256",
+                                     "observation_sha256"))):
                 hold()
         parsed = taskc.parse_frame(taskc.canonical(frame) + b"\n")
         item = self.registry.select(parsed)
