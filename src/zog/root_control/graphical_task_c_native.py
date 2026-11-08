@@ -365,6 +365,11 @@ def installed_runtime():
             or not ROLE.fullmatch(ssm_policy["role_arn"])):
         hold()
 
+    if installation_runtime:
+        # Authenticate the selected physical STATE backend/registry before
+        # even opening privileged checkpoint-writer or SSM sessions.
+        stable_scope, storage_record = _selected_installation_storage(
+            row, selection, registry, operator, now=int(time.time()))
     checkpoint_session, checkpoint_access = _session(
         CHECKPOINT_SESSION, account=checkpoint_policy["account_id"],
         region=checkpoint_policy["region"], role_arn=checkpoint_policy["role_arn"])
@@ -374,8 +379,6 @@ def installed_runtime():
     if checkpoint_access == ssm_access:
         hold()
     if installation_runtime:
-        stable_scope, storage_record = _selected_installation_storage(
-            row, selection, registry, operator, now=int(time.time()))
         checkpoint = S3InstallationCheckpoint(
             checkpoint_session.client("s3", config=S3_TIMEOUT),
             bucket=checkpoint_policy["bucket"],
