@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: zog144/host-deploy
-          ref: b498ccf8f56e44e62358225b62704d65e1b0a5f7
+          ref: 5a36712b878fb7c43a20b017315a96a02f66b298
           path: companions/host-deploy
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/tests:${{ github.workspace }}/companions/host-deploy/src:${{ github.workspace }}/companions/host-deploy/tests:${{ github.workspace }}/companions/host-install/src:${{ github.workspace }}/companions/host-install/tests
         run: |
-          test "$(git -C companions/host-deploy rev-parse HEAD)" = b498ccf8f56e44e62358225b62704d65e1b0a5f7
+          test "$(git -C companions/host-deploy rev-parse HEAD)" = 5a36712b878fb7c43a20b017315a96a02f66b298
           test "$(git -C companions/host-install rev-parse HEAD)" = 24376bd784b7efcc1e393188f792c41685e75f79
           python -m pytest -q -rs \
             tests/test_graphical_task_c_backend_observation.py \
