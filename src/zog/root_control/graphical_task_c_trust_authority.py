@@ -35,6 +35,7 @@ from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
 from . import graphical_installation_storage_authority as installation_storage
 from . import graphical_task_c_v3_readonly as v3_readonly
 from . import graphical_task_c_native as owner_native
+from . import graphical_task_c_backend_observation as live_backend
 
 OWNER_SOURCE = "5ad7d5ed72d1b72edc767a658de28506791a74d4"
 BROKER_SOURCE = "0ea6d583fa441527f45dabbbf542731560644a72"
@@ -409,6 +410,8 @@ def installed_readonly_authority():
         # immutable install commitment and independent anchor.
         _, record = owner_native._selected_installation_storage(
             root_row, selection, registry, operator_key, now=int(time.time()))
+        # The root selector has now checked this fresh protected backend
+        # against the signed registry. Recheck on each broker IPC as well.
         _, commit = _checked_json(owner_native.STORAGE_COMMIT, maximum=4096)
         readonly_role, scope = v3_readonly.verify_installation_broker_selection(
             storage_record=record, storage_commit=commit, root_row=root_row,
@@ -468,4 +471,6 @@ def installed_readonly_authority():
         gateway_gid=config["gateway_gid"],
         gateway_executable_sha256=config["gateway_executable_sha256"],
         gateway_cgroup=config["gateway_cgroup"],
+        backend_recheck=(live_backend.require_live_backend_bound_identity
+                         if selected_v3 else None),
     )
