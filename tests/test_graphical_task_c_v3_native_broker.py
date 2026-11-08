@@ -45,6 +45,10 @@ def selection(monkeypatch, *, wrong_reader=False):
         trust.SIGNING_CREDENTIAL:row["broker_signer"].private_bytes_raw(),
     }
     def read_key(path,**kw):
+        if path==native.STORAGE_REGISTRY:
+            # Constructor captures protected selected bytes, but the
+            # native selector remains separately mocked in this unit test.
+            return op.canonical({"schema":"synthetic-only"})
         assert path in keys
         return keys[path]
     monkeypatch.setattr(trust,"_checked_json",read_json)
