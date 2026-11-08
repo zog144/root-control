@@ -1,7 +1,7 @@
 """Task C prospective installation-level storage authority.
 
-A *registered installation* selects persistent storage before any Fonts
-catalogue/operation approval exists. A separate signed operation still selects
+An explicitly selected local Host installation or legacy signed registry
+selects persistent storage before any Fonts operation approval exists. A separate signed operation still selects
 EVERY claim, send and revocation. This source never initializes remote S3,
 provisions mounts, issues registry keys or accepts a native service.
 """
@@ -16,6 +16,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from . import graphical_operation_owner_source as operation
 from .graphical_native_owner import hold
 
+# Local operator-selected identity is NOT signed, cannot initialize /state,
+# and is not Command Center enrollment. The distinct operator-signed storage
+# approval plus protected installer commit authorize Task C's S3 selection.
+LOCAL_SCHEMA = "zog-task-c-local-installation-selection-v1"
+LOCAL_SCOPE_SCHEMA = "zog-task-c-local-installation-storage-scope-v1"
+LOCAL_EXTRA = ("host_install_installation_uuid", "host_install_state_uuid")
+LOCAL_KEYS = frozenset(("schema", "host_id", "host_fingerprint",
+    "target_identity_sha256", "installation_id", "state_volume_id")
+    + LOCAL_EXTRA)
 REGISTRY_SCHEMA = "zog-task-c-registered-installation-v1"
 REGISTRY_DOMAIN = b"zog-task-c-registered-installation-v1\0"
 SCOPE_SCHEMA = "zog-task-c-installation-storage-scope-v1"
@@ -78,8 +87,37 @@ def _verify_signature(signed, *, domain, public):
         _denied()
 
 
-def installation_scope(registry, *, pinned_registry_public):
+def installation_scope(registry, *, pinned_registry_public=None, allow_local=False):
     """Selected registry evidence, never a request-derived storage scope."""
+    if type(registry) is dict and registry.get("schema") == LOCAL_SCHEMA:
+        # This branch is deliberately opt-in from a reviewed Task C runtime
+        # selection, NEVER a fallback if the registrar or key is missing.
+        # Pure local metadata alone supplies no operator or owner grant.
+        if (allow_local is not True or pinned_registry_public is not None
+                or set(registry) != LOCAL_KEYS
+                or any(not operation.match(registry[k], operation.H64)
+                       for k in ("host_id", "installation_id", "state_volume_id"))
+                or any(not operation.match(registry[k], operation.SHA)
+                       for k in ("host_fingerprint", "target_identity_sha256"))):
+            _denied()
+        from uuid import UUID
+        try:
+            for key in LOCAL_EXTRA:
+                val = registry[key]
+                if (type(val) is not str or str(UUID(val)) != val
+                        or UUID(val).int == 0):
+                    _denied()
+        except (TypeError, ValueError, AttributeError):
+            _denied()
+        local_scope = {"schema": LOCAL_SCOPE_SCHEMA,
+                       **{k: registry[k] for k in
+                          ("host_id", "host_fingerprint",
+                           "target_identity_sha256", "installation_id",
+                           "state_volume_id") + LOCAL_EXTRA}}
+        return local_scope, _digest(local_scope)
+    if (allow_local is True or type(pinned_registry_public) is not bytes):
+        # Distinguish the old signed-registry mode. Never downgrade it.
+        _denied()
     if (type(registry) is not dict or set(registry) != REGISTRY_KEYS
             or registry["schema"] != REGISTRY_SCHEMA
             or any(not operation.match(registry[k], operation.H64)
@@ -108,7 +146,7 @@ def prospective_genesis(installation_scope_sha256, registry_sha256):
 def verify_installation_storage_selection(
     *, registry, pinned_registry_public, authority,
     signed_storage_approval, pinned_operator_public,
-    independently_retained_anchor_sha256, now,
+    independently_retained_anchor_sha256, now, allow_local=False,
 ):
     """Source validation of independent registry + one-time storage grant.
 
@@ -117,7 +155,8 @@ def verify_installation_storage_selection(
     native proof of that custody. No implicit approval of any operation.
     """
     scope, scope_sha = installation_scope(
-        registry, pinned_registry_public=pinned_registry_public)
+        registry, pinned_registry_public=pinned_registry_public,
+        allow_local=allow_local)
     registry_sha = _digest(registry)
     if (type(authority) is not dict or set(authority) != AUTHORITY_KEYS
             or authority.get("schema") != AUTHORITY_SCHEMA
@@ -140,7 +179,8 @@ def verify_installation_storage_selection(
                 operation.SHA)
             or type(pinned_operator_public) is not bytes
             or len(pinned_operator_public) != 32
-            or pinned_operator_public == pinned_registry_public
+            or (pinned_registry_public is not None
+                and pinned_operator_public == pinned_registry_public)
             or signed_storage_approval["operator_public_sha256"] !=
                 _sha(pinned_operator_public)
             or not operation.match(authority["approval_sha256"], operation.SHA)
@@ -192,9 +232,9 @@ def verify_installation_storage_selection(
 
 
 def bind_operation_to_installation(
-    *, registry, pinned_registry_public, request,
+    *, registry, pinned_registry_public=None, request,
     signed_operation_approval=None, pinned_operator_public=None,
-    expected_approval_id=None, now=None,
+    expected_approval_id=None, now=None, allow_local=False,
 ):
     """Separate operation digest and approval; never use as storage identity.
 
@@ -203,9 +243,13 @@ def bind_operation_to_installation(
     approval still leaves an operation NOT ADMITTED (preparation only).
     """
     _, stable_scope = installation_scope(
-        registry, pinned_registry_public=pinned_registry_public)
+        registry, pinned_registry_public=pinned_registry_public,
+        allow_local=allow_local)
     req = operation.validate_request(request)
-    if any(req[k] != registry[k] for k in SCOPE_KEYS):
+    check_keys = (("host_id", "host_fingerprint",
+                   "target_identity_sha256", "installation_id",
+                   "state_volume_id") if allow_local else SCOPE_KEYS)
+    if any(req[k] != registry[k] for k in check_keys):
         _denied()
     operation_scope = operation.digest(operation.scope_from_request(req))
     result = {
