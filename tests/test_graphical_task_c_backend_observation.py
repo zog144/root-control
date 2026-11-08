@@ -2,6 +2,7 @@
 
 All context and signed remote data here are *synthetic tests*, never native GO.
 """
+import copy
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,6 +105,7 @@ def test_untrusted_local_record_never_satisfies_live_backend(monkeypatch,attack)
     local=attack not in ("local_record_with_legacy_mode",
                          "legacy_without_registry")
     fixture=make(monkeypatch,local=local)
+    chosen=copy.deepcopy(fixture.identity)
     try:
         if attack=="missing_state":
             def fail():raise StateError("not-installed","no /state")
@@ -134,7 +136,7 @@ def test_untrusted_local_record_never_satisfies_live_backend(monkeypatch,attack)
         allow=(not local if attack=="wrong_mode" else local)
         with pytest.raises(op.OperationDenied):
             native.require_live_backend_bound_identity(
-                expected_registry=fixture.identity,allow_local=allow)
+                expected_registry=chosen,allow_local=allow)
     finally:
         os.close(fixture.fd)
         if attack=="changed_descriptor":os.close(fixture.context.fd)
