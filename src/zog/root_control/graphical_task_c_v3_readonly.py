@@ -55,8 +55,9 @@ def verify_installation_broker_selection(
             or storage_record.get("mode") != storage.SOURCE_MODE
             or type(storage_commit) is not dict
             or type(root_row) is not dict
-            or root_row.get("schema") !=
-                "zog-protected-task-c-installed-runtime-v3"
+            or root_row.get("schema") not in (
+                "zog-protected-task-c-installed-runtime-v3",
+                "zog-protected-task-c-installed-runtime-local-v1")
             or type(root_row.get("storage_authority")) is not dict
             or root_row["storage_authority"].get(
                 "storage_authority_sha256") != op.digest(storage_record)
