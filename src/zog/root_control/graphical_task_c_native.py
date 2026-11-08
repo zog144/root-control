@@ -43,6 +43,8 @@ CHECKPOINT_SESSION = Path("/run/credentials/zog-graphical-owner.service/checkpoi
 LEDGER = Path("/var/lib/zog-graphical-owner-ledger")
 RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v2"
 INSTALLATION_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v3"
+# Explicit optional remote Task C enrollment; never a host boot prerequisite.
+LOCAL_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-local-v1"
 STORAGE_REGISTRY = Path("/etc/zog/graphical-owner/registered-installation.json")
 REGISTRY_ISSUER_PIN = Path("/etc/zog/graphical-owner/registry-issuer-public.key")
 INSTALLER_PIN = Path("/etc/zog/graphical-owner/storage-installer-public.key")
@@ -142,7 +144,7 @@ class SSMOriginalInspector:
 
 
 def _selected_installation_storage(row, selection, registry, operator, *, now):
-    """V3 installation storage requires signed registry and anchored commit.
+    """Selected Task C installation storage requires operator approval and anchor.
 
     This is a source-side readback of already installed immutable authority.
     Actual mount UUID/PARTUUID, external S3 retention, installed wheel/RECORD,
@@ -158,7 +160,12 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
                 or st.st_mode & 0o022):
             hold()
     registry_record = strict(_read_root(STORAGE_REGISTRY, max_bytes=4096))
-    registry_pub = _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600)
+    local_mode = row.get("schema") == LOCAL_RUNTIME_SCHEMA
+    if (local_mode != (registry_record.get("schema") ==
+                       installation_storage.LOCAL_SCHEMA)):
+        hold()  # No silent downgrade or automatic signed-registry fallback.
+    registry_pub = (None if local_mode else
+                    _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600))
     installer_pub = _read_root(INSTALLER_PIN, max_bytes=32, mode=0o600)
     storage_record = strict(_read_root(STORAGE_RECORD, max_bytes=4096))
     approval = strict(_read_root(STORAGE_APPROVAL, max_bytes=8192))
@@ -200,7 +207,7 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
             anchor["anchor_identity_sha256"],
         receipt=accepted, pinned_installer_public=installer_pub,
         independently_retained_commit_sha256=anchor["commit_sha256"],
-        now=now)
+        now=now, allow_local=local_mode)
     if (proof["installation_scope_sha256"] !=
             row["storage_authority"]["installation_scope_sha256"]
             or any(registry_record[k] != row[k] for k in (
@@ -211,7 +218,7 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
         scope = installation_storage.bind_operation_to_installation(
             registry=registry_record,
             pinned_registry_public=registry_pub,
-            request=req)
+            request=req, allow_local=local_mode)
         if (scope["installation_scope_sha256"] !=
                 proof["installation_scope_sha256"]
                 or scope["operation_scope_sha256"] != selection["identity"]
@@ -229,12 +236,10 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
     ):
         if checkpoint_policy.get(key) != storage_record[installed_key]:
             hold()
-    # A static registrar signature cannot prove which STATE backend is
-    # mounted *now*. Fail before selecting any owner/SSM session if the
-    # separately pinned short-lived observation and fresh kernel descriptor
-    # readback do not agree with this exact signed registry.
+    # Reopen the current physical STATE descriptor from host-install.
+    # No registrar or observer signer is needed for direct privileged reads.
     observed = live_backend.require_live_backend_bound_identity(
-        expected_registry=registry_record)
+        expected_registry=registry_record, allow_local=local_mode)
     if (observed["registry_sha256"] != contract.digest(registry_record)
             or observed["installation_scope_sha256"] !=
                 proof["installation_scope_sha256"]):
@@ -260,11 +265,14 @@ def installed_runtime():
         "observation_public_sha256", "originals", "commands", "checkpoint",
         "ssm", "origin_evidence_sha256", "origin_issuer_public_sha256",
     }
-    installation_runtime = row.get("schema") == INSTALLATION_RUNTIME_SCHEMA
+    installation_runtime = row.get("schema") in (
+        INSTALLATION_RUNTIME_SCHEMA, LOCAL_RUNTIME_SCHEMA)
     if installation_runtime:
         expected = expected | {"storage_authority"}
     if (set(row) != expected
-            or row["schema"] not in (RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA)
+            or row["schema"] not in (
+                RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA,
+                LOCAL_RUNTIME_SCHEMA)
             or row["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or any(not contract.match(row[k], contract.H64)
                    for k in ("host_id", "installation_id", "state_volume_id"))
@@ -410,11 +418,13 @@ def installed_runtime():
         registry, protected_owner=owner,
         ssm_inspector=SSMOriginalInspector(ssm_session,
                                           instance_id=ssm_policy["instance_id"]),
-        # Every selected v3 IPC invocation rechecks the *live* backend
-        # before claims or SSM. No received mapping, "native_accepted"
-        # boolean, or signed historical file can bypass this callable.
-        backend_recheck=(live_backend.require_live_backend_bound_identity
-                         if installation_runtime else None))
+        # The local mode is a protected Task C enrollment, not local boot.
+        # Re-check actual /state before every claim/SSM or observation.
+        backend_recheck=(__import__("functools").partial(
+            live_backend.require_live_backend_bound_identity,
+            expected_registry=strict(_read_root(STORAGE_REGISTRY, max_bytes=4096)),
+            allow_local=row["schema"] == LOCAL_RUNTIME_SCHEMA)
+            if installation_runtime else None))
     return executor, row
 
 
