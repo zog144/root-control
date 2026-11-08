@@ -83,6 +83,8 @@ def test_failed_v3_backend_observation_denies_before_any_external_claim(tmp_path
 @pytest.mark.parametrize("false_proof",(
     None, True, {"native_accepted":True},
     {**proof(),"installation_scope_sha256":"sha256:"+"e"*64},
+    {**proof(),"registry_sha256":"sha256:"+"e"*64},
+    {**proof(),"backend":"opaque-caller-mode"},
     {**proof(),"ssm_authorized":True},
 ))
 def test_v3_caller_boolean_or_unbound_proof_never_sends(tmp_path,false_proof):
