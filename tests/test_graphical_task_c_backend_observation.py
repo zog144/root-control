@@ -68,9 +68,10 @@ def make(monkeypatch,*,backend="root-directory",local=False):
         }
     else:
         identity=prior["registry"]
+    marker_bytes=canonical(context.marker)
     monkeypatch.setattr(state_inspect,"inspect_live",lambda:context)
     monkeypatch.setattr(state_inspect,"read_at",
-                        lambda fd,name:canonical(context.marker))
+                        lambda fd,name:marker_bytes)
     monkeypatch.setattr(native.os,"geteuid",lambda:0)
     monkeypatch.setattr(native,"_read_root",lambda path,**kw:
         (prior["registrar"] if str(path)==native.REGISTRY_PIN else
@@ -129,7 +130,8 @@ def test_untrusted_local_record_never_satisfies_live_backend(monkeypatch,attack)
         elif attack=="wrong_mode":
             pass
         elif attack=="local_record_with_legacy_mode":
-            fixture.identity={"schema":storage.LOCAL_SCHEMA}
+            fixture.identity.clear()
+            fixture.identity.update({"schema":storage.LOCAL_SCHEMA})
         elif attack=="legacy_without_registry":
             fixture.context.bundle["bootstrap"]["registries"]=[]
             fixture.context.bundle["bootstrap"]["control_authority"]=None
