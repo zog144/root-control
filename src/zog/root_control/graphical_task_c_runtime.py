@@ -137,7 +137,7 @@ class TaskCExecutor:
             if (type(evidence) is not dict
                     or set(evidence) != {
                         "backend", "registry_sha256",
-                        "installation_scope_sha256", "mapping_sha256",
+                        "installation_scope_sha256", "native_observer_sha256",
                         "observation_sha256"}
                     or evidence["installation_scope_sha256"] !=
                        self.owner.ledger.checkpoint.scope
@@ -148,7 +148,7 @@ class TaskCExecutor:
                     or any(not contract.match(evidence[k], contract.SHA)
                            for k in ("registry_sha256",
                                      "installation_scope_sha256",
-                                     "mapping_sha256",
+                                     "native_observer_sha256",
                                      "observation_sha256"))):
                 hold()
         parsed = taskc.parse_frame(taskc.canonical(frame) + b"\n")
