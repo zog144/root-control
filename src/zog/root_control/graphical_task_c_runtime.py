@@ -18,6 +18,7 @@ from . import graphical_operation_owner_source as contract
 from . import graphical_task_c_owner as taskc
 from .graphical_native_owner import SelectedOwner, hold
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
+from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
 
 RESULT_SCHEMA = "zog-graphical-task-c-owner-observation-v2"
 RESULT_DOMAIN = b"zog-graphical-task-c-owner-observation-v2\0"
@@ -32,17 +33,23 @@ class TaskCExecutor:
     objects nor the registry can be supplied through the Unix socket.
     """
 
-    def __init__(self, registry, *, protected_owner, ssm_inspector):
+    def __init__(self, registry, *, protected_owner, ssm_inspector, backend_recheck=None):
         if (not isinstance(registry, taskc.ProtectedOriginalRegistry)
                 or not isinstance(protected_owner, SelectedOwner)
                 or not isinstance(protected_owner.signer, Ed25519PrivateKey)
                 or not isinstance(protected_owner.ledger.checkpoint,
-                                  S3AppendOnlyCheckpoint)
+                                  (S3AppendOnlyCheckpoint, S3InstallationCheckpoint))
+                or (backend_recheck is not None
+                    and not callable(backend_recheck))
+                or (isinstance(protected_owner.ledger.checkpoint,
+                               S3InstallationCheckpoint)
+                    and backend_recheck is None)
                 or not callable(getattr(ssm_inspector, "inspect", None))):
             hold()
         self.registry = registry
         self.owner = protected_owner
         self.inspector = ssm_inspector
+        self.backend_recheck = backend_recheck
         selected = self.owner.installed
         if (set(selected["approved"]) != set(registry.entries)
                 or set(selected["commands"]) != set(registry.entries)
@@ -123,6 +130,18 @@ class TaskCExecutor:
             hold()
         # A frame is a selector, not a signed grant. Re-run the strict parser
         # even for source callers; the Unix transport parses it first.
+        if self.backend_recheck is not None:
+            # A live protected backend observer is required on each v3 call
+            # even for an observe-only frame. No caller-provided flag counts.
+            evidence = self.backend_recheck()
+            if (type(evidence) is not dict
+                    or set(evidence) != {
+                        "backend", "registry_sha256",
+                        "installation_scope_sha256", "mapping_sha256",
+                        "observation_sha256"}
+                    or evidence["installation_scope_sha256"] !=
+                       self.owner.ledger.checkpoint.scope):
+                hold()
         parsed = taskc.parse_frame(taskc.canonical(frame) + b"\n")
         item = self.registry.select(parsed)
         request = item["owner_request"]
