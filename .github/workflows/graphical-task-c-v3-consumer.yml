@@ -9,6 +9,7 @@ on:
       - src/zog/root_control/graphical_task_c_native.py
       - src/zog/root_control/graphical_task_c_v3_readonly.py
       - src/zog/root_control/graphical_task_c_trust_authority.py
+      - tests/test_graphical_task_c_v3_backend_send_fence.py
       - tests/test_graphical_task_c_backend_observation.py
       - tests/test_graphical_task_c_v3_readonly.py
       - tests/test_graphical_task_c_v3_native_broker.py
@@ -51,6 +52,7 @@ jobs:
           test "$(git -C companions/host-install rev-parse HEAD)" = 24376bd784b7efcc1e393188f792c41685e75f79
           python -m pytest -q -rs \
             tests/test_graphical_task_c_backend_observation.py \
+            tests/test_graphical_task_c_v3_backend_send_fence.py \
             tests/test_graphical_task_c_v3_readonly.py \
             tests/test_graphical_task_c_v3_native_broker.py \
             tests/test_graphical_task_c_trust_authority.py \
