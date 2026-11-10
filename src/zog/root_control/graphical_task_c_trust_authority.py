@@ -417,7 +417,10 @@ def installed_readonly_authority():
             root_row, selection, registry, operator_key, now=int(time.time()))
         # The root selector has now checked this fresh protected backend
         # against the signed registry. Recheck on each broker IPC as well.
-        _, commit = _checked_json(owner_native.STORAGE_COMMIT, maximum=4096)
+        _, commit = _checked_json(
+            owner_native.selected_storage_paths(
+                root_row["schema"] in owner_native.ROOT_BACKED_SCHEMAS
+            )["commit"], maximum=4096)
         readonly_role, scope = v3_readonly.verify_installation_broker_selection(
             storage_record=record, storage_commit=commit, root_row=root_row,
             broker_config=config, registry=registry, evidence=evidence,
