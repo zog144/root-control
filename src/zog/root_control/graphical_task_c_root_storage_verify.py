@@ -15,6 +15,7 @@ from .graphical_native_owner import hold, strict
 from .graphical_owner_service import _read_root
 from . import graphical_task_c_native as native
 from . import graphical_task_c_root_backed_storage as root
+from . import graphical_operation_owner_source as operation
 
 
 def inspect_disabled_local_readiness():
@@ -49,12 +50,8 @@ def inspect_disabled_local_readiness():
                 "schema":root.SELECTION_SCHEMA,
                 "registry_sha256":result["registry_sha256"],
                 "installation_scope_sha256":result["installation_scope_sha256"],
-                "storage_authority_sha256":__import__(
-                    "zog.root_control.graphical_operation_owner_source",
-                    fromlist=["digest"]).digest(authority),
-                "storage_commit_sha256":__import__(
-                    "zog.root_control.graphical_operation_owner_source",
-                    fromlist=["digest"]).digest(commit)}):
+                "storage_authority_sha256":operation.digest(authority),
+                "storage_commit_sha256":operation.digest(commit)}):
         hold()
     # Check the live /state reader separately. No new signer or registry
     # migration is needed; this does not create protected SSM authority.
