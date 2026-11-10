@@ -49,15 +49,27 @@ def verify_installation_broker_selection(
     from . import graphical_task_c_trust_authority as trust
     from zog.host_deploy.gateway import graphics_owner_trust_history as wire
 
+    from . import graphical_task_c_root_backed_storage as root_backed
+    local_root_mode = (type(root_row) is dict and root_row.get("schema") in (
+        "zog-protected-task-c-installed-runtime-root-backed-v4",
+        "zog-protected-task-c-installed-runtime-local-root-backed-v4"))
+    required_fields = (root_backed.AUTHORITY_KEYS if local_root_mode
+                       else storage.AUTHORITY_KEYS)
+    required_schema = (root_backed.AUTHORITY_SCHEMA if local_root_mode
+                       else storage.AUTHORITY_SCHEMA)
+    required_mode = (root_backed.MODE if local_root_mode
+                     else storage.SOURCE_MODE)
     if (type(storage_record) is not dict
-            or set(storage_record) != storage.AUTHORITY_KEYS
-            or storage_record.get("schema") != storage.AUTHORITY_SCHEMA
-            or storage_record.get("mode") != storage.SOURCE_MODE
+            or set(storage_record) != required_fields
+            or storage_record.get("schema") != required_schema
+            or storage_record.get("mode") != required_mode
             or type(storage_commit) is not dict
             or type(root_row) is not dict
             or root_row.get("schema") not in (
                 "zog-protected-task-c-installed-runtime-v3",
-                "zog-protected-task-c-installed-runtime-local-v1")
+                "zog-protected-task-c-installed-runtime-local-v1",
+                "zog-protected-task-c-installed-runtime-root-backed-v4",
+                "zog-protected-task-c-installed-runtime-local-root-backed-v4")
             or type(root_row.get("storage_authority")) is not dict
             or root_row["storage_authority"].get(
                 "storage_authority_sha256") != op.digest(storage_record)
