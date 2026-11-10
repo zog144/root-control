@@ -26,10 +26,11 @@ def inspect_disabled_local_readiness():
         hold()
     local = runtime["schema"] == native.ROOT_BACKED_LOCAL_RUNTIME_SCHEMA
     selected = strict(_read_root(native.STORAGE_REGISTRY, max_bytes=4096))
-    authority = strict(_read_root(native.STORAGE_RECORD, max_bytes=4096))
-    approval = strict(_read_root(native.STORAGE_APPROVAL, max_bytes=8192))
-    commit = strict(_read_root(native.STORAGE_COMMIT, max_bytes=4096))
-    anchor = strict(_read_root(native.STORAGE_ANCHOR, max_bytes=4096))
+    paths = native.selected_storage_paths(True)
+    authority = strict(_read_root(paths["record"], max_bytes=4096))
+    approval = strict(_read_root(paths["approval"], max_bytes=8192))
+    commit = strict(_read_root(paths["commit"], max_bytes=4096))
+    anchor = strict(_read_root(paths["anchor"], max_bytes=4096))
     operator = _read_root(native.OPERATOR_PIN, max_bytes=32, mode=0o600)
     installer = _read_root(native.INSTALLER_PIN, max_bytes=32, mode=0o600)
     registry_public = (None if local else
