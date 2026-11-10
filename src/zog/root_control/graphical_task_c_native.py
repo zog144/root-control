@@ -62,6 +62,20 @@ STORAGE_COMMIT = LEDGER / "installation-storage-commit.json"
 STORAGE_APPROVAL = Path("/var/lib/zog-graphical-owner-authority/installation-storage-approval.json")
 STORAGE_ANCHOR = Path("/var/lib/zog-graphical-owner-authority/installation-storage-anchor.json")
 
+def selected_storage_paths(root_mode):
+    """Fixed installer-selected paths. V3 legacy and V4 root dirs NEVER alias."""
+    if type(root_mode) is not bool:
+        hold()
+    ledger = Path(root_backed.LEDGER) if root_mode else LEDGER
+    directory = Path(root_backed.AUTHORITY) if root_mode else STORAGE_ANCHOR.parent
+    return {
+        "ledger": ledger, "authority": directory,
+        "record": ledger / STORAGE_RECORD.name,
+        "commit": ledger / STORAGE_COMMIT.name,
+        "approval": directory / STORAGE_APPROVAL.name,
+        "anchor": directory / STORAGE_ANCHOR.name,
+    }
+
 S3_TIMEOUT = Config(connect_timeout=5, read_timeout=15,
                     retries={"total_max_attempts": 1})
 SSM_TIMEOUT = Config(connect_timeout=5, read_timeout=15,
@@ -161,13 +175,14 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
     Native Work must still attest IAM/S3 retention and actual filesystem.
     """
     root_mode = row.get("schema") in ROOT_BACKED_SCHEMAS
-    external = STORAGE_ANCHOR.parent
+    paths = selected_storage_paths(root_mode)
+    selected_ledger, external = paths["ledger"], paths["authority"]
     if not root_mode:
         # Preserve exactly the historically signed two-mount disposition.
-        if (not LEDGER.is_mount() or not external.is_mount()
-                or os.stat(LEDGER).st_dev == os.stat(external).st_dev):
+        if (not selected_ledger.is_mount() or not external.is_mount()
+                or os.stat(selected_ledger).st_dev == os.stat(external).st_dev):
             hold()
-        for mount in (LEDGER, external):
+        for mount in (selected_ledger, external):
             st = os.lstat(mount)
             if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0
                     or st.st_mode & 0o022):
@@ -176,7 +191,10 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
         # No mountpoint or distinct-device requirement in v4. Check exact
         # protected directory identity against the installer-signed v2
         # commitment *after* opening the protected installed authority.
-        if LEDGER.is_mount() or external.is_mount():
+        if selected_ledger.is_mount() or external.is_mount():
+            hold()
+        if (os.stat(selected_ledger).st_dev != os.stat("/").st_dev
+                or os.stat(external).st_dev != os.stat("/").st_dev):
             hold()
     registry_record = strict(_read_root(STORAGE_REGISTRY, max_bytes=4096))
     local_mode = row.get("schema") in (
@@ -187,10 +205,10 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
     registry_pub = (None if local_mode else
                     _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600))
     installer_pub = _read_root(INSTALLER_PIN, max_bytes=32, mode=0o600)
-    storage_record = strict(_read_root(STORAGE_RECORD, max_bytes=4096))
-    approval = strict(_read_root(STORAGE_APPROVAL, max_bytes=8192))
-    accepted = strict(_read_root(STORAGE_COMMIT, max_bytes=4096))
-    anchor = strict(_read_root(STORAGE_ANCHOR, max_bytes=4096))
+    storage_record = strict(_read_root(paths["record"], max_bytes=4096))
+    approval = strict(_read_root(paths["approval"], max_bytes=8192))
+    accepted = strict(_read_root(paths["commit"], max_bytes=4096))
+    anchor = strict(_read_root(paths["anchor"], max_bytes=4096))
     if root_mode:
         if (type(row.get("storage_authority")) is not dict
                 or set(row["storage_authority"]) != root_backed.SELECTION_FIELDS
@@ -314,6 +332,7 @@ def installed_runtime():
     }
     installation_runtime = row.get("schema") in INSTALLATION_SCHEMAS
     root_mode = row.get("schema") in ROOT_BACKED_SCHEMAS
+    selected_ledger = selected_storage_paths(root_mode)["ledger"]
     if installation_runtime:
         expected = expected | {"storage_authority"}
     if (set(row) != expected
@@ -333,7 +352,7 @@ def installed_runtime():
                    for k in ("gateway_executable_sha256", "operator_key_sha256",
                              "observation_public_sha256", "origin_evidence_sha256",
                              "origin_issuer_public_sha256"))
-            or row["ledger_directory"] != str(LEDGER)
+            or row["ledger_directory"] != str(selected_ledger)
             or type(row["gateway_state_directory"]) is not str
             or not row["gateway_state_directory"].startswith("/")):
         hold()
@@ -342,17 +361,17 @@ def installed_runtime():
         # The selected protected owner and gateway state are ordinary local
         # directories on the existing root filesystem. They remain distinct
         # paths, but device separation provides no SSM authorization.
-        if (LEDGER.is_mount() or gateway_mount.is_mount()
-                or os.stat(LEDGER).st_dev != os.stat("/").st_dev
+        if (selected_ledger.is_mount() or gateway_mount.is_mount()
+                or os.stat(selected_ledger).st_dev != os.stat("/").st_dev
                 or os.stat(gateway_mount).st_dev != os.stat("/").st_dev
-                or gateway_mount in (LEDGER, Path(root_backed.AUTHORITY))
-                or LEDGER in gateway_mount.parents
+                or gateway_mount in (selected_ledger, Path(root_backed.AUTHORITY))
+                or selected_ledger in gateway_mount.parents
                 or Path(root_backed.AUTHORITY) in gateway_mount.parents):
             hold()
-    elif (not LEDGER.is_mount() or not gateway_mount.is_mount()
-            or os.stat(LEDGER).st_dev == os.stat(gateway_mount).st_dev):
+    elif (not selected_ledger.is_mount() or not gateway_mount.is_mount()
+            or os.stat(selected_ledger).st_dev == os.stat(gateway_mount).st_dev):
         hold()
-    for path in (LEDGER, gateway_mount):
+    for path in (selected_ledger, gateway_mount):
         info = os.lstat(path)
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                 or info.st_mode & 0o022):
@@ -467,7 +486,7 @@ def installed_runtime():
     # Check genesis/current history BEFORE admitting a socket, never create it.
     if checkpoint.inspect_current(selection["identity"])["revoked"]:
         hold()
-    ledger = ProtectedLedger(LEDGER, owner_uid=0, external_checkpoint=checkpoint)
+    ledger = ProtectedLedger(selected_ledger, owner_uid=0, external_checkpoint=checkpoint)
     sender = FixedSSMSessionSender(
         {"instance_id": ssm_policy["instance_id"]}, ssm_session)
     owner = SelectedOwner(ledger, installed=selection,
