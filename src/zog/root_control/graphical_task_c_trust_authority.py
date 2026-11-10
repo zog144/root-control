@@ -37,6 +37,7 @@ from . import graphical_installation_storage_authority as installation_storage
 from . import graphical_task_c_v3_readonly as v3_readonly
 from . import graphical_task_c_native as owner_native
 from . import graphical_task_c_backend_observation as live_backend
+from . import graphical_task_c_root_backed_storage as root_backed
 
 OWNER_SOURCE = "5ad7d5ed72d1b72edc767a658de28506791a74d4"
 BROKER_SOURCE = "0ea6d583fa441527f45dabbbf542731560644a72"
@@ -313,6 +314,7 @@ ROOT_V3_SOURCES = (
     "zog.root_control.graphical_task_c_native",
     "zog.root_control.graphical_task_c_runtime",
     "zog.root_control.graphical_task_c_backend_observation",
+    "zog.root_control.graphical_task_c_root_backed_storage",
     "zog.root_control.graphical_installation_storage_authority",
     "zog.root_control.graphical_installation_storage_commit",
     "zog.root_control.graphical_s3_installation_checkpoint",
@@ -345,8 +347,7 @@ def installed_readonly_authority():
         hold()
     _, config = _checked_json(BROKER_CONFIG, maximum=8192)
     _, root_row = _checked_json(OWNER_REGISTRY)
-    selected_v3 = root_row.get("schema") in (
-        owner_native.INSTALLATION_RUNTIME_SCHEMA, owner_native.LOCAL_RUNTIME_SCHEMA)
+    selected_v3 = root_row.get("schema") in owner_native.INSTALLATION_SCHEMAS
     required_config_schema = (v3_readonly.BROKER_CONFIG_SCHEMA if selected_v3
                               else "zog-task-c-readonly-broker-native-selection-v1")
     expected_config = (
@@ -479,6 +480,8 @@ def installed_readonly_authority():
             live_backend.require_live_backend_bound_identity,
             expected_registry=strict(_read_root(
                     owner_native.STORAGE_REGISTRY, max_bytes=4096)),
-            allow_local=root_row["schema"] == owner_native.LOCAL_RUNTIME_SCHEMA)
+            allow_local=root_row["schema"] in (
+                owner_native.LOCAL_RUNTIME_SCHEMA,
+                owner_native.ROOT_BACKED_LOCAL_RUNTIME_SCHEMA))
             if selected_v3 else None),
     )
