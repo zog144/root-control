@@ -77,7 +77,8 @@ def setup():
         "commit_sha256":op.digest(receipt)}
     return dict(old=old,authority=approved,approval=approval,
                 receipt=receipt,anchor=anchor,operator=pub(operator),
-                installer=pub(installer))
+                installer=pub(installer),
+                installer_private=installer,operator_private=operator)
 
 
 def verify(row,*,verify_directories=False):
