@@ -6,6 +6,9 @@ on:
     paths:
       - src/zog/root_control/graphical_installation_storage_authority.py
       - src/zog/root_control/graphical_installation_storage_commit.py
+      - src/zog/root_control/graphical_task_c_root_backed_storage.py
+      - tests/test_graphical_task_c_root_backed_storage.py
+      - tests/test_graphical_s3_installation_checkpoint.py
       - src/zog/root_control/graphical_task_c_backend_observation.py
       - src/zog/root_control/graphical_task_c_runtime.py
       - src/zog/root_control/graphical_task_c_native.py
@@ -54,6 +57,7 @@ jobs:
           test "$(git -C companions/host-deploy rev-parse HEAD)" = 5a36712b878fb7c43a20b017315a96a02f66b298
           test "$(git -C companions/host-install rev-parse HEAD)" = b08f074727e21926cb6460766b53f0d0696855e5
           python -m pytest -q -rs \
+            tests/test_graphical_task_c_root_backed_storage.py \
             tests/test_graphical_task_c_local_identity.py \
             tests/test_graphical_task_c_backend_observation.py \
             tests/test_graphical_task_c_v3_backend_send_fence.py \
