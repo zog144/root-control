@@ -315,6 +315,7 @@ ROOT_V3_SOURCES = (
     "zog.root_control.graphical_task_c_runtime",
     "zog.root_control.graphical_task_c_backend_observation",
     "zog.root_control.graphical_task_c_root_backed_storage",
+    "zog.root_control.graphical_task_c_root_storage_verify",
     "zog.root_control.graphical_installation_storage_authority",
     "zog.root_control.graphical_installation_storage_commit",
     "zog.root_control.graphical_s3_installation_checkpoint",
