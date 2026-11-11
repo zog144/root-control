@@ -6,6 +6,7 @@ ledger, peer identity, signer or separately-issued short-lived AWS credentials
 must deny. This module does not authorize starting the native owner unit.
 """
 from __future__ import annotations
+from functools import partial
 
 import base64
 import hashlib
@@ -29,6 +30,8 @@ from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
 from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
 from .graphical_installation_storage_commit import verify_installed_storage_commit
 from . import graphical_installation_storage_authority as installation_storage
+from . import graphical_task_c_root_backed_storage as root_backed
+from . import graphical_task_c_backend_observation as live_backend
 from .graphical_task_c_runtime import TaskCExecutor
 from .graphical_task_c_origin import verify_installed_evidence
 
@@ -42,6 +45,15 @@ CHECKPOINT_SESSION = Path("/run/credentials/zog-graphical-owner.service/checkpoi
 LEDGER = Path("/var/lib/zog-graphical-owner-ledger")
 RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v2"
 INSTALLATION_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-v3"
+# Explicit optional remote Task C enrollment; never a host boot prerequisite.
+LOCAL_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-local-v1"
+# V4 is explicitly selected; old signed two-filesystem v3 cannot downgrade.
+ROOT_BACKED_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-root-backed-v4"
+ROOT_BACKED_LOCAL_RUNTIME_SCHEMA = "zog-protected-task-c-installed-runtime-local-root-backed-v4"
+ROOT_BACKED_SCHEMAS = frozenset((
+    ROOT_BACKED_RUNTIME_SCHEMA, ROOT_BACKED_LOCAL_RUNTIME_SCHEMA))
+INSTALLATION_SCHEMAS = frozenset((
+    INSTALLATION_RUNTIME_SCHEMA, LOCAL_RUNTIME_SCHEMA)) | ROOT_BACKED_SCHEMAS
 STORAGE_REGISTRY = Path("/etc/zog/graphical-owner/registered-installation.json")
 REGISTRY_ISSUER_PIN = Path("/etc/zog/graphical-owner/registry-issuer-public.key")
 INSTALLER_PIN = Path("/etc/zog/graphical-owner/storage-installer-public.key")
@@ -49,6 +61,20 @@ STORAGE_RECORD = LEDGER / "installation-storage-authority.json"
 STORAGE_COMMIT = LEDGER / "installation-storage-commit.json"
 STORAGE_APPROVAL = Path("/var/lib/zog-graphical-owner-authority/installation-storage-approval.json")
 STORAGE_ANCHOR = Path("/var/lib/zog-graphical-owner-authority/installation-storage-anchor.json")
+
+def selected_storage_paths(root_mode):
+    """Fixed installer-selected paths. V3 legacy and V4 root dirs NEVER alias."""
+    if type(root_mode) is not bool:
+        hold()
+    ledger = Path(root_backed.LEDGER) if root_mode else LEDGER
+    directory = Path(root_backed.AUTHORITY) if root_mode else STORAGE_ANCHOR.parent
+    return {
+        "ledger": ledger, "authority": directory,
+        "record": ledger / STORAGE_RECORD.name,
+        "commit": ledger / STORAGE_COMMIT.name,
+        "approval": directory / STORAGE_APPROVAL.name,
+        "anchor": directory / STORAGE_ANCHOR.name,
+    }
 
 S3_TIMEOUT = Config(connect_timeout=5, read_timeout=15,
                     retries={"total_max_attempts": 1})
@@ -141,65 +167,112 @@ class SSMOriginalInspector:
 
 
 def _selected_installation_storage(row, selection, registry, operator, *, now):
-    """V3 installation storage requires signed registry and anchored commit.
+    """Selected Task C installation storage requires operator approval and anchor.
 
     This is a source-side readback of already installed immutable authority.
-    Actual mount UUID/PARTUUID, external S3 retention, installed wheel/RECORD,
-    and service credentials remain independent native Work acceptance gates.
+    External S3 serializes all claims. Local directories cannot restore send
+    eligibility; physical EBS mounts are needed ONLY for signed legacy v3.
+    Native Work must still attest IAM/S3 retention and actual filesystem.
     """
-    external = STORAGE_ANCHOR.parent
-    if (not LEDGER.is_mount() or not external.is_mount()
-            or os.stat(LEDGER).st_dev == os.stat(external).st_dev):
-        hold()
-    for mount in (LEDGER, external):
-        st = os.lstat(mount)
-        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0
-                or st.st_mode & 0o022):
+    root_mode = row.get("schema") in ROOT_BACKED_SCHEMAS
+    paths = selected_storage_paths(root_mode)
+    selected_ledger, external = paths["ledger"], paths["authority"]
+    if not root_mode:
+        # Preserve exactly the historically signed two-mount disposition.
+        if (not selected_ledger.is_mount() or not external.is_mount()
+                or os.stat(selected_ledger).st_dev == os.stat(external).st_dev):
+            hold()
+        for mount in (selected_ledger, external):
+            st = os.lstat(mount)
+            if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0
+                    or st.st_mode & 0o022):
+                hold()
+    else:
+        # No mountpoint or distinct-device requirement in v4. Check exact
+        # protected directory identity against the installer-signed v2
+        # commitment *after* opening the protected installed authority.
+        if selected_ledger.is_mount() or external.is_mount():
+            hold()
+        if (os.stat(selected_ledger).st_dev != os.stat("/").st_dev
+                or os.stat(external).st_dev != os.stat("/").st_dev):
             hold()
     registry_record = strict(_read_root(STORAGE_REGISTRY, max_bytes=4096))
-    registry_pub = _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600)
+    local_mode = row.get("schema") in (
+        LOCAL_RUNTIME_SCHEMA, ROOT_BACKED_LOCAL_RUNTIME_SCHEMA)
+    if (local_mode != (registry_record.get("schema") ==
+                       installation_storage.LOCAL_SCHEMA)):
+        hold()  # No silent downgrade or automatic signed-registry fallback.
+    registry_pub = (None if local_mode else
+                    _read_root(REGISTRY_ISSUER_PIN, max_bytes=32, mode=0o600))
     installer_pub = _read_root(INSTALLER_PIN, max_bytes=32, mode=0o600)
-    storage_record = strict(_read_root(STORAGE_RECORD, max_bytes=4096))
-    approval = strict(_read_root(STORAGE_APPROVAL, max_bytes=8192))
-    accepted = strict(_read_root(STORAGE_COMMIT, max_bytes=4096))
-    anchor = strict(_read_root(STORAGE_ANCHOR, max_bytes=4096))
-    if (type(anchor) is not dict
-            or set(anchor) != {
-                "schema", "registry_sha256", "installation_scope_sha256",
-                "anchor_identity_sha256", "commit_sha256",
-                "ledger_fs_uuid", "authority_fs_uuid", "state_fs_uuid"}
-            or anchor["schema"] !=
-                "zog-task-c-installation-storage-external-anchor-v1"
-            or any(anchor[k] != accepted[k] for k in (
-                "registry_sha256", "installation_scope_sha256",
-                "anchor_identity_sha256", "ledger_fs_uuid",
-                "authority_fs_uuid", "state_fs_uuid"))
-            or type(row.get("storage_authority")) is not dict
-            or set(row["storage_authority"]) != {
-                "schema", "registry_sha256", "installation_scope_sha256",
-                "storage_authority_sha256", "storage_commit_sha256"}
-            or row["storage_authority"]["schema"] !=
-                "zog-task-c-installed-storage-selection-v1"
-            or row["storage_authority"]["registry_sha256"] !=
-                anchor["registry_sha256"]
-            or row["storage_authority"]["installation_scope_sha256"] !=
-                anchor["installation_scope_sha256"]
-            or row["storage_authority"]["storage_authority_sha256"] !=
-                contract.digest(storage_record)
-            or row["storage_authority"]["storage_commit_sha256"] !=
-                contract.digest(accepted)):
-        hold()
-    proof = verify_installed_storage_commit(
-        registered_installation=registry_record,
-        pinned_registry_public=registry_pub,
-        storage_authority=storage_record,
-        signed_storage_approval=approval,
-        pinned_operator_public=operator,
-        independently_retained_anchor_sha256=
-            anchor["anchor_identity_sha256"],
-        receipt=accepted, pinned_installer_public=installer_pub,
-        independently_retained_commit_sha256=anchor["commit_sha256"],
-        now=now)
+    storage_record = strict(_read_root(paths["record"], max_bytes=4096))
+    approval = strict(_read_root(paths["approval"], max_bytes=8192))
+    accepted = strict(_read_root(paths["commit"], max_bytes=4096))
+    anchor = strict(_read_root(paths["anchor"], max_bytes=4096))
+    if root_mode:
+        if (type(row.get("storage_authority")) is not dict
+                or set(row["storage_authority"]) != root_backed.SELECTION_FIELDS
+                or row["storage_authority"].get("schema") !=
+                    root_backed.SELECTION_SCHEMA):
+            hold()
+        root_backed.verify_root_backed_anchor(
+            anchor, accepted, storage_record)
+        if any(row["storage_authority"].get(k) != expected for k, expected in (
+            ("registry_sha256", contract.digest(registry_record)),
+            ("installation_scope_sha256",
+             storage_record["installation_scope_sha256"]),
+            ("storage_authority_sha256", contract.digest(storage_record)),
+            ("storage_commit_sha256", contract.digest(accepted)))):
+            hold()
+        proof = root_backed.verify_root_backed_commit(
+            registry=registry_record,
+            pinned_registry_public=registry_pub,
+            authority=storage_record,
+            signed_storage_approval=approval,
+            pinned_operator_public=operator,
+            independently_retained_anchor_sha256=
+                anchor["anchor_identity_sha256"],
+            receipt=accepted, pinned_installer_public=installer_pub,
+            independently_retained_commit_sha256=anchor["commit_sha256"],
+            now=now, allow_local=local_mode, verify_directories=True)
+    else:
+        if (type(anchor) is not dict
+                or set(anchor) != {
+                    "schema", "registry_sha256", "installation_scope_sha256",
+                    "anchor_identity_sha256", "commit_sha256",
+                    "ledger_fs_uuid", "authority_fs_uuid", "state_fs_uuid"}
+                or anchor["schema"] !=
+                    "zog-task-c-installation-storage-external-anchor-v1"
+                or any(anchor[k] != accepted[k] for k in (
+                    "registry_sha256", "installation_scope_sha256",
+                    "anchor_identity_sha256", "ledger_fs_uuid",
+                    "authority_fs_uuid", "state_fs_uuid"))
+                or type(row.get("storage_authority")) is not dict
+                or set(row["storage_authority"]) != {
+                    "schema", "registry_sha256", "installation_scope_sha256",
+                    "storage_authority_sha256", "storage_commit_sha256"}
+                or row["storage_authority"]["schema"] !=
+                    "zog-task-c-installed-storage-selection-v1"
+                or row["storage_authority"]["registry_sha256"] !=
+                    anchor["registry_sha256"]
+                or row["storage_authority"]["installation_scope_sha256"] !=
+                    anchor["installation_scope_sha256"]
+                or row["storage_authority"]["storage_authority_sha256"] !=
+                    contract.digest(storage_record)
+                or row["storage_authority"]["storage_commit_sha256"] !=
+                    contract.digest(accepted)):
+            hold()
+        proof = verify_installed_storage_commit(
+            registered_installation=registry_record,
+            pinned_registry_public=registry_pub,
+            storage_authority=storage_record,
+            signed_storage_approval=approval,
+            pinned_operator_public=operator,
+            independently_retained_anchor_sha256=
+                anchor["anchor_identity_sha256"],
+            receipt=accepted, pinned_installer_public=installer_pub,
+            independently_retained_commit_sha256=anchor["commit_sha256"],
+            now=now, allow_local=local_mode)
     if (proof["installation_scope_sha256"] !=
             row["storage_authority"]["installation_scope_sha256"]
             or any(registry_record[k] != row[k] for k in (
@@ -210,7 +283,7 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
         scope = installation_storage.bind_operation_to_installation(
             registry=registry_record,
             pinned_registry_public=registry_pub,
-            request=req)
+            request=req, allow_local=local_mode)
         if (scope["installation_scope_sha256"] !=
                 proof["installation_scope_sha256"]
                 or scope["operation_scope_sha256"] != selection["identity"]
@@ -228,6 +301,14 @@ def _selected_installation_storage(row, selection, registry, operator, *, now):
     ):
         if checkpoint_policy.get(key) != storage_record[installed_key]:
             hold()
+    # Reopen the current physical STATE descriptor from host-install.
+    # No registrar or observer signer is needed for direct privileged reads.
+    observed = live_backend.require_live_backend_bound_identity(
+        expected_registry=registry_record, allow_local=local_mode)
+    if (observed["registry_sha256"] != contract.digest(registry_record)
+            or observed["installation_scope_sha256"] !=
+                proof["installation_scope_sha256"]):
+        hold()
     # A signed and independently anchored installation commitment is
     # persistent after its short-lived provisioning grant expires; this does
     # not make it an operation grant or assert current native service GO.
@@ -249,11 +330,16 @@ def installed_runtime():
         "observation_public_sha256", "originals", "commands", "checkpoint",
         "ssm", "origin_evidence_sha256", "origin_issuer_public_sha256",
     }
-    installation_runtime = row.get("schema") == INSTALLATION_RUNTIME_SCHEMA
+    installation_runtime = row.get("schema") in INSTALLATION_SCHEMAS
+    root_mode = row.get("schema") in ROOT_BACKED_SCHEMAS
+    selected_ledger = selected_storage_paths(root_mode)["ledger"]
     if installation_runtime:
         expected = expected | {"storage_authority"}
     if (set(row) != expected
-            or row["schema"] not in (RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA)
+            or row["schema"] not in (
+                RUNTIME_SCHEMA, INSTALLATION_RUNTIME_SCHEMA,
+                LOCAL_RUNTIME_SCHEMA, ROOT_BACKED_RUNTIME_SCHEMA,
+                ROOT_BACKED_LOCAL_RUNTIME_SCHEMA)
             or row["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or any(not contract.match(row[k], contract.H64)
                    for k in ("host_id", "installation_id", "state_volume_id"))
@@ -266,15 +352,26 @@ def installed_runtime():
                    for k in ("gateway_executable_sha256", "operator_key_sha256",
                              "observation_public_sha256", "origin_evidence_sha256",
                              "origin_issuer_public_sha256"))
-            or row["ledger_directory"] != str(LEDGER)
+            or row["ledger_directory"] != str(selected_ledger)
             or type(row["gateway_state_directory"]) is not str
             or not row["gateway_state_directory"].startswith("/")):
         hold()
     gateway_mount = Path(row["gateway_state_directory"])
-    if (not LEDGER.is_mount() or not gateway_mount.is_mount()
-            or os.stat(LEDGER).st_dev == os.stat(gateway_mount).st_dev):
+    if root_mode:
+        # The selected protected owner and gateway state are ordinary local
+        # directories on the existing root filesystem. They remain distinct
+        # paths, but device separation provides no SSM authorization.
+        if (selected_ledger.is_mount() or gateway_mount.is_mount()
+                or os.stat(selected_ledger).st_dev != os.stat("/").st_dev
+                or os.stat(gateway_mount).st_dev != os.stat("/").st_dev
+                or gateway_mount in (selected_ledger, Path(root_backed.AUTHORITY))
+                or selected_ledger in gateway_mount.parents
+                or Path(root_backed.AUTHORITY) in gateway_mount.parents):
+            hold()
+    elif (not selected_ledger.is_mount() or not gateway_mount.is_mount()
+            or os.stat(selected_ledger).st_dev == os.stat(gateway_mount).st_dev):
         hold()
-    for path in (LEDGER, gateway_mount):
+    for path in (selected_ledger, gateway_mount):
         info = os.lstat(path)
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                 or info.st_mode & 0o022):
@@ -354,6 +451,11 @@ def installed_runtime():
             or not ROLE.fullmatch(ssm_policy["role_arn"])):
         hold()
 
+    if installation_runtime:
+        # Authenticate the selected physical STATE backend/registry before
+        # even opening privileged checkpoint-writer or SSM sessions.
+        stable_scope, storage_record = _selected_installation_storage(
+            row, selection, registry, operator, now=int(time.time()))
     checkpoint_session, checkpoint_access = _session(
         CHECKPOINT_SESSION, account=checkpoint_policy["account_id"],
         region=checkpoint_policy["region"], role_arn=checkpoint_policy["role_arn"])
@@ -363,8 +465,6 @@ def installed_runtime():
     if checkpoint_access == ssm_access:
         hold()
     if installation_runtime:
-        stable_scope, storage_record = _selected_installation_storage(
-            row, selection, registry, operator, now=int(time.time()))
         checkpoint = S3InstallationCheckpoint(
             checkpoint_session.client("s3", config=S3_TIMEOUT),
             bucket=checkpoint_policy["bucket"],
@@ -386,7 +486,7 @@ def installed_runtime():
     # Check genesis/current history BEFORE admitting a socket, never create it.
     if checkpoint.inspect_current(selection["identity"])["revoked"]:
         hold()
-    ledger = ProtectedLedger(LEDGER, owner_uid=0, external_checkpoint=checkpoint)
+    ledger = ProtectedLedger(selected_ledger, owner_uid=0, external_checkpoint=checkpoint)
     sender = FixedSSMSessionSender(
         {"instance_id": ssm_policy["instance_id"]}, ssm_session)
     owner = SelectedOwner(ledger, installed=selection,
@@ -395,7 +495,15 @@ def installed_runtime():
     executor = TaskCExecutor(
         registry, protected_owner=owner,
         ssm_inspector=SSMOriginalInspector(ssm_session,
-                                          instance_id=ssm_policy["instance_id"]))
+                                          instance_id=ssm_policy["instance_id"]),
+        # The local mode is a protected Task C enrollment, not local boot.
+        # Re-check actual /state before every claim/SSM or observation.
+        backend_recheck=(partial(
+            live_backend.require_live_backend_bound_identity,
+            expected_registry=strict(_read_root(STORAGE_REGISTRY, max_bytes=4096)),
+            allow_local=row["schema"] in (
+                LOCAL_RUNTIME_SCHEMA, ROOT_BACKED_LOCAL_RUNTIME_SCHEMA))
+            if installation_runtime else None))
     return executor, row
 
 

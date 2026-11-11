@@ -6,6 +6,7 @@ operator-signed purpose approval, original issuer evidence and root-installed
 source/credential bytes can select a broker. Source review is not native GO.
 """
 from __future__ import annotations
+from functools import partial
 
 import base64
 import hashlib
@@ -31,6 +32,12 @@ from .graphical_native_owner import hold, strict
 from .graphical_owner_service import _read_root
 from .graphical_task_c_native import _session
 from .graphical_s3_checkpoint import S3AppendOnlyCheckpoint
+from .graphical_s3_installation_checkpoint import S3InstallationCheckpoint
+from . import graphical_installation_storage_authority as installation_storage
+from . import graphical_task_c_v3_readonly as v3_readonly
+from . import graphical_task_c_native as owner_native
+from . import graphical_task_c_backend_observation as live_backend
+from . import graphical_task_c_root_backed_storage as root_backed
 
 OWNER_SOURCE = "5ad7d5ed72d1b72edc767a658de28506791a74d4"
 BROKER_SOURCE = "0ea6d583fa441527f45dabbbf542731560644a72"
@@ -301,6 +308,33 @@ def _installed_gateway_source_digest():
     return digest_bytes(bytes(raw))
 
 
+ROOT_V3_SOURCES = (
+    "zog.root_control.graphical_task_c_trust_authority",
+    "zog.root_control.graphical_task_c_v3_readonly",
+    "zog.root_control.graphical_task_c_native",
+    "zog.root_control.graphical_task_c_runtime",
+    "zog.root_control.graphical_task_c_backend_observation",
+    "zog.root_control.graphical_task_c_root_backed_storage",
+    "zog.root_control.graphical_task_c_root_storage_verify",
+    "zog.root_control.graphical_installation_storage_authority",
+    "zog.root_control.graphical_installation_storage_commit",
+    "zog.root_control.graphical_s3_installation_checkpoint",
+    "zog.root_control.graphical_task_c_owner",
+)
+
+
+def _installed_v3_root_source_digest():
+    """Exact installed readable module bytes, separately pinned by installer."""
+    buf = bytearray()
+    for name in sorted(ROOT_V3_SOURCES):
+        spec = importlib.util.find_spec(name)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+            hold()
+        raw = _read_root(Path(spec.origin), max_bytes=131072, mode=0o644)
+        buf.extend(name.encode("ascii") + b"\0" + raw + b"\0")
+    return digest_bytes(bytes(buf))
+
+
 def installed_readonly_authority():
     """Read-only constructor for the *separately disabled* trust broker.
 
@@ -313,13 +347,26 @@ def installed_readonly_authority():
     if os.geteuid() != 0 or sys.argv != [sys.argv[0]]:
         hold()
     _, config = _checked_json(BROKER_CONFIG, maximum=8192)
-    if (type(config) is not dict or
-            set(config) != {"schema", "broker_source_revision", "root_source_revision",
-                            "gateway_uid", "gateway_gid", "gateway_cgroup",
-                            "gateway_executable_sha256", "boot_id"}
-            or config["schema"] != "zog-task-c-readonly-broker-native-selection-v1"
-            or config["broker_source_revision"] != BROKER_SOURCE
-            or config["root_source_revision"] != OWNER_SOURCE
+    _, root_row = _checked_json(OWNER_REGISTRY)
+    selected_v3 = root_row.get("schema") in owner_native.INSTALLATION_SCHEMAS
+    required_config_schema = (v3_readonly.BROKER_CONFIG_SCHEMA if selected_v3
+                              else "zog-task-c-readonly-broker-native-selection-v1")
+    expected_config = (
+        {"schema", "broker_source_sha256", "root_source_sha256",
+         "gateway_uid", "gateway_gid", "gateway_cgroup",
+         "gateway_executable_sha256", "boot_id"} if selected_v3 else
+        {"schema", "broker_source_revision", "root_source_revision",
+         "gateway_uid", "gateway_gid", "gateway_cgroup",
+         "gateway_executable_sha256", "boot_id"})
+    if (type(config) is not dict or set(config) != expected_config
+            or config["schema"] != required_config_schema
+            or (selected_v3 and (
+                config["root_source_sha256"] != _installed_v3_root_source_digest()
+                or config["broker_source_sha256"] !=
+                    _installed_gateway_source_digest()))
+            or (not selected_v3 and (
+                config["broker_source_revision"] != BROKER_SOURCE
+                or config["root_source_revision"] != OWNER_SOURCE))
             or config["boot_id"] != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             or type(config["gateway_uid"]) is not int
             or config["gateway_uid"] < 1000
@@ -331,8 +378,11 @@ def installed_readonly_authority():
             or not original.match(config["gateway_executable_sha256"], original.SHA)):
         hold()
 
-    record, record_sha = read_original_record()
-    _, root_row = _checked_json(OWNER_REGISTRY)
+    # For v3, original storage identity is the independently committed
+    # installation authority, not a manufactured v1 request-bound record.
+    # V2 retains the original reserved-record/anchor selector verbatim.
+    if not selected_v3:
+        record, record_sha = read_original_record()
     operator_key = _read_root(OPERATOR, max_bytes=32)
     issuer_key = _read_root(ISSUER, max_bytes=32)
     _, evidence = _checked_json(ISSUER_EVENT, maximum=16000)
@@ -348,28 +398,73 @@ def installed_readonly_authority():
         hold()
     registry = taskc.ProtectedOriginalRegistry(
         root_row["originals"], pinned_operator_public_key=operator_key)
-    readonly_role, scope = verify_original_selection(
-        record=record, record_sha=record_sha, root_row=root_row,
-        broker_config=config, registry=registry, evidence=evidence,
-        operator_key=operator_key,
-        issuer_key=issuer_key, observation_public=observation_public,
-        pin=pin, pin_sha=digest_bytes(pin_raw), approval=approval,
-        broker_signer=signer,
-        selected_broker_sha=_installed_gateway_source_digest(),
-        now=int(time.time()))
+    if selected_v3:
+        scopes = {
+            original.digest(original.scope_from_request(e["owner_request"]))
+            for e in registry.entries.values()
+        }
+        if len(scopes) != 1:
+            hold()
+        scope = scopes.pop()
+        selection = {"identity": scope, "approved": {
+            e["owner_request"]["operation_id"]:
+                original.digest(e["owner_request"])
+            for e in registry.entries.values()
+        }}
+        # Checks two independent protected mounts, existing operator-signed
+        # storage approval, immutable installer commit and external anchor.
+        # Local mode requires no invented registry or observation signer.
+        _, record = owner_native._selected_installation_storage(
+            root_row, selection, registry, operator_key, now=int(time.time()))
+        # The root selector has now checked this fresh protected backend
+        # against the signed registry. Recheck on each broker IPC as well.
+        _, commit = _checked_json(
+            owner_native.selected_storage_paths(
+                root_row["schema"] in owner_native.ROOT_BACKED_SCHEMAS
+            )["commit"], maximum=4096)
+        readonly_role, scope = v3_readonly.verify_installation_broker_selection(
+            storage_record=record, storage_commit=commit, root_row=root_row,
+            broker_config=config, registry=registry, evidence=evidence,
+            operator_key=operator_key, issuer_key=issuer_key,
+            observation_public=observation_public, pin=pin,
+            pin_sha=digest_bytes(pin_raw), approval=approval,
+            broker_signer=signer,
+            selected_broker_sha=_installed_gateway_source_digest(),
+            selected_root_source_sha=_installed_v3_root_source_digest(),
+            now=int(time.time()))
+    else:
+        readonly_role, scope = verify_original_selection(
+            record=record, record_sha=record_sha, root_row=root_row,
+            broker_config=config, registry=registry, evidence=evidence,
+            operator_key=operator_key,
+            issuer_key=issuer_key, observation_public=observation_public,
+            pin=pin, pin_sha=digest_bytes(pin_raw), approval=approval,
+            broker_signer=signer,
+            selected_broker_sha=_installed_gateway_source_digest(),
+            now=int(time.time()))
 
     # The only S3 session derives from this fixed systemd LoadCredential file.
-    # Identity is queried with this exact session, no default boto3/IMDS chain.
+    # No owner writer/SSM credential, default SDK chain or IMDS fallback.
     session, _ = _session(
         READ_CREDENTIAL, account=record["checkpoint_account_id"],
         region=record["checkpoint_region"], role_arn=readonly_role)
-    checkpoint = S3AppendOnlyCheckpoint(
-        GetObjectOnly(session.client("s3", config=S3_CONFIG)),
-        bucket=record["checkpoint_bucket"],
-        prefix=record["checkpoint_prefix"],
-        account_id=record["checkpoint_account_id"],
-        scope_digest=scope,
-        genesis_sha256=record["checkpoint_genesis_sha256"])
+    readonly = GetObjectOnly(session.client("s3", config=S3_CONFIG))
+    if selected_v3:
+        checkpoint = S3InstallationCheckpoint(
+            readonly, bucket=record["checkpoint_bucket"],
+            prefix=record["checkpoint_prefix"],
+            account_id=record["checkpoint_account_id"],
+            installation_scope_sha256=record["installation_scope_sha256"],
+            registry_sha256=record["registry_sha256"],
+            genesis_sha256=record["checkpoint_genesis_sha256"],
+            approved={scope: selection["approved"]})
+    else:
+        checkpoint = S3AppendOnlyCheckpoint(
+            readonly, bucket=record["checkpoint_bucket"],
+            prefix=record["checkpoint_prefix"],
+            account_id=record["checkpoint_account_id"],
+            scope_digest=scope,
+            genesis_sha256=record["checkpoint_genesis_sha256"])
     # A 403 for the first missing event is NOT a valid end-of-history.
     checkpoint.current_witness(scope)
 
@@ -385,4 +480,12 @@ def installed_readonly_authority():
         gateway_gid=config["gateway_gid"],
         gateway_executable_sha256=config["gateway_executable_sha256"],
         gateway_cgroup=config["gateway_cgroup"],
+        backend_recheck=(partial(
+            live_backend.require_live_backend_bound_identity,
+            expected_registry=strict(_read_root(
+                    owner_native.STORAGE_REGISTRY, max_bytes=4096)),
+            allow_local=root_row["schema"] in (
+                owner_native.LOCAL_RUNTIME_SCHEMA,
+                owner_native.ROOT_BACKED_LOCAL_RUNTIME_SCHEMA))
+            if selected_v3 else None),
     )

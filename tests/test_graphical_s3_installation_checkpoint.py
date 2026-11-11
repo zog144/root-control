@@ -160,3 +160,81 @@ def test_selected_owner_never_sends_without_preinstalled_registry_genesis(tmp_pa
         owner.submit(req,grant,now=400)
     assert sender.calls==[]
     assert remote.puts==0
+
+
+
+def test_conditional_installation_claim_is_global_across_concurrent_owners():
+    """One winning S3 slot even if all local owner records are rolled back."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    remote,ctor,(scope,req),_=setup_remote()
+    remote.barrier=threading.Barrier(2)
+    def submit(_):
+        try:
+            ctor().claim_once(scope,req["operation_id"],op.digest(req))
+            return "claimed"
+        except op.OperationDenied:
+            return "hold"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(submit,range(2)))==["claimed","hold"]
+    remote.barrier=None
+    for _ in range(2):
+        with pytest.raises(op.OperationDenied):
+            ctor().claim_once(scope,req["operation_id"],op.digest(req))
+    assert remote.puts==2
+    assert len(remote.rows)==2
+
+
+def test_installation_claim_revocation_race_has_one_external_order():
+    """Both transitions compete for 000001.json, not separate unsafe keys."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    remote,ctor,(scope,req),_=setup_remote()
+    remote.barrier=threading.Barrier(2)
+    def attempt(action):
+        try:
+            if action=="claim":
+                ctor().claim_once(scope,req["operation_id"],op.digest(req))
+            else:
+                ctor().revoke(scope)
+            return action
+        except op.OperationDenied:
+            return "hold"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(attempt,("claim","revoke")))
+    assert results.count("hold")==1
+    assert len(remote.rows)==2 and remote.puts==2
+    remote.barrier=None
+    history=ctor()
+    if "revoke" in results:
+        assert history.inspect_current(scope)=={"revoked":True}
+        with pytest.raises(op.OperationDenied):
+            history.claim_once(scope,req["operation_id"],op.digest(req))
+    else:
+        history.revoke(scope)
+        assert history.inspect_current(scope)=={"revoked":True}
+    with pytest.raises(op.OperationDenied):
+        ctor().claim_once(scope,req["operation_id"],op.digest(req))
+
+
+def test_deleted_external_history_is_outside_source_only_rollback_proof():
+    remote,ctor,(scope,req),_=setup_remote()
+    ctor().claim_once(scope,req["operation_id"],op.digest(req))
+    # A malicious AWS admin could delete an externally accepted event.
+    # Source GetObject cannot distinguish erased event from never written.
+    del remote.rows["new/installation/000001.json"]
+    assert ctor().current_witness(scope)["sequence"]==0
+    # Native IAM/Object Lock + separately attested retention/highwater
+    # remain mandatory; root filesystem separation would not fix this.
+
+
+def test_claim_lost_ack_remains_uncertain_after_restart_without_new_send():
+    remote,ctor,(scope,req),_=setup_remote()
+    remote.lost_ack=True
+    with pytest.raises(op.OperationDenied):
+        ctor().claim_once(scope,req["operation_id"],op.digest(req))
+    remote.lost_ack=False
+    assert ctor().inspect_claim(scope,req["operation_id"],op.digest(req))
+    with pytest.raises(op.OperationDenied):
+        ctor().claim_once(scope,req["operation_id"],op.digest(req))
+    assert remote.puts==1

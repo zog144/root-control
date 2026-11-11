@@ -31,7 +31,7 @@ def verify_installed_storage_commit(
     storage_authority, signed_storage_approval, pinned_operator_public,
     independently_retained_anchor_sha256, receipt,
     pinned_installer_public, independently_retained_commit_sha256,
-    now,
+    now, allow_local=False,
 ):
     if (type(receipt) is not dict or set(receipt) != FIELDS
             or receipt.get("schema") != SCHEMA
@@ -40,8 +40,9 @@ def verify_installed_storage_commit(
             or not 1 <= receipt["accepted_at"] <= now
             or type(pinned_installer_public) is not bytes
             or len(pinned_installer_public) != 32
-            or pinned_installer_public in (
-                pinned_operator_public, pinned_registry_public)
+            or pinned_installer_public == pinned_operator_public
+            or (pinned_registry_public is not None and
+                pinned_installer_public == pinned_registry_public)
             or not op.match(independently_retained_commit_sha256, op.SHA)
             or op.digest(receipt) != independently_retained_commit_sha256
             or any(not UUID.fullmatch(receipt[k]) for k in (
@@ -77,7 +78,7 @@ def verify_installed_storage_commit(
         pinned_operator_public=pinned_operator_public,
         independently_retained_anchor_sha256=
             independently_retained_anchor_sha256,
-        now=receipt["accepted_at"])
+        now=receipt["accepted_at"], allow_local=allow_local)
     if (receipt["registry_sha256"] != proof["registry_sha256"]
             or receipt["installation_scope_sha256"] !=
                 proof["installation_scope_sha256"]):
