@@ -205,7 +205,7 @@ def test_backend_recovers_only_after_verified_absence(registered,disappear):
     class Barrier:
         def status(self,token):return {'status':'synchronized'}
         def evidence(self,token,**kwargs):
-            assert kwargs==dict(unit=info['unit_name'],job_id='c'*32,uid=12345)
+            assert kwargs==dict(unit=info['unit_name'],job_id='c'*32,uid=os.geteuid())
             return dict(properties=props,invocation_id='a'*32,boot_id=jb.boot_id(),
                         ExecMainCode=1,ExecMainStatus=0,ExecMainExitTimestampMonotonic=1,result='success')
     backend.journal_barrier=Barrier()
