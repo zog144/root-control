@@ -121,7 +121,7 @@ def test_build_payload_mounts_unprivileged_hook_and_keeps_sandbox(registered,tmp
     executable,argv,flags=props['ExecStopPostEx'].value[0]
     assert executable==argv[0]=='/run/zog-journal/wait' and argv[1]=='1'*64
     assert flags==['no-env-expand','ignore-failure']
-    assert props['User'].value=='12345' and props['NoNewPrivileges'].value
+    assert 'User' not in props and 'Group' not in props and props['NoNewPrivileges'].value
     assert props['CapabilityBoundingSet'].value==0 and props['PrivateNetwork'].value
     assert props['BindReadOnlyPaths'].value==[
         ['/run/zog-journal-broker','/run/zog-journal',False,0],
@@ -205,7 +205,7 @@ def test_backend_recovers_only_after_verified_absence(registered,disappear):
     class Barrier:
         def status(self,token):return {'status':'synchronized'}
         def evidence(self,token,**kwargs):
-            assert kwargs==dict(unit=info['unit_name'],job_id='c'*32,uid=12345)
+            assert kwargs==dict(unit=info['unit_name'],job_id='c'*32,uid=os.geteuid())
             return dict(properties=props,invocation_id='a'*32,boot_id=jb.boot_id(),
                         ExecMainCode=1,ExecMainStatus=0,ExecMainExitTimestampMonotonic=1,result='success')
     backend.journal_barrier=Barrier()
