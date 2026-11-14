@@ -208,7 +208,7 @@ def test_invalid_cpu_weight_rejected(registered,value):
     with pytest.raises(SystemdBackendError):canonical_request(request)
 
 
-@pytest.mark.parametrize('field', ['execution_user_id', 'execution_group_id'])
+@pytest.mark.parametrize('field', ['execution_user_id', 'execution_group_id', 'User', 'Group'])
 def test_caller_cannot_select_a_build_account(registered, field):
     from zog.root_control.build import canonical_request
     _, _, request = registered
@@ -227,3 +227,31 @@ def test_workspace_ownership_uses_running_process_credentials(registered):
     backend, args, _ = registered
     assert (args['source_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
     assert (args['output_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+
+
+@pytest.mark.parametrize(('uid', 'gid'), [(0, 0), (1001, 1002)])
+def test_registration_uses_runtime_credentials_without_nonroot_admission(registered, monkeypatch, uid, gid):
+    import shutil
+    backend, args, _request = registered
+    second = args['project_root'] / 'state/image-build/attempts/two'
+    second.mkdir(parents=True)
+    prepared = second / 'root'
+    shutil.copytree(args['prepared_root'], prepared)
+    source = second / 'source'
+    output = second / 'output'
+    source.mkdir()
+    output.mkdir()
+    monkeypatch.setattr(os, 'geteuid', lambda: uid)
+    monkeypatch.setattr(os, 'getegid', lambda: gid)
+    backend.register(project_root=args['project_root'], resource_id='d'*32,
+                     prepared_root=prepared, source_directory=source,
+                     output_directory=output, input_manifest_id='second-manifest')
+    assert (source, uid, gid) in backend.test_ownership
+    assert (output, uid, gid) in backend.test_ownership
+
+
+def test_build_registration_rejects_user_and_group_override_fields(registered):
+    backend, args, _request = registered
+    for field in ('execution_user_id', 'execution_group_id', 'User', 'Group'):
+        with pytest.raises(TypeError):
+            backend.register(**dict(args, **{field: 0}))

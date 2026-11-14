@@ -1,7 +1,11 @@
-"""Privileged build resource registration and finite systemd execution.
+"""Build resource registration and finite systemd execution.
 
-The socket has the same trusted-local access boundary as root-control. Build
-commands use a separate non-root identity and never access controller storage.
+The socket retains root-control's existing installed service authorization.
+Finite jobs have no selectable execution account: transient services omit
+User=/Group= and run under the systemd manager's default service credentials.
+Native acceptance must compare the resulting child EUID/EGID against the
+actual root-control process (normally root); omission alone is not evidence
+of inheritance from a non-root process.
 """
 import hashlib
 import json
