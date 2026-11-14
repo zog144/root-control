@@ -1,7 +1,11 @@
-"""Privileged build resource registration and finite systemd execution.
+"""Build resource registration and finite systemd execution.
 
-The socket has the same trusted-local access boundary as root-control. Build
-commands use a separate non-root identity and never access controller storage.
+The socket retains root-control's existing installed service authorization.
+Finite jobs have no selectable execution account: transient services omit
+User=/Group= and run under the systemd manager's default service credentials.
+Native acceptance must compare the resulting child EUID/EGID against the
+actual root-control process (normally root); omission alone is not evidence
+of inheritance from a non-root process.
 """
 import hashlib
 import json
@@ -34,7 +38,7 @@ def positive(value, label):
 def canonical_request(raw):
     value = json.loads(json.dumps(raw, allow_nan=False))
     required = {'build_root_id', 'source_workspace_id', 'output_workspace_id', 'command', 'environment',
-                'working_directory', 'execution_user_id', 'execution_group_id', 'startup_timeout_seconds',
+                'working_directory', 'startup_timeout_seconds',
                 'execution_timeout_seconds', 'termination_grace_seconds', 'resource_limits', 'read_only_root', 'network_access'}
     if set(value) - {'device_profile'} != required:
         raise SystemdBackendError('build request has missing or unsupported fields')
@@ -45,9 +49,6 @@ def canonical_request(raw):
         raise SystemdBackendError('workspace does not belong to registered build root')
     if value['read_only_root'] is not True or value['network_access'] is not False:
         raise SystemdBackendError('build requires read-only root and disabled network')
-    for key in ('execution_user_id', 'execution_group_id'):
-        if type(value[key]) is not int or not 0 < value[key] < 2**31:
-            raise SystemdBackendError('explicit nonzero build UID/GID required')
     for key in ('startup_timeout_seconds', 'execution_timeout_seconds', 'termination_grace_seconds'):
         positive(value[key], key)
     if not isinstance(value['command'], list) or not value['command'] or any(not isinstance(s, str) or '\0' in s for s in value['command']) or not value['command'][0]:
@@ -149,7 +150,7 @@ class BuildBackend:
         return record
 
     def register(self, *, project_root, resource_id, prepared_root, source_directory, output_directory,
-                 input_manifest_id, execution_user_id, execution_group_id):
+                 input_manifest_id):
         identity(resource_id)
         root = Path(project_root).resolve()
         paths = [Path(p).resolve(strict=True) for p in (prepared_root, source_directory, output_directory)]
@@ -158,14 +159,10 @@ class BuildBackend:
             raise SystemdBackendError('build inputs must be directories beneath state/image-build/attempts')
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i+1:]):
             raise SystemdBackendError('build root/source/output paths must not overlap')
-        if type(execution_user_id) is not int or type(execution_group_id) is not int or min(execution_user_id, execution_group_id) <= 0:
-            raise SystemdBackendError('nonzero build UID/GID required')
-        if execution_user_id == root.stat().st_uid:
-            raise SystemdBackendError('build UID must differ from controller project owner')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
             raise SystemdBackendError('verified input manifest identity is required')
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
-                      input_manifest_id=input_manifest_id, execution_user_id=execution_user_id, execution_group_id=execution_group_id)
+                      input_manifest_id=input_manifest_id)
         path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
         ensure_directory(self.directory)
@@ -218,7 +215,7 @@ class BuildBackend:
         self._tree(imported, 0, 0, immutable=True)
         for phase, workspace in zip(('sync-source', 'sync-output'), paths[1:]):
             progress(phase)
-            self._tree(workspace, execution_user_id, execution_group_id)
+            self._tree(workspace, os.geteuid(), os.getegid())
         record['state'] = 'ready'
         progress('ready')
         return record
@@ -228,8 +225,6 @@ class BuildBackend:
         identity(job_id)
         path, registration = self.load(project_root, request['build_root_id'])
         binding = registration['intent']
-        if any(request[k] != binding[k] for k in ('execution_user_id', 'execution_group_id')):
-            raise SystemdBackendError('execution identity differs from registration')
         source, output = Path(binding['source_directory']), Path(binding['output_directory'])
         executable = request['command'][0]
         directory = request['working_directory']
@@ -294,7 +289,7 @@ class BuildBackend:
             # Retry before start reuses its identity; attempted jobs never restart.
             if not info.get('journal_barrier_token'):
                 info['journal_barrier_token'] = self.journal_barrier.register(
-                    info['unit_name'], request['execution_user_id'], job_id)
+                    info['unit_name'], os.geteuid(), job_id)
                 replace_json(job_path, info)
         elif info.get('journal_barrier_token'):
             raise SystemdBackendError('prepared journal barrier requires enabled broker')
@@ -308,7 +303,6 @@ class BuildBackend:
             'Type': ('s', 'exec'), 'ExitType': ('s', 'cgroup'), 'Restart': ('s', 'no'),
             'KillMode': ('s', 'control-group'), 'RemainAfterExit': ('b', False), 'AddRef': ('b', True),
             'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
-            'User': ('s', str(r['execution_user_id'])), 'Group': ('s', str(r['execution_group_id'])),
             'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
             'PrivateTmp': ('b', True), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
             'CapabilityBoundingSet': ('t', 0), 'AmbientCapabilities': ('t', 0),
@@ -349,8 +343,7 @@ class BuildBackend:
     @staticmethod
     def expected_properties(path, info):
         r = info['request']
-        return {'RootDirectory':str(path/'root'), 'User':str(r['execution_user_id']),
-                'Group':str(r['execution_group_id']), 'ExitType':'cgroup','Type':'exec',
+        return {'RootDirectory':str(path/'root'), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
                 'ExecStart':[info['resolved_executable'], *r['command'][1:]],
@@ -387,7 +380,7 @@ class BuildBackend:
             raw['journal_barrier'] = barrier.status(token)
             if not raw.get('exists'):
                 evidence = barrier.evidence(token,unit=info['unit_name'],job_id=job_id,
-                                            uid=info['request']['execution_user_id'])
+                                            uid=os.geteuid())
                 if evidence is not None:
                     properties=dict(evidence['properties'])
                     properties['ExecStart']=self.systemd._normalize_exec_start(properties.get('ExecStart'))

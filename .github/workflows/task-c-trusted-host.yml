@@ -1,0 +1,36 @@
+name: Task C trusted Host local one-attempt SSM source regression
+on:
+  push:
+    branches: [regular/inherit-build-execution-identity-20261114, main, unstable]
+  pull_request:
+    paths:
+      - src/zog/root_control/task_c_trusted_host.py
+      - tests/test_task_c_trusted_host.py
+      - .github/workflows/task-c-trusted-host.yml
+      - src/zog/root_control/build.py
+      - tests/test_build_backend.py
+permissions:
+  contents: read
+jobs:
+  trusted-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install 'pytest>=8,<10'
+      - name: Exercise Task C root-owned journal tests; base CI runs full build and combined tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          sudo --preserve-env=PYTHONPATH "$(which python)" -m pytest -q -rs tests/test_task_c_trusted_host.py
+      - if: always()
+        run: echo 'Local trust model only. One SSM interface simulated, no AWS, S3, operator signers, EBS, service activation, or native send.' >> "$GITHUB_STEP_SUMMARY"

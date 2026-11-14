@@ -28,10 +28,10 @@ def registered(tmp_path, monkeypatch):
     backend.test_ownership=ownership
     rid='b'*32
     args=dict(project_root=project,resource_id=rid,prepared_root=root,source_directory=source,output_directory=output,
-              input_manifest_id='verified-manifest',execution_user_id=12345,execution_group_id=12345)
+              input_manifest_id='verified-manifest')
     backend.register(**args)
     request=dict(build_root_id=rid,source_workspace_id=rid+'-source',output_workspace_id=rid+'-output',command=['cc','-v'],
-                 environment={'PATH':'/bin'},working_directory='/image-build/source',execution_user_id=12345,execution_group_id=12345,
+                 environment={'PATH':'/bin'},working_directory='/image-build/source',
                  startup_timeout_seconds=5,execution_timeout_seconds=8,termination_grace_seconds=2,
                  resource_limits={'thread-count-maximum':32,'memory-maximum-bytes':10000000},read_only_root=True,network_access=False)
     return backend,args,request
@@ -42,20 +42,20 @@ def test_import_is_private_read_only_and_workspaces_stay_at_caller_paths(registe
     imported=backend.resource_path(args['project_root'],args['resource_id'])/'root'
     assert (imported/'bin/cc').read_text()=='fake compiler'
     assert not (imported/'bin/cc').stat().st_mode & 0o222
-    assert (args['source_directory']/'input',12345,12345) in backend.test_ownership
+    assert (args['source_directory']/'input',os.geteuid(),os.getegid()) in backend.test_ownership
     (args['prepared_root']/'bin/cc').write_text('changed original')
     backend.register(**args)
     assert (imported/'bin/cc').read_text()=='fake compiler'
 
 
-def test_properties_enforce_finite_unprivileged_network_disabled_execution(registered):
+def test_properties_use_existing_identity_and_preserve_finite_network_disabled_execution(registered):
     backend,args,request=registered
     backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
     props=backend.systemd.properties
     assert props['PrivateNetwork'].value is True
     assert props['NoNewPrivileges'].value is True
     assert props['CapabilityBoundingSet'].value==0
-    assert props['User'].value=='12345'
+    assert 'User' not in props and 'Group' not in props
     assert props['RuntimeMaxUSec'].value==8000000
     assert props['TimeoutStartUSec'].value==5000000
     assert props['TimeoutStopUSec'].value==2000000
@@ -206,3 +206,52 @@ def test_invalid_cpu_weight_rejected(registered,value):
     _,_,request=registered
     request['resource_limits']['cpu-weight']=value
     with pytest.raises(SystemdBackendError):canonical_request(request)
+
+
+@pytest.mark.parametrize('field', ['execution_user_id', 'execution_group_id', 'User', 'Group'])
+def test_caller_cannot_select_a_build_account(registered, field):
+    from zog.root_control.build import canonical_request
+    _, _, request = registered
+    request[field] = 24202
+    with pytest.raises(SystemdBackendError, match='missing or unsupported fields'):
+        canonical_request(request)
+
+
+def test_registration_rejects_alternate_account_arguments(registered):
+    backend, args, _ = registered
+    with pytest.raises(TypeError):
+        backend.register(**dict(args, execution_user_id=24202))
+
+
+def test_workspace_ownership_uses_running_process_credentials(registered):
+    backend, args, _ = registered
+    assert (args['source_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+    assert (args['output_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+
+
+@pytest.mark.parametrize(('uid', 'gid'), [(0, 0), (1001, 1002)])
+def test_registration_uses_runtime_credentials_without_nonroot_admission(registered, monkeypatch, uid, gid):
+    import shutil
+    backend, args, _request = registered
+    second = args['project_root'] / 'state/image-build/attempts/two'
+    second.mkdir(parents=True)
+    prepared = second / 'root'
+    shutil.copytree(args['prepared_root'], prepared)
+    source = second / 'source'
+    output = second / 'output'
+    source.mkdir()
+    output.mkdir()
+    monkeypatch.setattr(os, 'geteuid', lambda: uid)
+    monkeypatch.setattr(os, 'getegid', lambda: gid)
+    backend.register(project_root=args['project_root'], resource_id='d'*32,
+                     prepared_root=prepared, source_directory=source,
+                     output_directory=output, input_manifest_id='second-manifest')
+    assert (source, uid, gid) in backend.test_ownership
+    assert (output, uid, gid) in backend.test_ownership
+
+
+def test_build_registration_rejects_user_and_group_override_fields(registered):
+    backend, args, _request = registered
+    for field in ('execution_user_id', 'execution_group_id', 'User', 'Group'):
+        with pytest.raises(TypeError):
+            backend.register(**dict(args, **{field: 0}))
