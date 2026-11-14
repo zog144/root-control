@@ -27,10 +27,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install 'pytest>=8,<10'
-      - name: Verify one checkout contains Task C, inherited build and local send-once tests
+      - name: Exercise Task C root-owned journal tests; base CI runs full build and combined tests
         env:
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
-          sudo --preserve-env=PYTHONPATH "$(which python)" -m pytest -q -rs tests/test_task_c_trusted_host.py tests/test_build_backend.py tests/test_task_c_build_coexist.py
+          sudo --preserve-env=PYTHONPATH "$(which python)" -m pytest -q -rs tests/test_task_c_trusted_host.py
       - if: always()
         run: echo 'Local trust model only. One SSM interface simulated, no AWS, S3, operator signers, EBS, service activation, or native send.' >> "$GITHUB_STEP_SUMMARY"
