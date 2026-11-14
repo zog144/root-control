@@ -2,9 +2,9 @@ name: Public source verification
 
 on:
   push:
-    branches: [main, unstable]
+    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114]
   pull_request:
-    branches: [main, unstable]
+    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114]
   workflow_dispatch:
 
 permissions:
