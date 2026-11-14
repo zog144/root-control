@@ -42,13 +42,13 @@ def test_import_is_private_read_only_and_workspaces_stay_at_caller_paths(registe
     imported=backend.resource_path(args['project_root'],args['resource_id'])/'root'
     assert (imported/'bin/cc').read_text()=='fake compiler'
     assert not (imported/'bin/cc').stat().st_mode & 0o222
-    assert (args['source_directory']/'input',12345,12345) in backend.test_ownership
+    assert (args['source_directory']/'input',os.geteuid(),os.getegid()) in backend.test_ownership
     (args['prepared_root']/'bin/cc').write_text('changed original')
     backend.register(**args)
     assert (imported/'bin/cc').read_text()=='fake compiler'
 
 
-def test_properties_enforce_finite_unprivileged_network_disabled_execution(registered):
+def test_properties_use_existing_identity_and_preserve_finite_network_disabled_execution(registered):
     backend,args,request=registered
     backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
     props=backend.systemd.properties

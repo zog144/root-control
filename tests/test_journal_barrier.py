@@ -121,7 +121,7 @@ def test_build_payload_mounts_unprivileged_hook_and_keeps_sandbox(registered,tmp
     executable,argv,flags=props['ExecStopPostEx'].value[0]
     assert executable==argv[0]=='/run/zog-journal/wait' and argv[1]=='1'*64
     assert flags==['no-env-expand','ignore-failure']
-    assert props['User'].value=='12345' and props['NoNewPrivileges'].value
+    assert 'User' not in props and 'Group' not in props and props['NoNewPrivileges'].value
     assert props['CapabilityBoundingSet'].value==0 and props['PrivateNetwork'].value
     assert props['BindReadOnlyPaths'].value==[
         ['/run/zog-journal-broker','/run/zog-journal',False,0],
