@@ -28,10 +28,10 @@ def registered(tmp_path, monkeypatch):
     backend.test_ownership=ownership
     rid='b'*32
     args=dict(project_root=project,resource_id=rid,prepared_root=root,source_directory=source,output_directory=output,
-              input_manifest_id='verified-manifest',execution_user_id=12345,execution_group_id=12345)
+              input_manifest_id='verified-manifest')
     backend.register(**args)
     request=dict(build_root_id=rid,source_workspace_id=rid+'-source',output_workspace_id=rid+'-output',command=['cc','-v'],
-                 environment={'PATH':'/bin'},working_directory='/image-build/source',execution_user_id=12345,execution_group_id=12345,
+                 environment={'PATH':'/bin'},working_directory='/image-build/source',
                  startup_timeout_seconds=5,execution_timeout_seconds=8,termination_grace_seconds=2,
                  resource_limits={'thread-count-maximum':32,'memory-maximum-bytes':10000000},read_only_root=True,network_access=False)
     return backend,args,request
@@ -55,7 +55,7 @@ def test_properties_enforce_finite_unprivileged_network_disabled_execution(regis
     assert props['PrivateNetwork'].value is True
     assert props['NoNewPrivileges'].value is True
     assert props['CapabilityBoundingSet'].value==0
-    assert props['User'].value=='12345'
+    assert 'User' not in props and 'Group' not in props
     assert props['RuntimeMaxUSec'].value==8000000
     assert props['TimeoutStartUSec'].value==5000000
     assert props['TimeoutStopUSec'].value==2000000
@@ -206,3 +206,24 @@ def test_invalid_cpu_weight_rejected(registered,value):
     _,_,request=registered
     request['resource_limits']['cpu-weight']=value
     with pytest.raises(SystemdBackendError):canonical_request(request)
+
+
+@pytest.mark.parametrize('field', ['execution_user_id', 'execution_group_id'])
+def test_caller_cannot_select_a_build_account(registered, field):
+    from zog.root_control.build import canonical_request
+    _, _, request = registered
+    request[field] = 24202
+    with pytest.raises(SystemdBackendError, match='missing or unsupported fields'):
+        canonical_request(request)
+
+
+def test_registration_rejects_alternate_account_arguments(registered):
+    backend, args, _ = registered
+    with pytest.raises(TypeError):
+        backend.register(**dict(args, execution_user_id=24202))
+
+
+def test_workspace_ownership_uses_running_process_credentials(registered):
+    backend, args, _ = registered
+    assert (args['source_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+    assert (args['output_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
