@@ -18,7 +18,7 @@ def test_combined_controller_issuer_and_build_exports():
     assert callable(LocalTaskCJournal.submit_once)
     assert callable(BusctlSystemdBackend.reconcile_selected_issuer)
     assert callable(BusctlSystemdBackend.start_service)
-    assert callable(issuer_lifecycle_broker)
+    assert callable(issuer_lifecycle_broker.IssuerLifecycleBroker)
     assert callable(host_bindings.resolve)
     assert hasattr(host_bindings, '_CERT_POLICY_SOURCE')
     assert 'execution_user_id' not in inspect.signature(BuildBackend.register).parameters
