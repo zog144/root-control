@@ -102,6 +102,17 @@ jobs:
               names=set(z.namelist())
               assert 'zog/root_control/__init__.py' in names
               assert 'zog/root_control/daemon.py' in names
+              for required in (
+                  'zog/root_control/task_c_trusted_host.py',
+                  'zog/root_control/issuer_inspection_result.py',
+                  'zog/root_control/issuer_observation.py',
+                  'zog/root_control/issuer_credentials.py',
+                  'zog/root_control/issuer_execution_fence.py',
+                  'zog/root_control/issuer_execution_reconcile.py',
+                  'zog/root_control/issuer_station_transfer.py',
+                  'zog/root_control/issuer_cross_host.py',
+              ):
+                  assert required in names, required
               assert 'zog/root_control/native/journal-wait.c' in names
               assert 'zog/__init__.py' not in names
               assert not any(x.startswith('zog/box_control/') for x in names)
