@@ -59,7 +59,7 @@ FIXED_PARENT = "/etc/zog/host-deploy"
 FIXED_DIRECTORY = "selected-issuer-execution"
 # Reviewed source candidate only; installer pin update requires independent
 # rights and installed-wheels acceptance. A retained older commit fails closed.
-REVIEWED_BOX_CONTROL = "baca7f815974dbf685950c0c7e78f693dd0a96e2"
+REVIEWED_BOX_CONTROL = "c886e7a90bb4ea74e771a6c5dcefaa2069539ec7"
 
 
 @contextmanager
