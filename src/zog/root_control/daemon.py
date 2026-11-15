@@ -67,7 +67,7 @@ class RootControlDaemon:
             emit("root-control-response-undelivered", operation=operation, resource_id=resource_id)
 
     def _dispatch(self, conn, request, workers, slots):
-        lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status'} else 0
+        lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
@@ -82,12 +82,16 @@ class RootControlDaemon:
     def _serve_request(self, conn, request, slot, queued_at=None):
         started = time.monotonic()
         registration = request.get('operation') == 'build_register'
+        starting_service = request.get('operation') == 'systemd_start_service'
         rid = request.get('resource_id')
         # Do not echo arbitrary client strings into diagnostics.
         rid = rid if isinstance(rid, str) and len(rid) == 32 and all(c in '0123456789abcdef' for c in rid) else None
         if registration:
             emit('build-registration-start', resource_id=rid,
                  queued_seconds=started-(queued_at if queued_at is not None else started))
+        if starting_service:
+            emit('systemd-start-service-dispatched',
+                 queued_seconds=round(started-(queued_at if queued_at is not None else started), 6))
         try:
             with conn:
                 try:
@@ -97,7 +101,14 @@ class RootControlDaemon:
                 if registration:
                     emit('build-registration-finish', resource_id=rid, ok=response.get('ok') is True,
                          elapsed_seconds=time.monotonic()-started)
-                self._respond(conn, response, operation='build_register' if registration else None, resource_id=rid)
+                if starting_service:
+                    emit('systemd-start-service-handler-finished',
+                         rpc_ok=response.get('ok') is True,
+                         elapsed_seconds=round(time.monotonic()-started, 6))
+                self._respond(conn, response,
+                              operation=('build_register' if registration else
+                                         'systemd_start_service' if starting_service else None),
+                              resource_id=rid)
         finally:
             slot.release()
 
@@ -126,6 +137,20 @@ class RootControlDaemon:
                     or not set(arguments) <= {"project_root", "runtime_id", "limit"}):
                 raise ValueError("unsupported runtime credential inspection arguments")
             return {"ok": True, "result": inspect_runtime_credentials(**arguments)}
+        if operation == "issuer_inspect_result":
+            if set(request) != {"operation", "project_root", "request_id"}:
+                raise ValueError("invalid selected issuer inspection arguments")
+            from .issuer_inspection_result import read_selected_inspection
+            return {"ok": True, "result": read_selected_inspection(
+                project_root=request["project_root"], request_id=request["request_id"],
+            )}
+        if operation == "issuer_observe":
+            if set(request) != {"operation", "project_root", "request_id"}:
+                raise ValueError("invalid privileged issuer inspection arguments")
+            from .issuer_observation import observe_issuer_request
+            return {"ok": True, "result": observe_issuer_request(
+                project_root=request["project_root"], request_id=request["request_id"],
+            )}
         if operation == "application_runtime_mounts":
             from .mounts import inspect_runtime_mounts
             arguments = {k:v for k,v in request.items() if k != "operation"}
