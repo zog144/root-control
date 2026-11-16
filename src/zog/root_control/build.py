@@ -280,7 +280,13 @@ class BuildBackend:
         job_path = path/'jobs'/(job_id+'.json')
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
-        if self.systemd.version() < 250: raise SystemdBackendError('systemd 250 or later required')
+        systemd_version = self.systemd.version()
+        if systemd_version < 250: raise SystemdBackendError('systemd 250 or later required')
+        # Before recording any start attempt, fail closed when legacy
+        # ExecStart cannot provide the literal argv contract of ExecStartEx.
+        command = [info['resolved_executable'], *info['request']['command'][1:]]
+        if systemd_version < 254 and any('$' in arg for arg in command):
+            raise SystemdBackendError('systemd before 254 cannot preserve literal $ in build argv')
         null_device = self.private_null(path) if info['request'].get('device_profile') == 'private-null-permission-test' else None
         if self.journal_barrier:
             if request['termination_grace_seconds'] < 3:
@@ -296,7 +302,7 @@ class BuildBackend:
         info['start_attempted'] = True
         replace_json(job_path, info)
         self.systemd.start_slice(project_root=project_root, slice_name=info['slice_name'], description='Zog build job')
-        r = info['request']; bind = registration['intent']; command = [info['resolved_executable'], *r['command'][1:]]
+        r = info['request']; bind = registration['intent']
         # Fixed security policy; callers cannot weaken these properties.
         values = {
             'Description': ('s', 'Zog finite build job'), 'Slice': ('s', info['slice_name']),
@@ -322,21 +328,33 @@ class BuildBackend:
         environment = [f'{k}={v}' for k,v in sorted(r['environment'].items())]
         binds = [bind['source_directory'],'/image-build/source','false',0,bind['output_directory'],'/image-build/output','false',0]
         if null_device is not None: binds += [str(null_device),'/dev/null','false',0]
-        props += [self.systemd._property('Environment', 'as', len(environment), *environment),
-                  ['ExecStartEx',Variant('a(sasas)',[[command[0],command,['no-env-expand']]])],
-                  self.systemd._property('BindPaths','a(ssbt)',len(binds)//4,*binds)]
+        props.append(self.systemd._property('Environment', 'as', len(environment), *environment))
+        if systemd_version < 254:
+            # systemd 252 does not recognize ExecStartEx; legacy a(sasb)
+            # passes executable, argv and one ignore-failure boolean.
+            props.append(self.systemd._property('ExecStart', 'a(sasb)',
+                1, command[0], len(command), *command, 'false'))
+        else:
+            props.append(['ExecStartEx', Variant('a(sasas)', [[
+                command[0], command, ['no-env-expand']]])])
+        props.append(self.systemd._property('BindPaths','a(ssbt)',len(binds)//4,*binds))
         if self.journal_barrier:
             # All injected paths are under the controller-created /run directory.
             target = path/'root/run/zog-journal'
             if target.is_symlink(): raise SystemdBackendError('unsafe barrier mount target')
             target.mkdir(exist_ok=True)
-            props += [
-                self.systemd._property('BindReadOnlyPaths','a(ssbt)',2,
-                    str(self.journal_barrier.socket_path.parent),'/run/zog-journal','false',0,
-                    str(self.journal_barrier.helper),'/run/zog-journal/wait','false',0),
-                ['ExecStopPostEx',Variant('a(sasas)',[[
-                    '/run/zog-journal/wait', ['/run/zog-journal/wait',info['journal_barrier_token']],
-                    ['no-env-expand','ignore-failure']]])]]
+            props.append(self.systemd._property('BindReadOnlyPaths','a(ssbt)',2,
+                str(self.journal_barrier.socket_path.parent),'/run/zog-journal','false',0,
+                str(self.journal_barrier.helper),'/run/zog-journal/wait','false',0))
+            hook = ['/run/zog-journal/wait', info['journal_barrier_token']]
+            if systemd_version < 254:
+                # Legacy boolean keeps ignore-failure; fixed path and
+                # hex token cannot trigger legacy environment expansion.
+                props.append(self.systemd._property('ExecStopPost', 'a(sasb)',
+                    1, hook[0], len(hook), *hook, 'true'))
+            else:
+                props.append(['ExecStopPostEx', Variant('a(sasas)', [[
+                    hook[0], hook, ['no-env-expand', 'ignore-failure']]])])
         self.systemd._job('StartTransientUnit','ssa(sv)a(sa(sv))',[info['unit_name'],'fail',props,[]])
         return info
 

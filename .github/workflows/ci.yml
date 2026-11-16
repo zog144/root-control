@@ -2,9 +2,9 @@ name: Public source verification
 
 on:
   push:
-    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114]
+    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114, regular/systemd252-finite-build-command-20261116]
   pull_request:
-    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114]
+    branches: [main, unstable, regular/issuer-taskc-inherited-build-20261114, regular/systemd252-finite-build-command-20261116]
   workflow_dispatch:
 
 permissions:

@@ -59,8 +59,8 @@ def test_properties_use_existing_identity_and_preserve_finite_network_disabled_e
     assert props['RuntimeMaxUSec'].value==8000000
     assert props['TimeoutStartUSec'].value==5000000
     assert props['TimeoutStopUSec'].value==2000000
-    assert props['ExecStartEx'].value[0][0]=='/bin/cc'
-    assert props['ExecStartEx'].value[0][2]==['no-env-expand']
+    assert 'ExecStartEx' not in props
+    assert props['ExecStart'].value == [['/bin/cc', ['/bin/cc', '-v'], False]]
     assert props['ProtectSystem'].value=='strict'
     with pytest.raises(SystemdBackendError): backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
 
@@ -255,3 +255,60 @@ def test_build_registration_rejects_user_and_group_override_fields(registered):
     for field in ('execution_user_id', 'execution_group_id', 'User', 'Group'):
         with pytest.raises(TypeError):
             backend.register(**dict(args, **{field: 0}))
+
+
+
+def test_modern_systemd_uses_no_expansion_execstart(registered, monkeypatch):
+    backend, args, request = registered
+    monkeypatch.setattr(backend.systemd, 'version', lambda: 255)
+    request['command'].append('$LITERAL')
+    backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    props = backend.systemd.properties
+    assert 'ExecStart' not in props
+    assert props['ExecStartEx'].value == [[
+        '/bin/cc', ['/bin/cc', '-v', '$LITERAL'], ['no-env-expand']]]
+
+
+def test_systemd_252_fails_dollar_expansion_before_recording_attempt(registered):
+    backend, args, request = registered
+    request['command'].append('$HOST_SECRETS')
+    with pytest.raises(SystemdBackendError, match='cannot preserve literal'):
+        backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    saved = json.loads((path/'jobs'/('c'*32+'.json')).read_text())
+    assert not saved.get('start_attempted')
+    assert backend.systemd.properties is None
+
+
+def test_252_execstart_observation_matches_original_job_identity(registered, monkeypatch):
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    assert 'ExecStart' in backend.systemd.properties
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    properties = backend.expected_properties(path, info)
+    properties['ExecStart'] = BusctlSystemdBackend._normalize_exec_start([
+        ['/bin/cc', ['/bin/cc', '-v'], False, 0, 0, 0, 0, 0, 0, 0]])
+    assert properties['ExecStart'] == ['/bin/cc', '-v']
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kw: {
+        'exists': True, 'unit_name': info['unit_name'],
+        'transient': True, 'active_state': 'inactive',
+        'control_group': None, 'properties': properties,
+        'result': 'success', 'invocation_id': 'f'*32,
+    })
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda unit: '/mock/unit')
+    values = dict(PrivateNetwork=True, NoNewPrivileges=True, CapabilityBoundingSet=0,
+                  RuntimeMaxUSec=8000000, ExecMainCode=1, ExecMainStatus=0,
+                  ExecMainExitTimestampMonotonic=10)
+    monkeypatch.setattr(backend.systemd, '_get_property',
+                        lambda _obj, _iface, key: values[key])
+    result = backend.observe(project_root=args['project_root'], job_id='c'*32,
+                             build_root_id=args['resource_id'])
+    assert result['exists'] and result['ExecMainCode'] == 1
+    assert result['ExecMainStatus'] == 0 and result['cgroup_empty'] is True
+
+    # A unit previously created with an unknown ExecStartEx property cannot
+    # be promoted to success just because the controller software changed.
+    properties['ExecStart'] = []
+    with pytest.raises(SystemdBackendError, match='build property mismatch: ExecStart'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
