@@ -118,9 +118,10 @@ def test_build_payload_mounts_unprivileged_hook_and_keeps_sandbox(registered,tmp
     request['environment']['LD_PRELOAD']='/image-build/source/hostile.so'
     backend.start(project_root=args['project_root'],job_id='c'*32,request=request)
     props=backend.systemd.properties
-    executable,argv,flags=props['ExecStopPostEx'].value[0]
+    assert 'ExecStopPostEx' not in props
+    executable,argv,ignore_failure=props['ExecStopPost'].value[0]
     assert executable==argv[0]=='/run/zog-journal/wait' and argv[1]=='1'*64
-    assert flags==['no-env-expand','ignore-failure']
+    assert ignore_failure is True
     assert 'User' not in props and 'Group' not in props and props['NoNewPrivileges'].value
     assert props['CapabilityBoundingSet'].value==0 and props['PrivateNetwork'].value
     assert props['BindReadOnlyPaths'].value==[
@@ -223,3 +224,22 @@ def test_backend_recovers_only_after_verified_absence(registered,disappear):
         backend.systemd._get_unit_path=lambda unit:'/still-present'
         with pytest.raises(SystemdBackendError,match='vanished'):
             backend.observe(project_root=args['project_root'],job_id='c'*32,build_root_id=args['resource_id'])
+
+
+
+def test_modern_systemd_preserves_stop_hook_no_expansion(registered, monkeypatch):
+    backend, args, request = registered
+    monkeypatch.setattr(backend.systemd, 'version', lambda: 255)
+    class Barrier:
+        helper = Path('/usr/libexec/zog/journal-wait')
+        socket_path = Path('/run/zog-journal-broker/socket')
+        def register(self, *_): return 'a'*64
+    backend.journal_barrier = Barrier()
+    request['termination_grace_seconds'] = 3
+    backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    props = backend.systemd.properties
+    assert 'ExecStopPost' not in props
+    assert props['ExecStopPostEx'].value == [[
+        '/run/zog-journal/wait',
+        ['/run/zog-journal/wait', 'a'*64],
+        ['no-env-expand', 'ignore-failure']]]
