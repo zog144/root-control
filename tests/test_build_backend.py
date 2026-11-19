@@ -304,8 +304,8 @@ def test_legacy_argv_without_dollar_is_unchanged(plain):
 
 
 @pytest.mark.parametrize('value,error', [
-    ('bad\\0literal', 'invalid legacy build argument'),
-    ('\\ud800', 'not valid UTF-8'),
+    ('bad' + chr(0) + 'literal', 'invalid legacy build argument'),
+    (chr(0xD800), 'not valid UTF-8'),
     ('$' * (128 * 1024), 'exceeds legacy exec limit'),
 ])
 def test_legacy_argv_rejects_unrepresentable_input_before_dispatch(value, error):
