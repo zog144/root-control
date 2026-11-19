@@ -243,3 +243,33 @@ def test_modern_systemd_preserves_stop_hook_no_expansion(registered, monkeypatch
         '/run/zog-journal/wait',
         ['/run/zog-journal/wait', 'a'*64],
         ['no-env-expand', 'ignore-failure']]]
+
+
+def test_252_dollar_argv_authenticated_terminal_evidence_remains_exact(registered, monkeypatch):
+    backend, args, request = registered
+    request['command'].append("awk '{print $1}'")
+    request['termination_grace_seconds'] = 3
+    class Barrier:
+        helper = Path('/usr/libexec/zog/journal-wait')
+        socket_path = Path('/run/zog-journal-broker/socket')
+        def register(self, *a): return 'e'*64
+        def status(self, token): return {'status':'synchronized'}
+        def evidence(self, token, **kw):
+            assert kw['job_id'] == 'c'*32
+            return dict(properties=evidence_properties, invocation_id='a'*32,
+                        boot_id=jb.boot_id(), ExecMainCode=1, ExecMainStatus=0,
+                        ExecMainExitTimestampMonotonic=9, result='success')
+    backend.journal_barrier = Barrier()
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    evidence_properties = backend.expected_properties(path, info)
+    assert evidence_properties['ExecStart'][-1] == "awk '{print $$1}'"
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kw: {'exists':False})
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda u: None)
+    observed = backend.observe(project_root=args['project_root'], job_id='c'*32,
+                               build_root_id=args['resource_id'])
+    assert observed['terminal_evidence']['ExecMainStatus'] == 0
+    evidence_properties['ExecStart'][-1] = "awk '{print $1}'"
+    with pytest.raises(SystemdBackendError, match='exit evidence property mismatch: ExecStart'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
