@@ -318,7 +318,7 @@ def test_legacy_oversize_escaped_dollar_rejected_before_start_attempt(registered
     backend, args, request = registered
     # The actual execve argument must be within the conservative Linux
     # maximum; doubling a legal original only in D-Bus must not reject it.
-    request['command'].append('
+    request['command'].append('$' * (128 * 1024))
     with pytest.raises(SystemdBackendError, match='exceeds legacy exec limit'):
         backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
     path = backend.resource_path(args['project_root'], args['resource_id'])
