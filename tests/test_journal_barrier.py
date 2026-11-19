@@ -246,6 +246,7 @@ def test_modern_systemd_preserves_stop_hook_no_expansion(registered, monkeypatch
 
 
 def test_252_dollar_argv_authenticated_terminal_evidence_remains_exact(registered, monkeypatch):
+    from zog.root_control.systemd import SystemdBackendError
     backend, args, request = registered
     request['command'].append("awk '{print $1}'")
     request['termination_grace_seconds'] = 3
