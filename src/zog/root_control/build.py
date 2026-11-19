@@ -71,7 +71,7 @@ def canonical_request(raw):
 
 LEGACY_SYSTEMD_ARGV_ENCODING = 'systemd-252-dollar-doubled-v1'
 # Linux MAX_ARG_STRLEN is PAGE_SIZE * 32 on the supported compiler hosts.
-# Keep a conservative, explicit per-argument UTF-8 byte limit.
+# Validate the eventual execve argv, not the larger D-Bus wire form.
 LEGACY_ARGV_MAX_BYTES = 128 * 1024 - 1
 
 
@@ -91,11 +91,11 @@ def legacy_systemd_argv(command):
             raise SystemdBackendError('invalid legacy build argument')
         wire = arg.replace('$', '$$')
         try:
-            size = len(wire.encode('utf-8'))
+            size = len(arg.encode('utf-8'))
         except UnicodeEncodeError as exc:
             raise SystemdBackendError('build argument is not valid UTF-8') from exc
         if size > LEGACY_ARGV_MAX_BYTES:
-            raise SystemdBackendError('encoded build argument exceeds legacy exec limit')
+            raise SystemdBackendError('build argument exceeds legacy exec limit')
         encoded.append(wire)
     return encoded
 

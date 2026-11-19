@@ -316,9 +316,9 @@ def test_legacy_argv_rejects_unrepresentable_input_before_dispatch(value, error)
 
 def test_legacy_oversize_escaped_dollar_rejected_before_start_attempt(registered):
     backend, args, request = registered
-    # A legal-looking original could expand beyond Linux's per-argument
-    # kernel bound when encoded for systemd.
-    request['command'].append('$' * (64 * 1024))
+    # The actual execve argument must be within the conservative Linux
+    # maximum; doubling a legal original only in D-Bus must not reject it.
+    request['command'].append('
     with pytest.raises(SystemdBackendError, match='exceeds legacy exec limit'):
         backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
     path = backend.resource_path(args['project_root'], args['resource_id'])
@@ -419,3 +419,110 @@ def test_modern_execstartex_remains_unencoded_in_persisted_request(registered, m
     path = backend.resource_path(args['project_root'], args['resource_id'])
     assert backend.expected_properties(path, info)['ExecStart'] == [
         '/bin/cc', *saved_original['command'][1:]]
+ * (128 * 1024))
+    with pytest.raises(SystemdBackendError, match='exceeds legacy exec limit'):
+        backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    saved = json.loads((path/'jobs'/('c'*32+'.json')).read_text())
+    assert not saved.get('start_attempted')
+    assert backend.systemd.properties is None
+
+
+def test_252_execstart_observation_matches_original_job_identity(registered, monkeypatch):
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    assert 'ExecStart' in backend.systemd.properties
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    properties = backend.expected_properties(path, info)
+    properties['ExecStart'] = BusctlSystemdBackend._normalize_exec_start([
+        ['/bin/cc', ['/bin/cc', '-v'], False, 0, 0, 0, 0, 0, 0, 0]])
+    assert properties['ExecStart'] == ['/bin/cc', '-v']
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kw: {
+        'exists': True, 'unit_name': info['unit_name'],
+        'transient': True, 'active_state': 'inactive',
+        'control_group': None, 'properties': properties,
+        'result': 'success', 'invocation_id': 'f'*32,
+    })
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda unit: '/mock/unit')
+    values = dict(PrivateNetwork=True, NoNewPrivileges=True, CapabilityBoundingSet=0,
+                  RuntimeMaxUSec=8000000, ExecMainCode=1, ExecMainStatus=0,
+                  ExecMainExitTimestampMonotonic=10)
+    monkeypatch.setattr(backend.systemd, '_get_property',
+                        lambda _obj, _iface, key: values[key])
+    result = backend.observe(project_root=args['project_root'], job_id='c'*32,
+                             build_root_id=args['resource_id'])
+    assert result['exists'] and result['ExecMainCode'] == 1
+    assert result['ExecMainStatus'] == 0 and result['cgroup_empty'] is True
+
+    # A unit previously created with an unknown ExecStartEx property cannot
+    # be promoted to success just because the controller software changed.
+    properties['ExecStart'] = []
+    with pytest.raises(SystemdBackendError, match='build property mismatch: ExecStart'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
+
+
+def test_252_dollar_readback_strictly_matches_encoded_not_unescaped(registered, monkeypatch):
+    backend, args, request = registered
+    request['command'] += ['$IMAGE_BUILD_SOURCE', '$(sha256sum file)',
+                           "awk '{print $1}'"]
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    raw_expected = backend.expected_properties(path, info)
+    assert raw_expected['ExecStart'] == [
+        '/bin/cc', '-v', '$$IMAGE_BUILD_SOURCE', '$$(sha256sum file)',
+        "awk '{print $$1}'"]
+    properties = dict(raw_expected)
+    properties['ExecStart'] = BusctlSystemdBackend._normalize_exec_start([[
+        '/bin/cc', raw_expected['ExecStart'], False, 0, 0, 0, 0, 0, 0, 0]])
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kw: {
+        'exists': True, 'unit_name': info['unit_name'], 'transient': True,
+        'active_state': 'inactive', 'control_group': None, 'properties': properties,
+        'result': 'success', 'invocation_id': 'f'*32})
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda unit: '/unit/mock')
+    readings = dict(PrivateNetwork=True, NoNewPrivileges=True, CapabilityBoundingSet=0,
+                    RuntimeMaxUSec=8000000, ExecMainCode=1, ExecMainStatus=0,
+                    ExecMainExitTimestampMonotonic=10)
+    monkeypatch.setattr(backend.systemd, '_get_property',
+                        lambda _obj, _iface, key: readings[key])
+    assert backend.observe(project_root=args['project_root'], job_id='c'*32,
+                           build_root_id=args['resource_id'])['ExecMainStatus'] == 0
+
+    for bad in (
+        ['/bin/cc', '-v', '$IMAGE_BUILD_SOURCE', '$(sha256sum file)', "awk '{print $1}'"],
+        ['/bin/cc', '-v', '$$$IMAGE_BUILD_SOURCE', '$$(sha256sum file)', "awk '{print $$1}'"],
+        [],
+    ):
+        properties['ExecStart'] = bad
+        with pytest.raises(SystemdBackendError, match='build property mismatch: ExecStart'):
+            backend.observe(project_root=args['project_root'], job_id='c'*32,
+                            build_root_id=args['resource_id'])
+
+
+def test_unknown_saved_argv_encoding_cannot_be_adopted(registered):
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    info['exec_argv_encoding'] = 'unknown'
+    with pytest.raises(SystemdBackendError, match='unsupported saved build argv encoding'):
+        backend.expected_properties(path, info)
+
+
+def test_modern_execstartex_remains_unencoded_in_persisted_request(registered, monkeypatch):
+    backend, args, request = registered
+    monkeypatch.setattr(backend.systemd, 'version', lambda: 255)
+    request['command'] += ['$', '$$FILE', '$(sha256sum x)', "awk '{print $1}'"]
+    saved_original = json.loads(json.dumps(request))
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    assert 'exec_argv_encoding' not in info
+    assert backend.systemd.properties['ExecStartEx'].value[0][1] == [
+        '/bin/cc', '-v', '$', '$$FILE', '$(sha256sum x)', "awk '{print $1}'"]
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    assert backend.expected_properties(path, info)['ExecStart'] == [
+        '/bin/cc', *saved_original['command'][1:]]
+
+
+def test_legacy_large_but_kernel_representable_dollar_argument_is_encoded():
+    from zog.root_control.build import legacy_systemd_argv
+    raw = '$' * (64 * 1024)
+    assert legacy_systemd_argv(['/bin/cc', raw]) == ['/bin/cc', '$' * (128 * 1024)]

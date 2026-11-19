@@ -24,7 +24,9 @@ attempts lacking the mode keep the historical strict readback rule.
 On 254+, `ExecStartEx` with `no-env-expand` remains unchanged.
 
 The legacy encoder fails closed for NUL, invalid UTF-8 and an
-encoded argument exceeding the Linux maximum string length. Such
+original argument exceeding a conservative Linux execve string bound.
+The doubled D-Bus wire form may be larger; it is not the kernel argv.
+Such
 requests fail *before* the durable attempted-start marker and before
 journal-barrier registration or systemd job submission.
 
