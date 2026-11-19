@@ -69,6 +69,37 @@ def canonical_request(raw):
     return value
 
 
+LEGACY_SYSTEMD_ARGV_ENCODING = 'systemd-252-dollar-doubled-v1'
+# Linux MAX_ARG_STRLEN is PAGE_SIZE * 32 on the supported compiler hosts.
+# Validate the eventual execve argv, not the larger D-Bus wire form.
+LEGACY_ARGV_MAX_BYTES = 128 * 1024 - 1
+
+
+def legacy_systemd_argv(command):
+    """Encode literal argv for systemd 250-253's expanding ExecStart D-Bus API.
+
+    systemd stores the doubled dollar signs in ExecStart. Its executor then
+    reduces each '$$' to one literal '$', without consulting environment
+    variables, splitting words or invoking a shell. The original build request
+    must never be rewritten to this wire representation.
+    """
+    if not isinstance(command, list) or not command:
+        raise SystemdBackendError('invalid legacy build argv')
+    encoded = []
+    for arg in command:
+        if not isinstance(arg, str) or '\0' in arg:
+            raise SystemdBackendError('invalid legacy build argument')
+        wire = arg.replace('$', '$$')
+        try:
+            size = len(arg.encode('utf-8'))
+        except UnicodeEncodeError as exc:
+            raise SystemdBackendError('build argument is not valid UTF-8') from exc
+        if size > LEGACY_ARGV_MAX_BYTES:
+            raise SystemdBackendError('build argument exceeds legacy exec limit')
+        encoded.append(wire)
+    return encoded
+
+
 def root_path(root, source, output, virtual):
     """Resolve symlinks using guest-root semantics, never host absolute links."""
     pending = list(PurePosixPath(virtual).parts[1:])
@@ -282,11 +313,16 @@ class BuildBackend:
             raise SystemdBackendError('build start already attempted; inspect existing job')
         systemd_version = self.systemd.version()
         if systemd_version < 250: raise SystemdBackendError('systemd 250 or later required')
-        # Before recording any start attempt, fail closed when legacy
-        # ExecStart cannot provide the literal argv contract of ExecStartEx.
         command = [info['resolved_executable'], *info['request']['command'][1:]]
-        if systemd_version < 254 and any('$' in arg for arg in command):
-            raise SystemdBackendError('systemd before 254 cannot preserve literal $ in build argv')
+        if systemd_version < 254:
+            # Validate the wire form before the journal barrier registration
+            # or an attempted-start record. Never mutate the canonical argv.
+            # The stored encoding mode makes the later ExecStart readback
+            # comparable to this exact attempt, even across upgrades.
+            legacy_command = legacy_systemd_argv(command)
+            info['exec_argv_encoding'] = LEGACY_SYSTEMD_ARGV_ENCODING
+        else:
+            legacy_command = None
         null_device = self.private_null(path) if info['request'].get('device_profile') == 'private-null-permission-test' else None
         if self.journal_barrier:
             if request['termination_grace_seconds'] < 3:
@@ -333,7 +369,7 @@ class BuildBackend:
             # systemd 252 does not recognize ExecStartEx; legacy a(sasb)
             # passes executable, argv and one ignore-failure boolean.
             props.append(self.systemd._property('ExecStart', 'a(sasb)',
-                1, command[0], len(command), *command, 'false'))
+                1, command[0], len(legacy_command), *legacy_command, 'false'))
         else:
             props.append(['ExecStartEx', Variant('a(sasas)', [[
                 command[0], command, ['no-env-expand']]])])
@@ -361,10 +397,16 @@ class BuildBackend:
     @staticmethod
     def expected_properties(path, info):
         r = info['request']
+        command = [info['resolved_executable'], *r['command'][1:]]
+        mode = info.get('exec_argv_encoding')
+        if mode == LEGACY_SYSTEMD_ARGV_ENCODING:
+            command = legacy_systemd_argv(command)
+        elif mode is not None:
+            raise SystemdBackendError('unsupported saved build argv encoding')
         return {'RootDirectory':str(path/'root'), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
-                'ExecStart':[info['resolved_executable'], *r['command'][1:]],
+                'ExecStart':command,
                 'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
                 'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
 
