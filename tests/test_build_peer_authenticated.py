@@ -75,7 +75,7 @@ def test_historical_registration_remains_readable_but_not_replayable(registered)
         backend.prepare(project_root=project, job_id='c'*32, request=request)
     with pytest.raises(SystemdBackendError, match='historical or differently bound'):
         backend.start(project_root=project, job_id='c'*32, request=request)
-    assert not (path/'jobs'/'c'*32).exists()
+    assert not (path/'jobs'/('c'*32+'.json')).exists()
 
 
 def test_existing_job_cannot_be_replayed_by_different_peer_or_old_schema(registered):
