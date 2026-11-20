@@ -149,6 +149,19 @@ def check_peer_access(path, peer, required, *, label):
             raise SystemdBackendError(f'{label} inaccessible to build peer (EACCES): {item}')
     return path
 
+def check_peer_tree_access(root, peer, *, writable, label):
+    """Check entire input tree before privileged import touches any storage."""
+    for current, directories, files in os.walk(root, followlinks=False):
+        for path in (Path(current), *(Path(current)/name for name in directories+files)):
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                continue
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise SystemdBackendError(f'{label} has unsupported entry: {path}')
+            permissions = (7 if writable else 5) if stat.S_ISDIR(mode) else (6 if writable else 4)
+            check_peer_access(path, peer, permissions, label=label)
+
+
 def root_path(root, source, output, virtual):
     """Resolve symlinks using guest-root semantics, never host absolute links."""
     pending = list(PurePosixPath(virtual).parts[1:])
@@ -242,8 +255,8 @@ class BuildBackend:
         # The input Project must already be accessible to the executing peer;
         # root-control cannot manufacture that access with privileged chown.
         for item, label in zip(paths, ('prepared root', 'source workspace', 'output workspace')):
-            check_peer_access(item, _peer, 7 if label == 'output workspace' else 5,
-                              label=label)
+            check_peer_tree_access(item, _peer, writable=label == 'output workspace',
+                                   label=label)
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i+1:]):
             raise SystemdBackendError('build root/source/output paths must not overlap')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
@@ -305,7 +318,16 @@ class BuildBackend:
         self._tree(imported, 0, 0, immutable=True)
         for phase, workspace in zip(('sync-source', 'sync-output'), paths[1:]):
             progress(phase)
-            self._tree(workspace, uid, gid)
+            # Source/output are application-owned and were checked under the
+            # exact authenticated peer. Do not chown/chmod another application
+            # tree just to make a privileged controller accept it.
+            for current, _dirs, files in os.walk(workspace, followlinks=False):
+                for name in files:
+                    item = Path(current) / name
+                    if item.is_file() and not item.is_symlink():
+                        with item.open('rb') as stream:
+                            os.fsync(stream.fileno())
+                synchronize_directory(Path(current))
         record['state'] = 'ready'
         progress('ready')
         return record
