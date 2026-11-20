@@ -1,5 +1,6 @@
 import os
 import socket
+import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
@@ -52,8 +53,11 @@ class RootControlDaemon:
                 while True:
                     conn, _ = server.accept()
                     try:
+                        # Capture kernel credentials on the accepted Unix socket.
+                        # A request field is never used as an execution identity.
+                        kernel_peer = self._kernel_peer(conn)
                         request = decode(conn, deadline=time.monotonic() + 10.0)
-                        self._dispatch(conn, request, workers, slots)
+                        self._dispatch(conn, request, workers, slots, peer=kernel_peer)
                     except Exception as exc:
                         with conn:
                             self._respond(conn, {"ok": False, "error": str(exc)})
@@ -66,20 +70,31 @@ class RootControlDaemon:
         except OSError:
             emit("root-control-response-undelivered", operation=operation, resource_id=resource_id)
 
-    def _dispatch(self, conn, request, workers, slots):
+    @staticmethod
+    def _kernel_peer(conn):
+        raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                              struct.calcsize('3i'))
+        if len(raw) != struct.calcsize('3i'):
+            raise PermissionError('Unix socket peer credentials unavailable')
+        pid, uid, gid = struct.unpack('3i', raw)
+        if pid <= 0 or uid < 0 or gid < 0:
+            raise PermissionError('invalid Unix socket peer credentials')
+        return (uid, gid)
+
+    def _dispatch(self, conn, request, workers, slots, *, peer=None):
         lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
             return
         try:
-            workers[lane].submit(self._serve_request, conn, request, slots[lane], time.monotonic())
+            workers[lane].submit(self._serve_request, conn, request, slots[lane], time.monotonic(), peer)
         except BaseException:
             slots[lane].release()
             conn.close()
             raise
 
-    def _serve_request(self, conn, request, slot, queued_at=None):
+    def _serve_request(self, conn, request, slot, queued_at=None, peer=None):
         started = time.monotonic()
         registration = request.get('operation') == 'build_register'
         starting_service = request.get('operation') == 'systemd_start_service'
@@ -95,7 +110,7 @@ class RootControlDaemon:
         try:
             with conn:
                 try:
-                    response = self.handle(request)
+                    response = self.handle(request, peer=peer)
                 except Exception as exc:
                     response = {"ok": False, "error": str(exc), "storage_failure": isinstance(exc, PersistenceError), "code": getattr(exc, "code", None)}
                 if registration:
@@ -112,10 +127,19 @@ class RootControlDaemon:
         finally:
             slot.release()
 
-    def handle(self, request):
+    def handle(self, request, *, peer=None):
         operation = request.get("operation")
         if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
+            # Only SO_PEERCRED, captured on the connection before queuing,
+            # grants access to build operations. It cannot be set in JSON.
+            from .build import authenticated_build_peer
+            selected = authenticated_build_peer(peer)
             arguments = {k:v for k,v in request.items() if k != "operation"}
+            if set(arguments) & {'_peer', 'peer', 'peer_identity', 'execution_user_id',
+                                 'execution_group_id', 'User', 'Group'}:
+                raise ValueError('caller-selected build identity is forbidden')
+            if operation in {'build_register', 'build_prepare', 'build_start'}:
+                arguments['_peer'] = selected
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
             from .processes import inspect
