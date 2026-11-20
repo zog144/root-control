@@ -193,3 +193,21 @@ def test_terminal_observation_rejects_wrong_systemd_user_group(registered, monke
     with pytest.raises(SystemdBackendError, match='build property mismatch: Group'):
         backend.observe(project_root=args['project_root'], job_id='c'*32,
                         build_root_id=args['resource_id'])
+
+
+@pytest.mark.parametrize('method,kwargs', [
+    ('observe', {'job_id':'c'*32}),
+    ('cleanup', {'job_id':'c'*32}),
+    ('cancel', {'job_id':'c'*32}),
+    ('release', {}),
+    ('forget', {}),
+])
+def test_second_nonroot_peer_cannot_operate_existing_resource(registered, method, kwargs):
+    backend, args, request = registered
+    if method in ('observe','cleanup','cancel'):
+        backend.prepare(project_root=args['project_root'], job_id='c'*32, request=request)
+    unauthorized = (backend.test_peer[0] + 1, backend.test_peer[1] + 1)
+    with pytest.raises(SystemdBackendError, match='historical or differently bound'):
+        getattr(backend, method)(project_root=args['project_root'],
+                                  build_root_id=args['resource_id'],
+                                  _peer=unauthorized, **kwargs)

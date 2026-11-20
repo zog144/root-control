@@ -36,6 +36,11 @@ def registered(tmp_path, monkeypatch):
     backend.register=bound(backend.register)
     backend.prepare=bound(backend.prepare)
     backend.start=bound(backend.start)
+    backend.observe=bound(backend.observe)
+    backend.cleanup=bound(backend.cleanup)
+    backend.cancel=bound(backend.cancel)
+    backend.release=bound(backend.release)
+    backend.forget=bound(backend.forget)
     backend.test_peer=peer
     rid='b'*32
     args=dict(project_root=project,resource_id=rid,prepared_root=root,source_directory=source,output_directory=output,

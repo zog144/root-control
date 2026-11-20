@@ -548,11 +548,16 @@ class BuildBackend:
             result.update(User=str(identity_record['uid']), Group=str(identity_record['gid']))
         return result
 
-    def observe(self, *, project_root, job_id, build_root_id):
-        path, _ = self.load(project_root, build_root_id)
+    def observe(self, *, project_root, job_id, build_root_id, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        authenticated_build_peer(_peer)
+        if registration.get('schema') == INHERITED_BUILD_SCHEMA:
+            assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return {'exists':False}
         info = json.loads(job_path.read_text())
+        if info.get('schema') == INHERITED_BUILD_SCHEMA:
+            assert_bound_job(info, _peer)
         expected = self.expected_properties(path,info)
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
@@ -605,11 +610,13 @@ class BuildBackend:
             return values.get('populated') == '0'
         except FileNotFoundError: return True
 
-    def cleanup(self, *, project_root, job_id, build_root_id):
-        path, _ = self.load(project_root, build_root_id)
+    def cleanup(self, *, project_root, job_id, build_root_id, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return True  # No start is possible without its durable privileged record.
         info = json.loads(job_path.read_text())
+        assert_bound_job(info, _peer)
         for unit in (info['unit_name'], info['slice_name']):
             raw = self.systemd.observe(project_root=project_root, unit_name=unit)
             if raw['exists']:
@@ -625,12 +632,15 @@ class BuildBackend:
         replace_json(job_path, info)
         return True
 
-    def cancel(self, *, project_root, job_id, build_root_id, expected_invocation_id=None):
-        path, _ = self.load(project_root, build_root_id)
+    def cancel(self, *, project_root, job_id, build_root_id, expected_invocation_id=None, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return
         info = json.loads(job_path.read_text())
-        observed = self.observe(project_root=project_root,job_id=job_id,build_root_id=build_root_id)
+        assert_bound_job(info, _peer)
+        observed = self.observe(project_root=project_root,job_id=job_id,
+                                build_root_id=build_root_id, _peer=_peer)
         if not observed.get('exists'): return
         if expected_invocation_id and observed.get('invocation_id') != expected_invocation_id:
             raise SystemdBackendError('refusing to cancel a different build invocation')
@@ -677,13 +687,15 @@ class BuildBackend:
                 os.fchown(descriptor, uid, gid)
                 os.fsync(descriptor)
 
-    def release(self, *, project_root, build_root_id):
+    def release(self, *, project_root, build_root_id, _peer):
+        authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
         manifest = path/'registration.json'
         if not manifest.exists():
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
             return {'state': 'released'}
         record = json.loads(manifest.read_text())
+        assert_bound_registration(record, _peer)
         if record['state'] == 'released': return record
         for job in (path/'jobs').glob('*.json'):
             if not json.loads(job.read_text())['process_cleanup_complete']:
@@ -699,12 +711,14 @@ class BuildBackend:
         replace_json(manifest, record)
         return record
 
-    def forget(self, *, project_root, build_root_id):
+    def forget(self, *, project_root, build_root_id, _peer):
+        authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
         if not path.exists():
             synchronize_directory(path.parent)
             return
         raw = json.loads((path/'registration.json').read_text())
+        assert_bound_registration(raw, _peer)
         if raw['state'] != 'released': raise SystemdBackendError('cannot forget retained build root')
         from .journal_barrier import JournalBarrier
         for job in (path/'jobs').glob('*.json'):

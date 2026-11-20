@@ -138,8 +138,7 @@ class RootControlDaemon:
             if set(arguments) & {'_peer', 'peer', 'peer_identity', 'execution_user_id',
                                  'execution_group_id', 'User', 'Group'}:
                 raise ValueError('caller-selected build identity is forbidden')
-            if operation in {'build_register', 'build_prepare', 'build_start'}:
-                arguments['_peer'] = selected
+            arguments['_peer'] = selected
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
             from .processes import inspect
