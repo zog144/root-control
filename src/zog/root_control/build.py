@@ -1,11 +1,10 @@
-"""Build resource registration and finite systemd execution.
+"""Finite builds bound to the authenticated non-root Unix socket peer.
 
-The socket retains root-control's existing installed service authorization.
-Finite jobs have no selectable execution account: transient services omit
-User=/Group= and run under the systemd manager's default service credentials.
-Native acceptance must compare the resulting child EUID/EGID against the
-actual root-control process (normally root); omission alone is not evidence
-of inheritance from a non-root process.
+Only kernel SO_PEERCRED determines the execution UID/GID. The caller's JSON
+cannot select or switch identities. The root-control daemon keeps its own
+privileged management role; PID1 receives numeric User=/Group= derived from
+the already authenticated box-control peer, not from the root daemon.
+Historical registrations remain readable but cannot start again.
 """
 import hashlib
 import json
@@ -100,6 +99,104 @@ def legacy_systemd_argv(command):
     return encoded
 
 
+
+INHERITED_BUILD_SCHEMA = 2
+
+
+def authenticated_build_peer(peer):
+    """Validate a kernel-derived (effective uid, primary gid) pair."""
+    if (type(peer) is not tuple or len(peer) != 2
+            or any(type(x) is not int or not 0 < x < 2**31 for x in peer)):
+        raise SystemdBackendError('build requires authenticated non-root socket peer UID/GID')
+    return peer
+
+
+def assert_bound_registration(record, peer):
+    uid, gid = authenticated_build_peer(peer)
+    if (type(record) is not dict or record.get('schema') != INHERITED_BUILD_SCHEMA
+            or record.get('execution_identity') != {'uid':uid, 'gid':gid}):
+        raise SystemdBackendError('historical or differently bound build registration cannot replay')
+    return uid, gid
+
+
+def assert_bound_job(record, peer):
+    uid, gid = authenticated_build_peer(peer)
+    if (type(record) is not dict or record.get('schema') != INHERITED_BUILD_SCHEMA
+            or record.get('execution_identity') != {'uid':uid, 'gid':gid}):
+        raise SystemdBackendError('historical or differently bound build job cannot replay')
+    return uid, gid
+
+
+def check_peer_access(path, peer, required, *, label):
+    """Conservative POSIX DAC preflight; actual child access is kernel enforced.
+
+    Do not repair permissions, create directories or chown to make a missing
+    Project accessible. Supplementary groups/ACLs are deliberately not
+    inferred from an unauthenticated request; their absence may fail closed.
+    """
+    uid, gid = authenticated_build_peer(peer)
+    path = Path(path)
+    for item in (*reversed(path.parents), path):
+        try:
+            st = item.stat()
+        except FileNotFoundError as exc:
+            raise SystemdBackendError(f'{label} missing (ENOENT): {item}') from exc
+        except PermissionError as exc:
+            raise SystemdBackendError(f'{label} inaccessible (EACCES): {item}') from exc
+        bits = (st.st_mode >> (6 if st.st_uid == uid else 3 if st.st_gid == gid else 0)) & 7
+        need = required if item == path else 1
+        if bits & need != need:
+            raise SystemdBackendError(f'{label} inaccessible to build peer (EACCES): {item}')
+    return path
+
+def check_peer_tree_access(root, peer, *, writable, label):
+    """Check entire input tree before privileged import touches any storage."""
+    for current, directories, files in os.walk(root, followlinks=False):
+        for path in (Path(current), *(Path(current)/name for name in directories+files)):
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                continue
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise SystemdBackendError(f'{label} has unsupported entry: {path}')
+            permissions = (7 if writable else 5) if stat.S_ISDIR(mode) else (6 if writable else 4)
+            check_peer_access(path, peer, permissions, label=label)
+
+
+def kernel_build_child_identity(pid, control_group, saved):
+    """Verify the live kernel child, not only PID1's requested User/Group."""
+    if type(pid) is not int or pid <= 1 or not isinstance(control_group, str) or not control_group.startswith('/'):
+        raise SystemdBackendError('live build child PID/cgroup unavailable')
+    if (type(saved) is not dict or set(saved) != {'uid', 'gid'}):
+        raise SystemdBackendError('missing protected build peer identity')
+    try:
+        pid_root = Path('/proc') / str(pid)
+        status = (pid_root/'status').read_text()
+        cgroups = (pid_root/'cgroup').read_text().splitlines()
+    except (FileNotFoundError, PermissionError) as exc:
+        raise SystemdBackendError('live build child credentials unavailable') from exc
+    identities = {}
+    for line in status.splitlines():
+        if line.startswith(('Uid:', 'Gid:')):
+            key, values = line.split(':', 1)
+            parts = values.split()
+            if len(parts) != 4 or not all(x.isascii() and x.isdecimal() for x in parts):
+                raise SystemdBackendError('malformed live build child kernel credentials')
+            identities[key] = tuple(int(x) for x in parts)
+    # The native compiler Host uses the unified cgroup v2 hierarchy.
+    member = [line[3:] for line in cgroups if line.startswith('0::')]
+    if len(member) != 1 or not (member[0] == control_group
+                                or member[0].startswith(control_group.rstrip('/') + '/')):
+        raise SystemdBackendError('live build child is outside selected systemd cgroup')
+    if (set(identities) != {'Uid', 'Gid'} or
+            any(identities[key][index] != saved[identity_key]
+                for key,identity_key in [('Uid','uid'),('Gid','gid')]
+                for index in (1,3)) or
+            saved['uid'] == 0 or saved['gid'] == 0):
+        raise SystemdBackendError('live child EUID/EGID differs from authenticated build peer')
+    return {'pid':pid, 'euid':saved['uid'], 'egid':saved['gid'],
+            'verified_cgroup':control_group}
+
+
 def root_path(root, source, output, virtual):
     """Resolve symlinks using guest-root semantics, never host absolute links."""
     pending = list(PurePosixPath(virtual).parts[1:])
@@ -181,13 +278,20 @@ class BuildBackend:
         return record
 
     def register(self, *, project_root, resource_id, prepared_root, source_directory, output_directory,
-                 input_manifest_id):
+                 input_manifest_id, _peer):
+        uid, gid = authenticated_build_peer(_peer)
         identity(resource_id)
         root = Path(project_root).resolve()
+        check_peer_access(root, _peer, 5, label='build Project')
         paths = [Path(p).resolve(strict=True) for p in (prepared_root, source_directory, output_directory)]
         allowed = root / 'state' / 'image-build' / 'attempts'
         if any(not p.is_dir() or not p.is_relative_to(allowed) for p in paths):
             raise SystemdBackendError('build inputs must be directories beneath state/image-build/attempts')
+        # The input Project must already be accessible to the executing peer;
+        # root-control cannot manufacture that access with privileged chown.
+        for item, label in zip(paths, ('prepared root', 'source workspace', 'output workspace')):
+            check_peer_tree_access(item, _peer, writable=label == 'output workspace',
+                                   label=label)
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i+1:]):
             raise SystemdBackendError('build root/source/output paths must not overlap')
         if not isinstance(input_manifest_id, str) or not input_manifest_id:
@@ -201,6 +305,7 @@ class BuildBackend:
         ensure_directory(path)
         if manifest.exists():
             previous = json.loads(manifest.read_text())
+            assert_bound_registration(previous, _peer)
             if previous['intent'] != intent: raise SystemdBackendError('registration identity already bound')
             if previous['state'] == 'ready': return previous
             if previous['state'] == 'released': raise SystemdBackendError('registration was released')
@@ -214,7 +319,9 @@ class BuildBackend:
                     b = Path(prior['intent'][key])
                     if a == b or a.is_relative_to(b) or b.is_relative_to(a):
                         raise SystemdBackendError('workspace already registered')
-        record = {'schema': 1, 'resource_id': resource_id, 'intent': intent, 'state': 'importing'}
+        record = {'schema': INHERITED_BUILD_SCHEMA, 'resource_id': resource_id,
+                  'execution_identity': {'uid': uid, 'gid': gid},
+                  'intent': intent, 'state': 'importing'}
         started = time.monotonic()
         record['started_at'] = time.time()
         def progress(phase):
@@ -246,15 +353,26 @@ class BuildBackend:
         self._tree(imported, 0, 0, immutable=True)
         for phase, workspace in zip(('sync-source', 'sync-output'), paths[1:]):
             progress(phase)
-            self._tree(workspace, os.geteuid(), os.getegid())
+            # Source/output are application-owned and were checked under the
+            # exact authenticated peer. Do not chown/chmod another application
+            # tree just to make a privileged controller accept it.
+            for current, _dirs, files in os.walk(workspace, followlinks=False):
+                for name in files:
+                    item = Path(current) / name
+                    if item.is_file() and not item.is_symlink():
+                        with item.open('rb') as stream:
+                            os.fsync(stream.fileno())
+                synchronize_directory(Path(current))
         record['state'] = 'ready'
         progress('ready')
         return record
 
-    def prepare(self, *, project_root, job_id, request):
+    def prepare(self, *, project_root, job_id, request, _peer):
         request = canonical_request(request)
+        authenticated_build_peer(_peer)
         identity(job_id)
         path, registration = self.load(project_root, request['build_root_id'])
+        uid, gid = assert_bound_registration(registration, _peer)
         binding = registration['intent']
         source, output = Path(binding['source_directory']), Path(binding['output_directory'])
         executable = request['command'][0]
@@ -271,13 +389,16 @@ class BuildBackend:
         if resolved is None: raise SystemdBackendError('executable not found inside build root and explicit PATH')
         unit = f'zog-{Path(project_root).name}-build{job_id}.service'
         slice_name = f'zog-{Path(project_root).name}-build{job_id}.slice'
-        result = dict(request=request, job_id=job_id, unit_name=unit, slice_name=slice_name,
+        result = dict(schema=INHERITED_BUILD_SCHEMA, request=request,
+                      execution_identity={'uid':uid, 'gid':gid},
+                      job_id=job_id, unit_name=unit, slice_name=slice_name,
                       resolved_executable=resolved, process_cleanup_complete=False)
         jobs = path / 'jobs'
         ensure_directory(jobs)
         job_path = jobs / (job_id+'.json')
         if job_path.exists():
             prior = json.loads(job_path.read_text())
+            assert_bound_job(prior, _peer)
             if prior['request'] != request: raise SystemdBackendError('job identity already bound')
             return prior
         for other in jobs.glob('*.json'):
@@ -305,9 +426,13 @@ class BuildBackend:
         synchronize_directory(path)
         return node
 
-    def start(self, *, project_root, job_id, request):
-        info = self.prepare(project_root=project_root, job_id=job_id, request=request)
+    def start(self, *, project_root, job_id, request, _peer):
+        uid, gid = authenticated_build_peer(_peer)
+        info = self.prepare(project_root=project_root, job_id=job_id,
+                            request=request, _peer=_peer)
+        assert_bound_job(info, _peer)
         path, registration = self.load(project_root, request['build_root_id'])
+        assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(job_id+'.json')
         if info.get('start_attempted'):
             raise SystemdBackendError('build start already attempted; inspect existing job')
@@ -331,7 +456,7 @@ class BuildBackend:
             # Retry before start reuses its identity; attempted jobs never restart.
             if not info.get('journal_barrier_token'):
                 info['journal_barrier_token'] = self.journal_barrier.register(
-                    info['unit_name'], os.geteuid(), job_id)
+                    info['unit_name'], uid, job_id)
                 replace_json(job_path, info)
         elif info.get('journal_barrier_token'):
             raise SystemdBackendError('prepared journal barrier requires enabled broker')
@@ -345,6 +470,7 @@ class BuildBackend:
             'Type': ('s', 'exec'), 'ExitType': ('s', 'cgroup'), 'Restart': ('s', 'no'),
             'KillMode': ('s', 'control-group'), 'RemainAfterExit': ('b', False), 'AddRef': ('b', True),
             'RootDirectory': ('s', str(path/'root')), 'WorkingDirectory': ('s', r['working_directory']),
+            'User': ('s', str(uid)), 'Group': ('s', str(gid)),
             'ProtectSystem': ('s', 'strict'), 'PrivateNetwork': ('b', True), 'PrivateDevices': ('b', True),
             'PrivateTmp': ('b', True), 'MountAPIVFS': ('b', True), 'NoNewPrivileges': ('b', True),
             'CapabilityBoundingSet': ('t', 0), 'AmbientCapabilities': ('t', 0),
@@ -403,18 +529,35 @@ class BuildBackend:
             command = legacy_systemd_argv(command)
         elif mode is not None:
             raise SystemdBackendError('unsupported saved build argv encoding')
-        return {'RootDirectory':str(path/'root'), 'ExitType':'cgroup','Type':'exec',
+        identity_record = info.get('execution_identity')
+        if info.get('schema') == INHERITED_BUILD_SCHEMA:
+            if (type(identity_record) is not dict
+                    or set(identity_record) != {'uid', 'gid'}
+                    or any(type(identity_record[k]) is not int or identity_record[k] <= 0
+                           for k in ('uid', 'gid'))):
+                raise SystemdBackendError('saved build execution identity invalid')
+        elif identity_record is not None:
+            raise SystemdBackendError('historical job contains untrusted identity selection')
+        result = {'RootDirectory':str(path/'root'), 'ExitType':'cgroup','Type':'exec',
                 'Restart':'no','ProtectSystem':'strict','KillMode':'control-group',
                 'WorkingDirectory':r['working_directory'],
                 'ExecStart':command,
                 'PrivateNetwork':True,'NoNewPrivileges':True,'CapabilityBoundingSet':0,
                 'RuntimeMaxUSec':int(r['execution_timeout_seconds']*1000000)}
+        if identity_record is not None:
+            result.update(User=str(identity_record['uid']), Group=str(identity_record['gid']))
+        return result
 
-    def observe(self, *, project_root, job_id, build_root_id):
-        path, _ = self.load(project_root, build_root_id)
+    def observe(self, *, project_root, job_id, build_root_id, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        authenticated_build_peer(_peer)
+        if registration.get('schema') == INHERITED_BUILD_SCHEMA:
+            assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return {'exists':False}
         info = json.loads(job_path.read_text())
+        if info.get('schema') == INHERITED_BUILD_SCHEMA:
+            assert_bound_job(info, _peer)
         expected = self.expected_properties(path,info)
         try:
             raw = self.systemd.observe(project_root=project_root, unit_name=info['unit_name'])
@@ -427,6 +570,10 @@ class BuildBackend:
                     if properties.get(name) != value: raise SystemdBackendError(f'build property mismatch: {name}')
                 for key in ('ExecMainCode', 'ExecMainStatus', 'ExecMainExitTimestampMonotonic'):
                     raw[key] = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', key)
+                if raw.get('active_state') == 'active' and info.get('schema') == INHERITED_BUILD_SCHEMA:
+                    pid = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', 'MainPID')
+                    raw['child_identity'] = kernel_build_child_identity(
+                        pid, raw.get('control_group'), info['execution_identity'])
                 raw['cgroup_empty'] = (self.cgroup_empty(raw.get('control_group')) if raw.get('control_group') else raw.get('active_state') in ('inactive','failed'))
         except SystemdBackendError:
             # The last AddRef can vanish during this multi-property observation.
@@ -440,7 +587,7 @@ class BuildBackend:
             raw['journal_barrier'] = barrier.status(token)
             if not raw.get('exists'):
                 evidence = barrier.evidence(token,unit=info['unit_name'],job_id=job_id,
-                                            uid=os.geteuid())
+                                            uid=(info.get('execution_identity') or {}).get('uid', 0))
                 if evidence is not None:
                     properties=dict(evidence['properties'])
                     properties['ExecStart']=self.systemd._normalize_exec_start(properties.get('ExecStart'))
@@ -463,11 +610,13 @@ class BuildBackend:
             return values.get('populated') == '0'
         except FileNotFoundError: return True
 
-    def cleanup(self, *, project_root, job_id, build_root_id):
-        path, _ = self.load(project_root, build_root_id)
+    def cleanup(self, *, project_root, job_id, build_root_id, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return True  # No start is possible without its durable privileged record.
         info = json.loads(job_path.read_text())
+        assert_bound_job(info, _peer)
         for unit in (info['unit_name'], info['slice_name']):
             raw = self.systemd.observe(project_root=project_root, unit_name=unit)
             if raw['exists']:
@@ -483,12 +632,15 @@ class BuildBackend:
         replace_json(job_path, info)
         return True
 
-    def cancel(self, *, project_root, job_id, build_root_id, expected_invocation_id=None):
-        path, _ = self.load(project_root, build_root_id)
+    def cancel(self, *, project_root, job_id, build_root_id, expected_invocation_id=None, _peer):
+        path, registration = self.load(project_root, build_root_id)
+        assert_bound_registration(registration, _peer)
         job_path = path/'jobs'/(identity(job_id)+'.json')
         if not job_path.exists(): return
         info = json.loads(job_path.read_text())
-        observed = self.observe(project_root=project_root,job_id=job_id,build_root_id=build_root_id)
+        assert_bound_job(info, _peer)
+        observed = self.observe(project_root=project_root,job_id=job_id,
+                                build_root_id=build_root_id, _peer=_peer)
         if not observed.get('exists'): return
         if expected_invocation_id and observed.get('invocation_id') != expected_invocation_id:
             raise SystemdBackendError('refusing to cancel a different build invocation')
@@ -535,13 +687,15 @@ class BuildBackend:
                 os.fchown(descriptor, uid, gid)
                 os.fsync(descriptor)
 
-    def release(self, *, project_root, build_root_id):
+    def release(self, *, project_root, build_root_id, _peer):
+        authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
         manifest = path/'registration.json'
         if not manifest.exists():
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
             return {'state': 'released'}
         record = json.loads(manifest.read_text())
+        assert_bound_registration(record, _peer)
         if record['state'] == 'released': return record
         for job in (path/'jobs').glob('*.json'):
             if not json.loads(job.read_text())['process_cleanup_complete']:
@@ -557,12 +711,14 @@ class BuildBackend:
         replace_json(manifest, record)
         return record
 
-    def forget(self, *, project_root, build_root_id):
+    def forget(self, *, project_root, build_root_id, _peer):
+        authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
         if not path.exists():
             synchronize_directory(path.parent)
             return
         raw = json.loads((path/'registration.json').read_text())
+        assert_bound_registration(raw, _peer)
         if raw['state'] != 'released': raise SystemdBackendError('cannot forget retained build root')
         from .journal_barrier import JournalBarrier
         for job in (path/'jobs').glob('*.json'):

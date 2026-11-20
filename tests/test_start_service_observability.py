@@ -18,7 +18,7 @@ def test_start_timeout_diagnostics_include_operation_but_no_untrusted_payload(mo
     monkeypatch.setattr(daemon_module, "emit",
                         lambda name, **data: emitted.append((name, data)))
     stub = SimpleNamespace(
-        handle=lambda request: {"ok": True},
+        handle=lambda request, *, peer=None: {"ok": True},
         _respond=lambda conn, response, **kw: responses.append((response, kw)),
     )
     released = []

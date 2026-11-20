@@ -1,5 +1,10 @@
 """Read-only verifier for a controller-launched dollar-argv build on systemd 252.
 
+Superseded for peer-bound execution by acceptance/build_peer_bound_live.py,
+which checks the normal authenticated nonroot root-control socket and does not
+read protected files directly. Do not use this pre-issue-48 diagnostic as
+native acceptance of a new peer-bound build.
+
 Use ONLY after the native Work owner has installed/attested the reviewed
 controller, created a distinct disposable finite-build request *through
 box-control/root-control*, and retained its exact resource/job IDs.
@@ -11,6 +16,7 @@ accepted cleanup unloads the transient service. Never use old R5 IDs.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from zog.root_control.build import (
@@ -56,7 +62,8 @@ def check(*, project_root, build_root_id, job_id, phase, resources):
         raise RuntimeError('systemd ExecStart differs from encoded saved job command')
 
     observed = backend.observe(project_root=project_root, job_id=job_id,
-                               build_root_id=build_root_id)
+                               build_root_id=build_root_id,
+                               _peer=(os.geteuid(), os.getegid()))
     if not observed.get('exists') or observed.get('unit_name') != unit_name:
         raise RuntimeError('root-control rejected the native build observation')
     if observed.get('transient') is not True or not observed.get('invocation_id'):
