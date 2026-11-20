@@ -162,6 +162,41 @@ def check_peer_tree_access(root, peer, *, writable, label):
             check_peer_access(path, peer, permissions, label=label)
 
 
+def kernel_build_child_identity(pid, control_group, saved):
+    """Verify the live kernel child, not only PID1's requested User/Group."""
+    if type(pid) is not int or pid <= 1 or not isinstance(control_group, str) or not control_group.startswith('/'):
+        raise SystemdBackendError('live build child PID/cgroup unavailable')
+    if (type(saved) is not dict or set(saved) != {'uid', 'gid'}):
+        raise SystemdBackendError('missing protected build peer identity')
+    try:
+        pid_root = Path('/proc') / str(pid)
+        status = (pid_root/'status').read_text()
+        cgroups = (pid_root/'cgroup').read_text().splitlines()
+    except (FileNotFoundError, PermissionError) as exc:
+        raise SystemdBackendError('live build child credentials unavailable') from exc
+    identities = {}
+    for line in status.splitlines():
+        if line.startswith(('Uid:', 'Gid:')):
+            key, values = line.split(':', 1)
+            parts = values.split()
+            if len(parts) != 4 or not all(x.isascii() and x.isdecimal() for x in parts):
+                raise SystemdBackendError('malformed live build child kernel credentials')
+            identities[key] = tuple(int(x) for x in parts)
+    # The native compiler Host uses the unified cgroup v2 hierarchy.
+    member = [line[3:] for line in cgroups if line.startswith('0::')]
+    if len(member) != 1 or not (member[0] == control_group
+                                or member[0].startswith(control_group.rstrip('/') + '/')):
+        raise SystemdBackendError('live build child is outside selected systemd cgroup')
+    if (set(identities) != {'Uid', 'Gid'} or
+            any(identities[key][index] != saved[identity_key]
+                for key,identity_key in [('Uid','uid'),('Gid','gid')]
+                for index in (1,3)) or
+            saved['uid'] == 0 or saved['gid'] == 0):
+        raise SystemdBackendError('live child EUID/EGID differs from authenticated build peer')
+    return {'pid':pid, 'euid':saved['uid'], 'egid':saved['gid'],
+            'verified_cgroup':control_group}
+
+
 def root_path(root, source, output, virtual):
     """Resolve symlinks using guest-root semantics, never host absolute links."""
     pending = list(PurePosixPath(virtual).parts[1:])
@@ -530,6 +565,10 @@ class BuildBackend:
                     if properties.get(name) != value: raise SystemdBackendError(f'build property mismatch: {name}')
                 for key in ('ExecMainCode', 'ExecMainStatus', 'ExecMainExitTimestampMonotonic'):
                     raw[key] = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', key)
+                if raw.get('active_state') == 'active' and info.get('schema') == INHERITED_BUILD_SCHEMA:
+                    pid = self.systemd._get_property(obj, 'org.freedesktop.systemd1.Service', 'MainPID')
+                    raw['child_identity'] = kernel_build_child_identity(
+                        pid, raw.get('control_group'), info['execution_identity'])
                 raw['cgroup_empty'] = (self.cgroup_empty(raw.get('control_group')) if raw.get('control_group') else raw.get('active_state') in ('inactive','failed'))
         except SystemdBackendError:
             # The last AddRef can vanish during this multi-property observation.
