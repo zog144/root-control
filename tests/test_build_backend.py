@@ -53,7 +53,7 @@ def test_import_is_private_read_only_and_workspaces_stay_at_caller_paths(registe
     imported=backend.resource_path(args['project_root'],args['resource_id'])/'root'
     assert (imported/'bin/cc').read_text()=='fake compiler'
     assert not (imported/'bin/cc').stat().st_mode & 0o222
-    assert (args['source_directory']/'input',os.geteuid(),os.getegid()) in backend.test_ownership
+    assert not any(path.is_relative_to(args['source_directory']) for path,_,_ in backend.test_ownership)
     (args['prepared_root']/'bin/cc').write_text('changed original')
     backend.register(**args)
     assert (imported/'bin/cc').read_text()=='fake compiler'
@@ -235,10 +235,11 @@ def test_registration_rejects_alternate_account_arguments(registered):
         backend.register(**dict(args, execution_user_id=24202))
 
 
-def test_workspace_ownership_uses_running_process_credentials(registered):
+def test_workspaces_are_not_rechowned_or_chmodded_by_privileged_import(registered):
     backend, args, _ = registered
-    assert (args['source_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
-    assert (args['output_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+    assert not any(path.is_relative_to(args['source_directory'])
+                   or path.is_relative_to(args['output_directory'])
+                   for path,_,_ in backend.test_ownership)
 
 
 def test_registered_workspace_uses_authenticated_peer_not_daemon_uid(registered, monkeypatch):
@@ -257,8 +258,11 @@ def test_registered_workspace_uses_authenticated_peer_not_daemon_uid(registered,
     backend.register(project_root=args['project_root'], resource_id='d'*32,
                      prepared_root=prepared, source_directory=source,
                      output_directory=output, input_manifest_id='second-manifest')
-    assert (source, *backend.test_peer) in backend.test_ownership
-    assert (output, *backend.test_peer) in backend.test_ownership
+    assert not any(path == source or path == output
+                   for path,_,_ in backend.test_ownership)
+    assert backend.registration_status(project_root=args['project_root'],
+                 resource_id='d'*32)['execution_identity'] == {
+                     'uid': backend.test_peer[0], 'gid': backend.test_peer[1]}
 
 
 @pytest.mark.parametrize('peer', [(0, 1001), (1001, 0), (0, 0), None,
