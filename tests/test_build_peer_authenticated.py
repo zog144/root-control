@@ -129,3 +129,67 @@ def test_running_kernel_child_identity_cannot_be_root_or_mismatched():
         kernel_build_child_identity(os.getpid(), group, {'uid':uid + 1, 'gid':gid})
     with pytest.raises(SystemdBackendError, match='outside selected'):
         kernel_build_child_identity(os.getpid(), '/not-this-cgroup', {'uid':uid, 'gid':gid})
+
+
+def test_active_controller_observation_reads_actual_kernel_nonroot_child(registered, monkeypatch):
+    backend, args, request = registered
+    uid,gid = os.geteuid(),os.getegid()
+    if uid == 0 or gid == 0:
+        pytest.skip('needs a real nonroot process; native Work verifies systemd child')
+    group = [line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
+             if line.startswith('0::')]
+    if len(group) != 1:
+        pytest.skip('native cgroup v2 Host acceptance is separate')
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    props = backend.expected_properties(path, info)
+    assert props['User'] == str(uid) and props['Group'] == str(gid)
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kw: {
+        'exists':True, 'transient':True, 'unit_name':info['unit_name'],
+        'active_state':'active', 'control_group':group[0],
+        'properties':dict(props), 'result':'success', 'invocation_id':'a'*32})
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda name:'/fake/systemd/unit')
+    readings = dict(PrivateNetwork=True, NoNewPrivileges=True, CapabilityBoundingSet=0,
+                    RuntimeMaxUSec=8_000_000, ExecMainCode=0, ExecMainStatus=0,
+                    ExecMainExitTimestampMonotonic=0, MainPID=os.getpid())
+    monkeypatch.setattr(backend.systemd, '_get_property',
+                        lambda _unit,_iface,property:readings[property])
+    # Unlike a mock UID string, /proc/self/status is read from the actual
+    # nonroot Linux test process through the production controller method.
+    result = backend.observe(project_root=args['project_root'], job_id='c'*32,
+                             build_root_id=args['resource_id'])
+    assert result['child_identity'] == {
+        'pid':os.getpid(), 'euid':uid, 'egid':gid,
+        'verified_cgroup':group[0]}
+    readings['MainPID'] = 1
+    with pytest.raises(SystemdBackendError, match='PID/cgroup unavailable'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
+
+
+def test_terminal_observation_rejects_wrong_systemd_user_group(registered, monkeypatch):
+    backend, args, request = registered
+    info = backend.start(project_root=args['project_root'], job_id='c'*32, request=request)
+    path = backend.resource_path(args['project_root'], args['resource_id'])
+    props = backend.expected_properties(path, info)
+    assert props['User'] == str(backend.test_peer[0])
+    assert props['Group'] == str(backend.test_peer[1])
+    properties = dict(props, User='0')
+    monkeypatch.setattr(backend.systemd, 'observe', lambda **kwargs: {
+        'exists':True, 'unit_name':info['unit_name'], 'transient':True,
+        'active_state':'inactive', 'control_group':None,
+        'properties':properties, 'result':'success', 'invocation_id':'a'*32})
+    monkeypatch.setattr(backend.systemd, '_get_unit_path', lambda name:'/fake/unit')
+    readings = dict(PrivateNetwork=True, NoNewPrivileges=True, CapabilityBoundingSet=0,
+                    RuntimeMaxUSec=8_000_000, ExecMainCode=1, ExecMainStatus=0,
+                    ExecMainExitTimestampMonotonic=10)
+    monkeypatch.setattr(backend.systemd, '_get_property',
+                        lambda _unit,_iface,key:readings[key])
+    with pytest.raises(SystemdBackendError, match='build property mismatch: User'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
+    properties['User'] = props['User']
+    properties['Group'] = '0'
+    with pytest.raises(SystemdBackendError, match='build property mismatch: Group'):
+        backend.observe(project_root=args['project_root'], job_id='c'*32,
+                        build_root_id=args['resource_id'])
