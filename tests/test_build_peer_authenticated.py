@@ -226,3 +226,102 @@ def test_second_nonroot_peer_cannot_operate_existing_resource(registered, method
         getattr(backend, method)(project_root=args['project_root'],
                                   build_root_id=args['resource_id'],
                                   _peer=unauthorized, **kwargs)
+
+
+def _root_resource(registered):
+    """Separate disposable schema-2 resource bound to authenticated 0:0."""
+    backend, args, original = registered
+    project = args['project_root']
+    attempt = project/'state/image-build/attempts/root-peer'
+    prepared = attempt/'root'
+    (prepared/'bin').mkdir(parents=True)
+    (prepared/'bin/cc').write_text('test compiled executable')
+    (prepared/'bin/cc').chmod(0o755)
+    source = attempt/'source'
+    output = attempt/'output'
+    source.mkdir()
+    output.mkdir()
+    (source/'input').write_text('input')
+    resource = 'e'*32
+    registration = dict(project_root=project,resource_id=resource,
+                        prepared_root=prepared,source_directory=source,
+                        output_directory=output,input_manifest_id='root-source',
+                        _peer=(0,0))
+    manifest = backend.register(**registration)
+    request = dict(original)
+    request.update(build_root_id=resource,source_workspace_id=resource+'-source',
+                   output_workspace_id=resource+'-output',
+                   command=['cc','$IMAGE_BUILD_SOURCE',"awk '{print $1}'"])
+    return backend, registration, request, manifest
+
+
+def _check_root_launch_recovery(backend, registration, request, manifest, monkeypatch):
+    assert manifest['execution_identity'] == {'uid':0,'gid':0}
+    assert manifest['schema'] == INHERITED_BUILD_SCHEMA
+    assert backend.register(**registration) == manifest
+    kwargs = dict(project_root=registration['project_root'],job_id='f'*32,
+                  request=request,_peer=(0,0))
+    prepared = backend.prepare(**kwargs)
+    assert prepared['execution_identity'] == {'uid':0,'gid':0}
+    started = backend.start(**kwargs)
+    assert started['request'] == request
+    props = backend.systemd.properties
+    assert props['User'].value == '0' and props['Group'].value == '0'
+    assert props['RootDirectory'].value == str(backend.resource_path(
+        registration['project_root'],registration['resource_id'])/'root')
+    assert props['ProtectSystem'].value == 'strict'
+    for key in ('PrivateNetwork','PrivateDevices','PrivateTmp','NoNewPrivileges'):
+        assert props[key].value is True
+    assert props['CapabilityBoundingSet'].value == 0
+    assert props['AmbientCapabilities'].value == 0
+    assert props['MemoryMax'].value == request['resource_limits']['memory-maximum-bytes']
+    assert props['TasksMax'].value == request['resource_limits']['thread-count-maximum']
+    assert props['ExecStart'].value == [[
+        '/bin/cc',['/bin/cc','$$IMAGE_BUILD_SOURCE',"awk '{print $$1}'"],False]]
+    assert 'ExecStartEx' not in props
+    location = backend.resource_path(registration['project_root'],
+                                     registration['resource_id'])
+    saved = json.loads((location/'jobs'/('f'*32+'.json')).read_text())
+    assert saved['execution_identity'] == {'uid':0,'gid':0}
+    assert saved['start_attempted'] is True
+    expected = backend.expected_properties(location, saved)
+    assert (expected['User'],expected['Group']) == ('0','0')
+    monkeypatch.setattr(backend.systemd,'observe',lambda **kw:dict(
+        exists=True,unit_name=started['unit_name'],transient=True,
+        active_state='inactive',control_group=None,properties=dict(expected),
+        result='success',invocation_id='a'*32))
+    monkeypatch.setattr(backend.systemd,'_get_unit_path',lambda unit:'/fake/systemd/unit')
+    values=dict(PrivateNetwork=True,NoNewPrivileges=True,
+                CapabilityBoundingSet=0,RuntimeMaxUSec=8_000_000,
+                ExecMainCode=1,ExecMainStatus=0,
+                ExecMainExitTimestampMonotonic=1234)
+    monkeypatch.setattr(backend.systemd,'_get_property',
+                        lambda _unit,_interface,key:values[key])
+    observe=dict(project_root=registration['project_root'],
+                 job_id='f'*32,build_root_id=registration['resource_id'])
+    terminal=backend.observe(**observe,_peer=(0,0))
+    assert terminal['ExecMainStatus'] == 0 and terminal['cgroup_empty'] is True
+    assert terminal['invocation_id'] == 'a'*32
+    with pytest.raises(SystemdBackendError,match='historical or differently bound'):
+        backend.observe(**observe,_peer=(1001,1002))
+    with pytest.raises(SystemdBackendError,match='already attempted'):
+        backend.start(**kwargs)
+
+
+def test_root_peer_0_0_registration_and_recovery_with_synthetic_access(
+        registered, monkeypatch):
+    from zog.root_control import build as build_module
+    # Source-only test runner may be non-root. Simulate accessible files;
+    # native root-run counterpart below verifies actual Project DAC.
+    monkeypatch.setattr(build_module,'check_peer_access',
+                        lambda path,peer,required,*,label:Path(path))
+    monkeypatch.setattr(build_module,'check_peer_tree_access',
+                        lambda path,peer,*,writable,label:None)
+    _check_root_launch_recovery(*_root_resource(registered), monkeypatch)
+
+
+def test_root_compiler_registration_with_real_root_process(registered,monkeypatch):
+    # Run in an existing root CI lane, with actual kernel UID:GID == 0:0.
+    if (os.geteuid(),os.getegid()) != (0,0):
+        pytest.skip('requires actual 0:0 root test process')
+    _check_root_launch_recovery(*_root_resource(registered),monkeypatch)
