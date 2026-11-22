@@ -79,6 +79,12 @@ jobs:
           python -c 'import pathlib, zog.root_control as r; assert r.__version__ == "0.1.0"; assert pathlib.Path(r.__file__).resolve().is_relative_to(pathlib.Path.cwd() / "src")'
       - name: Run synthetic and mocked privileged-boundary tests
         run: python -m pytest -q tests
+      - name: Verify existing root caller 0:0 under real kernel credentials
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
+        run: |
+          sudo --preserve-env=PYTHONPATH "$(which python)" -m pytest -q -rs \
+            tests/test_build_peer_authenticated.py::test_root_compiler_registration_with_real_root_process
 
   artifacts:
     name: Wheel and source-distribution audit
