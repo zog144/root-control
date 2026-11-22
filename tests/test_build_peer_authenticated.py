@@ -320,8 +320,35 @@ def test_root_peer_0_0_registration_and_recovery_with_synthetic_access(
     _check_root_launch_recovery(*_root_resource(registered), monkeypatch)
 
 
-def test_root_compiler_registration_with_real_root_process(registered,monkeypatch):
-    # Run in an existing root CI lane, with actual kernel UID:GID == 0:0.
+def test_root_compiler_registration_with_real_root_process(tmp_path,monkeypatch):
+    # Run under the existing root CI lane; no nonroot fixture or new accounts.
     if (os.geteuid(),os.getegid()) != (0,0):
         pytest.skip('requires actual 0:0 root test process')
-    _check_root_launch_recovery(*_root_resource(registered),monkeypatch)
+    from .test_build_backend import Systemd
+    from zog.root_control.build import BuildBackend
+    project=tmp_path/'project'
+    attempt=project/'state/image-build/attempts/root-peer'
+    prepared=attempt/'root'
+    (prepared/'bin').mkdir(parents=True)
+    (prepared/'bin/cc').write_text('test executable')
+    (prepared/'bin/cc').chmod(0o755)
+    source=attempt/'source'
+    output=attempt/'output'
+    source.mkdir(); output.mkdir()
+    (source/'input').write_text('input')
+    backend=BuildBackend(Systemd(),tmp_path/'privileged')
+    rid='e'*32
+    args=dict(project_root=project,resource_id=rid,prepared_root=prepared,
+              source_directory=source,output_directory=output,
+              input_manifest_id='root-source',_peer=(0,0))
+    record=backend.register(**args)
+    request=dict(build_root_id=rid,source_workspace_id=rid+'-source',
+                 output_workspace_id=rid+'-output',
+                 command=['cc','$IMAGE_BUILD_SOURCE',"awk '{print $1}'"],
+                 environment={'PATH':'/bin'},working_directory='/image-build/source',
+                 startup_timeout_seconds=5,execution_timeout_seconds=8,
+                 termination_grace_seconds=2,
+                 resource_limits={'thread-count-maximum':32,'memory-maximum-bytes':10_000_000},
+                 read_only_root=True,network_access=False)
+    assert (project.stat().st_uid,project.stat().st_gid) == (0,0)
+    _check_root_launch_recovery(backend,args,request,record,monkeypatch)
