@@ -99,7 +99,7 @@ class JournalBarrier:
 
     def register(self, unit, uid, job_id):
         if not self.server: raise RuntimeError('journal barrier not started')
-        if not re.fullmatch(r'zog-[A-Za-z0-9_.-]+\.service', unit) or type(uid) is not int or uid <= 0:
+        if not re.fullmatch(r'zog-[A-Za-z0-9_.-]+\.service', unit) or type(uid) is not int or not 0 <= uid < 2**31:
             raise ValueError('invalid barrier registration')
         token = hashlib.sha256((boot_id()+'\0'+unit+'\0'+job_id).encode()).hexdigest()
         record = dict(schema=1, unit=unit, uid=uid, job_id=job_id, boot_id=boot_id(),
@@ -157,7 +157,7 @@ class JournalBarrier:
     def authenticate(record, pid, uid, snapshot):
         invocation = snapshot.get('InvocationID')
         if isinstance(invocation, list): invocation = bytes(invocation).hex()
-        if (uid != record['uid'] or uid == 0 or record['boot_id'] != boot_id()
+        if (type(uid) is not int or uid < 0 or uid != record['uid'] or record['boot_id'] != boot_id()
             or snapshot.get('ControlPID') != pid or snapshot.get('SubState') != 'stop-post'
             or snapshot.get('Id') != record['unit'] or snapshot.get('Transient') is not True
             or not isinstance(invocation,str) or not re.fullmatch('[0-9a-f]{32}', invocation)

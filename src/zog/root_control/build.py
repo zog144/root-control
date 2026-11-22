@@ -1,10 +1,10 @@
-"""Finite builds bound to the authenticated non-root Unix socket peer.
+"""Finite builds bound to the authenticated Unix socket peer.
 
-Only kernel SO_PEERCRED determines the execution UID/GID. The caller's JSON
-cannot select or switch identities. The root-control daemon keeps its own
-privileged management role; PID1 receives numeric User=/Group= derived from
-the already authenticated box-control peer, not from the root daemon.
-Historical registrations remain readable but cannot start again.
+Only kernel SO_PEERCRED determines the execution UID/GID, including 0:0 for
+an existing root caller. Caller JSON cannot select or switch identities.
+The root-control daemon manages systemd while PID1 receives numeric
+User=/Group= derived from the authenticated peer. Historical registrations
+remain readable but cannot start again.
 """
 import hashlib
 import json
@@ -104,10 +104,11 @@ INHERITED_BUILD_SCHEMA = 2
 
 
 def authenticated_build_peer(peer):
-    """Validate a kernel-derived (effective uid, primary gid) pair."""
+    """Validate kernel-derived UID/GID, permitting root only as exact 0:0."""
     if (type(peer) is not tuple or len(peer) != 2
-            or any(type(x) is not int or not 0 < x < 2**31 for x in peer)):
-        raise SystemdBackendError('build requires authenticated non-root socket peer UID/GID')
+            or any(type(x) is not int or not 0 <= x < 2**31 for x in peer)
+            or (peer[0] == 0) != (peer[1] == 0)):
+        raise SystemdBackendError('build requires authenticated socket peer UID/GID (root must be 0:0)')
     return peer
 
 
@@ -187,11 +188,11 @@ def kernel_build_child_identity(pid, control_group, saved):
     if len(member) != 1 or not (member[0] == control_group
                                 or member[0].startswith(control_group.rstrip('/') + '/')):
         raise SystemdBackendError('live build child is outside selected systemd cgroup')
+    authenticated_build_peer((saved.get('uid'), saved.get('gid')))
     if (set(identities) != {'Uid', 'Gid'} or
             any(identities[key][index] != saved[identity_key]
                 for key,identity_key in [('Uid','uid'),('Gid','gid')]
-                for index in (1,3)) or
-            saved['uid'] == 0 or saved['gid'] == 0):
+                for index in (1,3))):
         raise SystemdBackendError('live child EUID/EGID differs from authenticated build peer')
     return {'pid':pid, 'euid':saved['uid'], 'egid':saved['gid'],
             'verified_cgroup':control_group}
@@ -531,11 +532,12 @@ class BuildBackend:
             raise SystemdBackendError('unsupported saved build argv encoding')
         identity_record = info.get('execution_identity')
         if info.get('schema') == INHERITED_BUILD_SCHEMA:
-            if (type(identity_record) is not dict
-                    or set(identity_record) != {'uid', 'gid'}
-                    or any(type(identity_record[k]) is not int or identity_record[k] <= 0
-                           for k in ('uid', 'gid'))):
+            if type(identity_record) is not dict or set(identity_record) != {'uid', 'gid'}:
                 raise SystemdBackendError('saved build execution identity invalid')
+            try:
+                authenticated_build_peer((identity_record['uid'], identity_record['gid']))
+            except SystemdBackendError as exc:
+                raise SystemdBackendError('saved build execution identity invalid') from exc
         elif identity_record is not None:
             raise SystemdBackendError('historical job contains untrusted identity selection')
         result = {'RootDirectory':str(path/'root'), 'ExitType':'cgroup','Type':'exec',
