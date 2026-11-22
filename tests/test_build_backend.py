@@ -270,12 +270,18 @@ def test_registered_workspace_uses_authenticated_peer_not_daemon_uid(registered,
                      'uid': backend.test_peer[0], 'gid': backend.test_peer[1]}
 
 
-@pytest.mark.parametrize('peer', [(0, 1001), (1001, 0), (0, 0), None,
-                                  ('1001', 1001), (1001, True)])
-def test_build_peer_root_and_forgery_rejected(peer):
+@pytest.mark.parametrize('peer', [(0, 1001), (1001, 0), None, (-1, 0),
+                                  ('1001', 1001), (1001, True), (0, False)])
+def test_build_peer_malformed_and_partial_root_rejected(peer):
     from zog.root_control.build import authenticated_build_peer
-    with pytest.raises(SystemdBackendError, match='authenticated non-root'):
+    with pytest.raises(SystemdBackendError, match='authenticated socket peer'):
         authenticated_build_peer(peer)
+
+
+def test_build_peer_accepts_existing_root_and_nonroot_pairs():
+    from zog.root_control.build import authenticated_build_peer
+    assert authenticated_build_peer((0, 0)) == (0, 0)
+    assert authenticated_build_peer((1001, 1002)) == (1001, 1002)
 
 
 def test_build_registration_rejects_user_and_group_override_fields(registered):

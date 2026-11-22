@@ -1,4 +1,4 @@
-"""Kernel-peer authentication, durable identity, and non-root child evidence."""
+"""Kernel-peer authentication, exact identity including root, and child evidence."""
 import json
 import os
 import socket
@@ -31,14 +31,29 @@ def test_unix_socket_peer_credentials_are_kernel_observed(tmp_path):
     assert selected == (os.geteuid(), os.getegid())
 
 
-def test_root_peer_and_missing_peer_never_invoke_build_backend(tmp_path):
+def test_missing_and_malformed_peer_never_invokes_build_backend(tmp_path):
     daemon = RootControlDaemon(tmp_path/'unused.sock')
     stub = BuildStub()
     daemon.build = stub
-    for peer in (None, (0, 1001), (1001, 0), (0, 0)):
-        with pytest.raises(SystemdBackendError, match='authenticated non-root'):
+    for peer in (None, (0, 1001), (1001, 0), (-1, 0), (0, -1),
+                 (True, 0), (0, False), ('0', '0')):
+        with pytest.raises(SystemdBackendError, match='authenticated socket peer'):
             daemon.handle({'operation': 'build_register'}, peer=peer)
     assert stub.calls == []
+
+
+def test_authenticated_root_peer_is_forwarded_unchanged_and_cannot_override_it(tmp_path):
+    daemon = RootControlDaemon(tmp_path/'unused.sock')
+    stub = BuildStub()
+    daemon.build = stub
+    request = {'operation': 'build_register', 'project_root': '/project', 'resource_id':'a'*32}
+    assert authenticated_build_peer((0, 0)) == (0, 0)
+    assert daemon.handle(request, peer=(0, 0))['result']['_peer'] == (0, 0)
+    for field in ('_peer', 'peer', 'peer_identity', 'execution_user_id',
+                  'execution_group_id', 'User', 'Group'):
+        with pytest.raises(ValueError, match='caller-selected'):
+            daemon.handle(dict(request, **{field: (1001,1001)}), peer=(0, 0))
+    assert len(stub.calls) == 1
 
 
 def test_build_identity_is_injected_server_side_not_selected_by_json(tmp_path):
@@ -113,10 +128,10 @@ def test_project_missing_and_inaccessible_are_distinct(tmp_path):
         inaccessible.chmod(0o700)
 
 
-def test_running_kernel_child_identity_cannot_be_root_or_mismatched():
+def test_running_kernel_child_identity_matches_authenticated_peer():
     uid, gid = os.geteuid(), os.getegid()
-    if uid == 0 or gid == 0:
-        pytest.skip('current test runner is root; native nonroot proof is separate')
+    if (uid == 0) != (gid == 0):
+        pytest.skip('mixed zero identity is not an authorized compiler peer')
     group_entries = [v for v in Path('/proc/self/cgroup').read_text().splitlines()
                      if v.startswith('0::')]
     if len(group_entries) != 1:

@@ -1,7 +1,8 @@
 """Read-only native acceptance through the normal authenticated root-control socket.
 
-Run from the *same non-root box-control peer* that submitted a separately
-authorized, disposable finite build. Never target archived Boot A operations.
+Run from the *same kernel-authenticated box-control peer* (including 0:0)
+that submitted a separately authorized, disposable finite build.
+Never target archived Boot A operations.
 This tool does not start jobs, call systemd directly or change state.
 """
 import argparse
@@ -13,7 +14,9 @@ import socket
 import time
 
 from zog.root_control.protocol import encode, decode
-from zog.root_control.build import canonical_request, legacy_systemd_argv
+from zog.root_control.build import (
+    authenticated_build_peer, canonical_request, legacy_systemd_argv,
+)
 
 
 def observed_over_socket(socket_path, project_root, job_id, build_root_id):
@@ -33,8 +36,7 @@ def observed_over_socket(socket_path, project_root, job_id, build_root_id):
 def acceptance(*, controller_socket, project_root, build_root_id, job_id,
                request_json, phase, expected_invocation_id=None):
     uid, gid = os.geteuid(), os.getegid()
-    if uid <= 0 or gid <= 0:
-        raise RuntimeError('native build acceptance must use the non-root box-control peer')
+    authenticated_build_peer((uid, gid))
     request = canonical_request(json.loads(Path(request_json).read_text()))
     if request['build_root_id'] != build_root_id:
         raise RuntimeError('test request resource identity differs')
@@ -58,7 +60,7 @@ def acceptance(*, controller_socket, project_root, build_root_id, job_id,
     result = {
         'schema':'root-control-peer-bound-child-acceptance-v1',
         'phase':phase, 'job_id':job_id, 'resource_id':build_root_id,
-        'uid':uid, 'gid':gid, 'child_nonroot':True,
+        'uid':uid, 'gid':gid, 'root_child_expected':uid == gid == 0,
         'unit_name':observation['unit_name'],
         'invocation_id':observation['invocation_id'],
         'argv_sha256':hashlib.sha256(
