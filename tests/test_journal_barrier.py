@@ -32,12 +32,12 @@ def test_authentication_rejects_uid_boot_and_changed_incarnation():
 
 
 class Peer:
-    def __init__(self,sock): self.sock=sock
+    def __init__(self,sock,uid=12345): self.sock=sock; self.uid=uid
     def __enter__(self): return self
     def __exit__(self,*args): self.sock.close()
     def __getattr__(self,key): return getattr(self.sock,key)
     def getsockopt(self,level,key,*args):
-        if key==socket.SO_PEERCRED: return struct.pack('3i',os.getpid(),12345,12345)
+        if key==socket.SO_PEERCRED: return struct.pack('3i',os.getpid(),self.uid,self.uid)
         return self.sock.getsockopt(level,key,*args)
 
 
@@ -49,11 +49,11 @@ def broker(tmp_path,monkeypatch):
     return barrier,token
 
 
-def exchange(broker,token):
+def exchange(broker,token,uid=12345):
     client,server=socket.socketpair()
     with client:
         client.sendall((token+'\n').encode())
-        broker.handle(Peer(server))
+        broker.handle(Peer(server,uid=uid))
         return client.recv(1)
 
 
@@ -276,3 +276,33 @@ def test_252_dollar_argv_authenticated_terminal_evidence_remains_exact(registere
     with pytest.raises(SystemdBackendError, match='exit evidence property mismatch: ExecStart'):
         backend.observe(project_root=args['project_root'], job_id='c'*32,
                         build_root_id=args['resource_id'])
+
+
+def test_root_0_journal_hook_registration_and_terminal_evidence(tmp_path,monkeypatch):
+    barrier = jb.JournalBarrier(tmp_path)
+    barrier.server = object()
+    token = barrier.register('zog-root-build.service',0,'d'*32)
+    state = dict(snapshot(),Id='zog-root-build.service',User='0',Group='0',
+                 ExecMainCode=1,ExecMainStatus=0,ExecMainExitTimestampMonotonic=42,
+                 Result='success')
+    monkeypatch.setattr(jb,'properties',lambda unit:state)
+    synchronized=[]
+    monkeypatch.setattr(jb,'synchronize',lambda:synchronized.append(True))
+    assert exchange(barrier,token,uid=0) == b'1'
+    assert synchronized == [True]
+    assert barrier.status(token)['status'] == 'synchronized'
+    evidence=barrier.evidence(token,unit='zog-root-build.service',
+                              job_id='d'*32,uid=0)
+    assert evidence['ExecMainStatus'] == 0
+    assert evidence['properties']['User'] == '0'
+    assert evidence['properties']['Group'] == '0'
+    with pytest.raises(ValueError,match='ownership differs'):
+        barrier.evidence(token,unit='zog-root-build.service',
+                         job_id='d'*32,uid=1001)
+    with pytest.raises(PermissionError,match='not the registered exit hook'):
+        jb.JournalBarrier.authenticate(
+            dict(unit='zog-root-build.service',uid=0,
+                 boot_id=jb.boot_id(),invocation_id=None),
+            os.getpid(),1001,state)
+    with pytest.raises(ValueError,match='invalid barrier registration'):
+        barrier.register('zog-root-build.service',-1,'e'*32)
