@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/companions/image-build/src
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,12 +28,12 @@ jobs:
           ref: b7934882cfacd2fbfd60c7964713ed3dde7f9460
           path: companions/box-control
           persist-credentials: false
-      - name: Checkout historical image-build fixture
+      - name: Checkout exact public image-build
         uses: actions/checkout@v4
         with:
-          repository: zog144/zog
-          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
-          path: historical-zog
+          repository: zog144/image-build
+          ref: 1f07e83dbd80dacb9bed0d6494c697375f0e26cd
+          path: companions/image-build
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -42,40 +42,35 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C companions/box-control rev-parse HEAD)" = "b7934882cfacd2fbfd60c7964713ed3dde7f9460"
-          test "$(git -C historical-zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
+          test "$(git -C companions/image-build rev-parse HEAD)" = "1f07e83dbd80dacb9bed0d6494c697375f0e26cd"
           {
             echo "## Privileged socket security source revisions"
             echo "- Candidate root-control: $(git rev-parse HEAD)"
             echo "- Approved controller companion: $(git -C companions/box-control rev-parse HEAD)"
-            echo "- Image-build: historical fixture only, no current approved image-build pin"
+            echo "- Image-build: $(git -C companions/image-build rev-parse HEAD)"
             echo "- Host socket UID/GID, real mount and reboot: NOT native-tested"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Provide historical namespace support without replacing current components
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          src = Path("historical-zog/src/zog").resolve()
-          dst = Path(".ci-deps/zog")
-          dst.mkdir(parents=True, exist_ok=True)
-          for p in src.iterdir():
-              if p.name in {"__init__.py", "__pycache__", "box_control", "root_control"}:
-                  continue
-              if p.is_dir() or (p.is_file() and p.suffix == ".py"):
-                  (dst / p.name).symlink_to(p)
-          assert not (dst / "__init__.py").exists()
-          PY
       - name: Validate current package identity
         run: |
           python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10'
           python -m pip install --no-deps -e . -e ./companions/box-control/box-control
           python -m compileall -q src tests
-          python - <<'PY'
+          python - <<'PYTHON'
           from pathlib import Path
-          import zog.root_control, zog.box_control
-          root = Path.cwd()
-          assert Path(zog.root_control.__file__).resolve().is_relative_to(root / "src")
-          assert Path(zog.box_control.__file__).resolve().is_relative_to(root / "companions/box-control/box-control/src")
-          PY
+          import zog.box_control
+          import zog.image_build
+          import zog.root_control
+
+          imports = {
+              zog.root_control: "src",
+              zog.box_control: "companions/box-control/box-control/src",
+              zog.image_build: "companions/image-build/src",
+          }
+          for module, checkout in imports.items():
+              origin = Path(module.__file__).resolve()
+              assert origin.is_relative_to(Path(checkout).resolve()), origin
+          assert zog.root_control.__version__ == "0.1.0"
+          PYTHON
       - name: Test privileged socket, mounts and controller grants
         run: |
           set -euo pipefail

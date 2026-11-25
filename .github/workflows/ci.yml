@@ -19,7 +19,7 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13"]
     env:
-      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/companions/image-build/src
     steps:
       - name: Checkout root-control
         uses: actions/checkout@v4
@@ -32,12 +32,12 @@ jobs:
           ref: a3e939b7a22ef6277ae9712961ffbd5a18ccac39
           path: companions/box-control
           persist-credentials: false
-      - name: Checkout public Zog aggregate for image-build
+      - name: Checkout exact public image-build
         uses: actions/checkout@v4
         with:
-          repository: zog144/zog
-          ref: d47d86b363824c718d9c165124cb55bbed12e0f9
-          path: companions/zog
+          repository: zog144/image-build
+          ref: 1f07e83dbd80dacb9bed0d6494c697375f0e26cd
+          path: companions/image-build
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -45,34 +45,12 @@ jobs:
       - name: Verify pins and public source boundary
         run: |
           test "$(git -C companions/box-control rev-parse HEAD)" = "a3e939b7a22ef6277ae9712961ffbd5a18ccac39"
-          test "$(git -C companions/zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
+          test "$(git -C companions/image-build rev-parse HEAD)" = "1f07e83dbd80dacb9bed0d6494c697375f0e26cd"
           test ! -e COPYRIGHT
           test ! -e version-share-handoff.json
           test -f LICENSE
           test -f LICENSES/BSD-3-Clause.txt
           test -f LICENSES/GPL-3.0-only.txt
-      - name: Build public aggregate namespace overlay
-        run: |
-          # The older aggregate ships a regular zog/__init__.py. Importing its
-          # src wholesale shadows current namespace component checkouts.
-          # Link its separately reviewed support modules without either
-          # box-control or root-control, keeping the namespace implicit.
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          src=Path("companions/zog/src/zog").resolve()
-          dest=Path(os.environ["GITHUB_WORKSPACE"])/".ci-deps"/"zog"
-          dest.mkdir(parents=True,exist_ok=True)
-          for path in src.iterdir():
-              if path.name in {"__init__.py","__pycache__","root_control","box_control"}:
-                  continue
-              if path.is_dir() or (path.is_file() and path.suffix==".py"):
-                  (dest/path.name).symlink_to(path)
-          assert not (dest/"__init__.py").exists()
-          assert not (dest/"root_control").exists()
-          assert not (dest/"box_control").exists()
-          assert (dest/"image_build").is_dir()
-          PY
       - name: Install test dependencies and root-control
         run: |
           python -m pip install 'dbus-next==0.2.3' 'pytest>=8,<10'
@@ -80,7 +58,22 @@ jobs:
       - name: Verify namespace and compile
         run: |
           python -m compileall -q src tests acceptance
-          python -c 'import pathlib, zog.root_control as r; assert r.__version__ == "0.1.0"; assert pathlib.Path(r.__file__).resolve().is_relative_to(pathlib.Path.cwd() / "src")'
+          python - <<'PYTHON'
+          from pathlib import Path
+          import zog.box_control
+          import zog.image_build
+          import zog.root_control
+
+          imports = {
+              zog.root_control: "src",
+              zog.box_control: "companions/box-control/box-control/src",
+              zog.image_build: "companions/image-build/src",
+          }
+          for module, checkout in imports.items():
+              origin = Path(module.__file__).resolve()
+              assert origin.is_relative_to(Path(checkout).resolve()), origin
+          assert zog.root_control.__version__ == "0.1.0"
+          PYTHON
       - name: Run synthetic and mocked privileged-boundary tests
         run: python -m pytest -q tests
 

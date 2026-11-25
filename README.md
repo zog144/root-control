@@ -20,9 +20,9 @@ represented as public Git ancestry.
 The current implementation reuses selected unprivileged state/validation
 helpers from `zog.box_control` and image-build interfaces. For a reproducible
 public compatibility check, GitHub Actions selects reviewed public box-control
-source and a pinned public `zog` aggregate for the remaining dependency; see
-[public CI guidance](.github/PUBLIC-TESTING.md). A separate latest-companion
-integration run is required when image-build has an approved public revision.
+and image-build source at exact commits. See
+[public CI guidance](.github/PUBLIC-TESTING.md) for the selected revisions and
+test scope.
 
 A standalone source distribution and wheel can be built with:
 
