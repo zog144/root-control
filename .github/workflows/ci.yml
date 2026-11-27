@@ -2,7 +2,7 @@ name: Public source verification
 
 on:
   push:
-    branches: [main, unstable]
+    branches: [main, unstable, review/issuer-unified-https-receiver-20261029]
   pull_request:
     branches: [main, unstable]
   workflow_dispatch:
