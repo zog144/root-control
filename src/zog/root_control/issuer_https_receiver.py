@@ -7,6 +7,9 @@ envelope before live delivery can be authorized.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from functools import wraps
+import fcntl
 import hashlib
 import hmac
 import json
@@ -236,7 +239,7 @@ def _state_paths(project):
     return base, digest + ".credential-ledger.json", digest + ".operation.json"
 
 
-def _load_state(project, authorization):
+def _raw_state(project):
     """Local ledger never contains delivery secrets; rollback is rejected."""
     directory, name, _ = _state_paths(project)
     credentials._check_root_directory(directory)
@@ -247,10 +250,15 @@ def _load_state(project, authorization):
         if path.exists():
             raw = json.loads(_root_regular(path, max_bytes=65536),
                              object_pairs_hook=_pairs)
-            return cd.advance_authorization(raw, authorization)
-        return cd.new_ledger(authorization)
+            return cd.validate_ledger(raw)
+        return None
     except (ValueError, KeyError, OSError, TypeError, cd.CredentialProtocolError):
         _deny()
+
+
+def _load_state(project, authorization):
+    raw = _raw_state(project)
+    return cd.advance_authorization(raw, authorization) if raw is not None else cd.new_ledger(authorization)
 
 
 def _persist_state(project, state):
@@ -271,15 +279,20 @@ def _operation(project):
             _deny()
         if not path.exists():
             return None
-        record = json.loads(_root_regular(path, max_bytes=8192),
+        record = json.loads(_root_regular(path, max_bytes=131072),
                             object_pairs_hook=_pairs)
-        if (type(record) is not dict or set(record) !=
-                {"request", "delivery_metadata", "phase"}
+        if (type(record) is not dict or set(record) not in (
+                {"request", "delivery_metadata", "phase"},
+                {"request", "delivery_metadata", "phase", "schema",
+                 "profile_sha256", "authorization_sha256", "before_sha256",
+                 "ledger", "ack_payload", "send_payload", "acknowledged"})
                 or record["phase"] not in {
                     "pending", "delivered", "installed", "cancelled"}
                 or type(record["request"]) is not dict):
             _deny()
         cd.binding(record["request"])
+        if "schema" in record:
+            _validate_operation(record)
         return record
     except (OSError, ValueError, TypeError, KeyError, cd.CredentialProtocolError):
         _deny()
@@ -428,48 +441,245 @@ def _native(admission):
         _deny()
 
 
+_DELIVERY_PUBLIC_FIELDS = ["authorization_id","authorization_revision","consumer","credential_id","credential_revision","delivery_id","expires_at","issued_at","purpose","request_id","schema","secret_format"]
+_OPERATION_SCHEMA = "zog-issuer-https-recovery-v1"
+
+
+def _digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def _validate_operation(record):
+    request, metadata = record["request"], record["delivery_metadata"]
+    phase, payload = record["phase"], record["ack_payload"]
+    if (record["schema"] != _OPERATION_SCHEMA
+            or type(record["acknowledged"]) is not bool
+            or any(type(record[k]) is not str or not _HEX.fullmatch(record[k])
+                   for k in ("profile_sha256", "authorization_sha256", "before_sha256"))):
+        _deny()
+    ledger = cd.validate_ledger(record["ledger"])
+    if (not ledger["requests"] or cd.binding(ledger) != cd.binding(request)
+            or ledger["authorization_id"] != request["authorization_id"]
+            or ledger["authorization_revision"] != request["authorization_revision"]
+            or ledger["credential_revision"] != request["credential_revision"]):
+        _deny()
+    row = ledger["requests"][-1]
+    if any(row[k] != request[k] for k in (
+            "request_id", "action", "credential_revision", "authorization_revision",
+            "previous_delivery_id")):
+        _deny()
+    if metadata is not None:
+        # Exact nonsecret delivery schema. Never persist a secret or arbitrary
+        # extension from a protected response.
+        if (type(metadata) is not dict or "secret" in metadata
+                or set(metadata) != set(_DELIVERY_PUBLIC_FIELDS)
+                or cd.binding(metadata) != cd.binding(request)
+                or any(metadata[k] != request[k] for k in (
+                    "request_id", "authorization_id", "authorization_revision",
+                    "credential_revision"))
+                or metadata["delivery_id"] != row["delivery_id"]):
+            _deny()
+    elif row["delivery_id"] is not None:
+        _deny()
+    if phase in ("pending", "delivered"):
+        if (row["status"] != phase or payload is not None
+                or record["send_payload"] is not None or record["acknowledged"]
+                or not ledger["rotation_required"]
+                or (phase == "delivered") != (metadata is not None)):
+            _deny()
+    elif phase == "installed":
+        cd.validate_receipt(payload, request, metadata)
+        if (row["status"] != "installed" or row["receipt_id"] != payload["receipt_id"]
+                or record["send_payload"] != payload or ledger["rotation_required"]):
+            _deny()
+    elif phase == "cancelled":
+        # Validate original and most recent wire body at their own creation
+        # times; the actual POST is separately checked at current time.
+        cd.validate_cancel(payload, request, now=payload["created_at"])
+        sent = record["send_payload"]
+        cd.validate_cancel(sent, request, now=sent["created_at"])
+        if (row["status"] != ("cancelled-after-delivery" if metadata is not None else "cancelled")
+                or row["cancel_id"] != payload["cancel_id"] or not ledger["rotation_required"]
+                or any(sent[k] != payload[k] for k in payload
+                       if k not in ("created_at", "expires_at"))
+                or sent["created_at"] < payload["created_at"]):
+            _deny()
+    else:
+        _deny()
+
+
+def _write_record(project, record):
+    _validate_operation(record)
+    directory, _, name = _state_paths(project)
+    credentials._check_root_directory(directory)
+    credentials._atomic_json(directory, name, record)
+
+
+def _sync(project, profile, authorization):
+    """Under provision lock: repair only an exact write-ahead boundary.
+
+    The operation file is the durable intent and contains the complete
+    nonsecret next ledger. The old ledger digest must match exactly, or
+    the ledger must already equal the next state. No inference from a
+    partial/mismatched legacy operation is allowed.
+    """
+    raw = _raw_state(project)
+    op = _operation(project)
+    if op is None:
+        if raw is not None and raw["requests"]:
+            _deny()
+    else:
+        if op.get("schema") != _OPERATION_SCHEMA:
+            _deny()  # old records lack recoverable receipt bodies
+        same_authority = (op["profile_sha256"] == _digest(profile)
+                          and op["authorization_sha256"] == _digest(authorization))
+        if not op["acknowledged"] and not same_authority:
+            _deny()
+        if raw != op["ledger"]:
+            if (not same_authority or _digest(raw) != op["before_sha256"]):
+                _deny()
+            _persist_state(project, op["ledger"])
+            raw = op["ledger"]
+    state = (cd.advance_authorization(raw, authorization) if raw is not None
+             else cd.new_ledger(authorization))
+    return raw, state, op
+
+
+def _commit(project, profile, authorization, raw, state, request, metadata,
+            phase, payload=None):
+    record = {
+        "schema": _OPERATION_SCHEMA, "request": request,
+        "delivery_metadata": metadata, "phase": phase,
+        "profile_sha256": _digest(profile),
+        "authorization_sha256": _digest(authorization),
+        "before_sha256": _digest(raw), "ledger": state,
+        "ack_payload": payload, "send_payload": payload, "acknowledged": False,
+    }
+    _write_record(project, record)
+    _persist_state(project, state)
+    return record
+
+
+@contextmanager
+def _receiver_lock(project):
+    # Separate from installer lock: serializes receipt recovery, cancellation
+    # and delivery across network and installer boundaries without deadlock.
+    directory, _, name = _state_paths(project)
+    credentials._check_root_directory(directory)
+    fd = os.open(directory / (name + ".lock"),
+                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        credentials._check_lock_info(os.fstat(fd))
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _serialized(function):
+    @wraps(function)
+    def run(project_root, *, private_identity, admission, **kwargs):
+        credentials._require_root()
+        _native(admission)
+        project = Project(Path(project_root))
+        if str(project.path) != str(Path(project_root)):
+            _deny()
+        with _receiver_lock(project):
+            try:
+                return function(project_root, private_identity=private_identity,
+                                admission=admission, **kwargs)
+            except (cd.CredentialProtocolError, OSError, ValueError, TypeError, KeyError):
+                _deny()
+    return run
+
+
 def _claim(project, profile, authorization):
     """Durable uncertain-delivery barrier: no automatic request retransmit."""
     with credentials._locked(project):
-        state = _load_state(project, authorization)
-        prior = _operation(project)
-        if prior is not None and prior["phase"] not in ("installed", "cancelled"):
+        raw, state, prior = _sync(project, profile, authorization)
+        if prior is not None and not prior["acknowledged"]:
             _deny()
         request = _new_request(authorization, state)
-        try:
-            cd.validate_request(request, authorization)
-            new_state = cd.admit_request(state, request)
-            # The network may deliver a secret and fail before we see it.
-            # Conservative rotation hold even on pending unknown delivery.
-            new_state["rotation_required"] = True
-            _save_operation(project, request, None, "pending")
-            _persist_state(project, new_state)
-            return request
-        except (ValueError, TypeError, cd.CredentialProtocolError):
-            _deny()
+        cd.validate_request(request, authorization)
+        new_state = cd.admit_request(state, request)
+        new_state["rotation_required"] = True
+        _commit(project, profile, authorization, raw, new_state, request, None, "pending")
+        return request
 
 
-def _save_delivered(project, authorization, request, metadata):
+def _save_delivered(project, profile, authorization, request, metadata):
     with credentials._locked(project):
-        state = _load_state(project, authorization)
-        try:
-            next_state = cd.record_delivery(state, metadata)
-            _persist_state(project, next_state)
-            _save_operation(project, request, metadata, "delivered")
-        except (ValueError, TypeError, cd.CredentialProtocolError):
+        raw, state, op = _sync(project, profile, authorization)
+        if op is None or op["phase"] != "pending" or op["request"] != request:
             _deny()
+        next_state = cd.record_delivery(state, metadata)
+        _commit(project, profile, authorization, raw, next_state,
+                request, metadata, "delivered")
 
 
-def _installed(project, authorization, request, metadata, receipt):
+def _installed(project, profile, authorization, request, metadata, receipt):
     with credentials._locked(project):
-        state = _load_state(project, authorization)
-        try:
-            cd.validate_receipt(receipt, request, metadata)
-            next_state = cd.record_installation(state, receipt)
-            _persist_state(project, next_state)
-            _save_operation(project, request, metadata, "installed")
-        except (ValueError, TypeError, cd.CredentialProtocolError):
+        raw, state, op = _sync(project, profile, authorization)
+        if (op is None or op["phase"] != "delivered" or op["request"] != request
+                or op["delivery_metadata"] != metadata):
             _deny()
+        cd.validate_receipt(receipt, request, metadata)
+        next_state = cd.record_installation(state, receipt)
+        _commit(project, profile, authorization, raw, next_state,
+                request, metadata, "installed", receipt)
+
+
+def _acknowledge(project, binding, key, auth, private_identity, request_id, transport):
+    """Resend only retained nonsecret terminal evidence, never the delivery."""
+    _current(project, binding, key, auth)
+    with credentials._locked(project):
+        _, _, op = _sync(project, binding, auth)
+        if (op is None or op["request"]["request_id"] != request_id
+                or op["phase"] not in ("installed", "cancelled")
+                or op["profile_sha256"] != _digest(binding)
+                or op["authorization_sha256"] != _digest(auth)):
+            _deny()
+    if op["phase"] == "installed":
+        _assert_installed_bytes(project, binding)
+    _current(project, binding, key, auth)
+    request, payload = op["request"], op["ack_payload"]
+    if not op["acknowledged"]:
+        if op["phase"] == "installed":
+            prepared = cd.prepare_receipt(binding["https_origin"] + RECEIPT_PATH,
+                payload, request, op["delivery_metadata"], private_identity)
+        else:
+            now = int(time.time())
+            payload_to_send = op["send_payload"]
+            try:
+                cd.validate_cancel(payload_to_send, request, now=now)
+            except cd.CredentialProtocolError:
+                if now < payload_to_send["expires_at"]:
+                    _deny()
+                # v1 validates a bounded cancellation window even for an
+                # idempotent retry. Only timestamps change; the original
+                # canonical cancellation, reason and ID stay retained.
+                payload_to_send = dict(payload, created_at=now, expires_at=now + 60)
+                op = dict(op, send_payload=payload_to_send)
+                with credentials._locked(project):
+                    _write_record(project, op)
+            prepared = cd.prepare_cancel(binding["https_origin"] + CANCEL_PATH,
+                payload_to_send, request, private_identity)
+        if _post(binding, prepared, expected_status=204, transport=transport) != b"":
+            _deny()
+        _current(project, binding, key, auth)
+        if op["phase"] == "installed":
+            _assert_installed_bytes(project, binding)
+        with credentials._locked(project):
+            _, _, latest = _sync(project, binding, auth)
+            if latest != op:
+                _deny()
+            _write_record(project, dict(op, acknowledged=True))
+    return {"schema": payload["schema"], "status": op["phase"],
+            "request_id": request_id,
+            **({"credential_revision": request["credential_revision"],
+                "delivery_id": payload["delivery_id"],
+                "receipt_id": payload["receipt_id"]} if op["phase"] == "installed"
+               else {"cancel_id": payload["cancel_id"]})}
 
 
 def _assert_installed_bytes(project, profile):
@@ -498,6 +708,7 @@ def _assert_installed_bytes(project, profile):
         _deny()
 
 
+@_serialized
 def receive_and_install(project_root, *, private_identity, admission,
                         transport=None):
     """Explicit root-selected operation, not a controller RPC or a retry loop.
@@ -523,7 +734,7 @@ def receive_and_install(project_root, *, private_identity, admission,
             profile["https_origin"] + PATH, request, auth, private_identity)
         raw = _post(profile, signed, expected_status=200, transport=transport)
         token, metadata = _delivery(raw, request, auth, key)
-        _save_delivered(project, auth, request, metadata)
+        _save_delivered(project, binding, auth, request, metadata)
         _current(project, binding, key, auth)
         reader, writer = os.pipe()
         try:
@@ -561,18 +772,9 @@ def receive_and_install(project_root, *, private_identity, admission,
             "outcome": "installed",
             "installed_at": moment,
         }
-        signed_receipt = cd.prepare_receipt(
-            profile["https_origin"] + RECEIPT_PATH,
-            receipt, request, metadata, private_identity)
-        _installed(project, auth, request, metadata, receipt)
-        if _post(profile, signed_receipt, expected_status=204,
-                 transport=transport) != b"":
-            _deny()
-        return {"schema": cd.RECEIPT_SCHEMA, "status": "installed",
-                "credential_revision": request["credential_revision"],
-                "request_id": request["request_id"],
-                "delivery_id": metadata["delivery_id"],
-                "receipt_id": receipt["receipt_id"]}
+        _installed(project, binding, auth, request, metadata, receipt)
+        return _acknowledge(project, binding, key, auth, private_identity,
+                            request["request_id"], transport)
     except CredentialReceiptDenied:
         raise
     except (cd.CredentialProtocolError, OSError, ValueError, TypeError,
@@ -580,6 +782,7 @@ def receive_and_install(project_root, *, private_identity, admission,
         _deny()
 
 
+@_serialized
 def cancel_pending(project_root, *, private_identity, admission,
                    transport=None):
     """Explicit owner-selected cancellation, never automatic retry/recovery.
@@ -600,8 +803,7 @@ def cancel_pending(project_root, *, private_identity, admission,
     _identity(private_identity, profile)
     _current(project, binding, key, auth)
     with credentials._locked(project):
-        state = _load_state(project, auth)
-        operation = _operation(project)
+        raw, state, operation = _sync(project, binding, auth)
         if operation is None or operation["phase"] not in ("pending", "delivered"):
             _deny()
         request = operation["request"]
@@ -623,16 +825,25 @@ def cancel_pending(project_root, *, private_identity, admission,
             }
             next_state = cd.record_cancel(state, cancel)
             next_state["rotation_required"] = True
-            _persist_state(project, next_state)
-            _save_operation(project, request, operation["delivery_metadata"],
-                            "cancelled")
+            cd.validate_cancel(cancel, request)
+            _commit(project, binding, auth, raw, next_state, request,
+                    operation["delivery_metadata"], "cancelled", cancel)
         except (cd.CredentialProtocolError, TypeError, ValueError):
             _deny()
-    signed = cd.prepare_cancel(
-        profile["https_origin"] + CANCEL_PATH,
-        cancel, request, private_identity)
-    if _post(profile, signed, expected_status=204,
-             transport=transport) != b"":
-        _deny()
-    return {"schema": cd.CANCEL_SCHEMA, "status": "cancelled",
-            "request_id": request["request_id"]}
+    return _acknowledge(project, binding, key, auth, private_identity,
+                        request["request_id"], transport)
+
+
+@_serialized
+def recover_acknowledgement(project_root, *, request_id, private_identity,
+                            admission, transport=None):
+    """Explicit same-request acknowledgement recovery; never install again."""
+    project = Project(Path(project_root))
+    profile = _profile(project)
+    _, selected = _approval(project, profile)
+    binding = {**profile, **selected}
+    key = _authority_key(profile)
+    auth = _authorization(project, profile, key)
+    _identity(private_identity, profile)
+    return _acknowledge(project, binding, key, auth, private_identity,
+                        request_id, transport)
