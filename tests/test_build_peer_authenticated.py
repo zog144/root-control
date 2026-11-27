@@ -10,9 +10,18 @@ from zog.root_control.build import (
     INHERITED_BUILD_SCHEMA, assert_bound_job, authenticated_build_peer,
     check_peer_access, kernel_build_child_identity,
 )
-from zog.root_control.daemon import RootControlDaemon
+from zog.root_control.daemon import BUILD_RPC_CONTRACT, RootControlDaemon
 from zog.root_control.systemd import SystemdBackendError
 from .test_build_backend import registered
+
+
+def _registration_envelope():
+    return dict(operation='build_register', project_root='/project',
+                build_contract=BUILD_RPC_CONTRACT, resource_id='a'*32,
+                prepared_root='/project/state/image-build/attempts/one/root',
+                source_directory='/project/state/image-build/attempts/one/source',
+                output_directory='/project/state/image-build/attempts/one/output',
+                input_manifest_id='manifest')
 
 
 class BuildStub:
@@ -46,7 +55,7 @@ def test_authenticated_root_peer_is_forwarded_unchanged_and_cannot_override_it(t
     daemon = RootControlDaemon(tmp_path/'unused.sock')
     stub = BuildStub()
     daemon.build = stub
-    request = {'operation': 'build_register', 'project_root': '/project', 'resource_id':'a'*32}
+    request = _registration_envelope()
     assert authenticated_build_peer((0, 0)) == (0, 0)
     assert daemon.handle(request, peer=(0, 0))['result']['_peer'] == (0, 0)
     for field in ('_peer', 'peer', 'peer_identity', 'execution_user_id',
@@ -60,8 +69,7 @@ def test_build_identity_is_injected_server_side_not_selected_by_json(tmp_path):
     daemon = RootControlDaemon(tmp_path/'unused.sock')
     stub = BuildStub()
     daemon.build = stub
-    args = {'operation':'build_register', 'project_root':'/project',
-            'resource_id':'a'*32}
+    args = _registration_envelope()
     peer = (1002, 1003)
     result = daemon.handle(args, peer=peer)['result']
     assert result['_peer'] == peer

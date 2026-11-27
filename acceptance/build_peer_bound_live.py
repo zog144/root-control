@@ -14,6 +14,7 @@ import socket
 import time
 
 from zog.root_control.protocol import encode, decode
+from zog.root_control.daemon import BUILD_RPC_CONTRACT
 from zog.root_control.build import (
     authenticated_build_peer, canonical_request, legacy_systemd_argv,
 )
@@ -25,6 +26,7 @@ def observed_over_socket(socket_path, project_root, job_id, build_root_id):
         conn.connect(str(socket_path))
         conn.sendall(encode({
             'operation':'build_observe', 'project_root':str(project_root),
+            'build_contract':BUILD_RPC_CONTRACT,
             'job_id':job_id, 'build_root_id':build_root_id}))
         response = decode(conn, deadline=time.monotonic()+10)
     if type(response) is not dict or response.get('ok') is not True:

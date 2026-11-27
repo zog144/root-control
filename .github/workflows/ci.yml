@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: zog144/box-control
-          ref: 36ce06658c7d17c73d9a87ba6ed127908b2a0e22
+          ref: ad61fa6a4e9c3176149720868cb008e0512dbec9
           path: companions/box-control
       - name: Checkout public Zog aggregate for image-build
         uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Verify pins and public source boundary
         run: |
-          test "$(git -C companions/box-control rev-parse HEAD)" = "36ce06658c7d17c73d9a87ba6ed127908b2a0e22"
+          test "$(git -C companions/box-control rev-parse HEAD)" = "ad61fa6a4e9c3176149720868cb008e0512dbec9"
           test "$(git -C companions/zog rev-parse HEAD)" = "d47d86b363824c718d9c165124cb55bbed12e0f9"
           test ! -e COPYRIGHT
           test ! -e version-share-handoff.json

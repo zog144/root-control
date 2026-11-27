@@ -15,6 +15,21 @@ from zog.box_control.errors import PersistenceError
 
 DEFAULT_SOCKET = Path("/run/zog/root-control.sock")
 
+# Independently validate the public box-control wire contract at the privilege
+# boundary. This is envelope metadata, never a backend request/identity field.
+BUILD_RPC_CONTRACT = "zog-build-inherited-peer-v2"
+_BUILD_RPC_FIELDS = {
+    "build_register": {"resource_id", "prepared_root", "source_directory",
+                       "output_directory", "input_manifest_id"},
+    "build_prepare": {"job_id", "request"},
+    "build_start": {"job_id", "request"},
+    "build_observe": {"job_id", "build_root_id"},
+    "build_cleanup": {"job_id", "build_root_id"},
+    "build_cancel": {"job_id", "build_root_id", "expected_invocation_id"},
+    "build_release": {"build_root_id"},
+    "build_forget": {"build_root_id"},
+}
+
 
 class RootControlDaemon:
     def __init__(self, socket_path, *, systemd_backend=None, journal_barrier=None,
@@ -129,16 +144,28 @@ class RootControlDaemon:
 
     def handle(self, request, *, peer=None):
         operation = request.get("operation")
-        if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
+        if operation in _BUILD_RPC_FIELDS:
             # Only SO_PEERCRED, captured on the connection before queuing,
             # grants access to build operations. It cannot be set in JSON.
             from .build import authenticated_build_peer
             selected = authenticated_build_peer(peer)
-            arguments = {k:v for k,v in request.items() if k != "operation"}
-            if set(arguments) & {'_peer', 'peer', 'peer_identity', 'execution_user_id',
-                                 'execution_group_id', 'User', 'Group'}:
+            if set(request) & {'_peer', 'peer', 'peer_identity', 'execution_user_id',
+                               'execution_group_id', 'User', 'Group'}:
                 raise ValueError('caller-selected build identity is forbidden')
-            arguments['_peer'] = selected
+            if (type(request.get("build_contract")) is not str
+                    or request["build_contract"] != BUILD_RPC_CONTRACT):
+                raise ValueError("unsupported inherited build RPC contract")
+            expected = _BUILD_RPC_FIELDS[operation] | {
+                "operation", "project_root", "build_contract"}
+            if set(request) != expected:
+                raise ValueError("unsupported inherited build RPC fields")
+            project = request["project_root"]
+            if (type(project) is not str or "\0" in project
+                    or not Path(project).is_absolute()):
+                raise ValueError("invalid inherited build RPC Project root")
+            arguments = {k: v for k, v in request.items()
+                         if k not in ("operation", "build_contract")}
+            arguments["_peer"] = selected
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
             from .processes import inspect
@@ -181,6 +208,9 @@ class RootControlDaemon:
                 raise ValueError("unsupported runtime mount inspection arguments")
             return {"ok": True, "result": inspect_runtime_mounts(**arguments)}
         if operation == 'build_registration_status':
+            # Read-only historical/absent status is deliberately unversioned.
+            if set(request) != {"operation", "project_root", "resource_id"}:
+                raise ValueError("unsupported build registration status fields")
             return {'ok': True, 'result': self.build.registration_status(
                 project_root=request['project_root'], resource_id=request['resource_id'])}
         if operation == "build_job_logs":
