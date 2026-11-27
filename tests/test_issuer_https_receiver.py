@@ -203,118 +203,239 @@ def test_purpose_scoped_root_admission_blocks_network(monkeypatch):
                        "native_https_accepted": False, "owner": {"status": "retained"}})
 
 
-def test_verified_secret_only_enters_anonymous_fd_and_receipt_post(monkeypatch):
+@pytest.fixture
+def recovery(tmp_path, monkeypatch):
+    from contextlib import nullcontext
     v, host, ca = fixture()
     now = int(time.time())
     a = dict(v["authorization"], approved_at=now-10, expires_at=now+3600)
     p = profile(v)
-    request = receiver._new_request(a, cd.new_ledger(a), now=now)
-    events = []
+    project = tmp_path/"project"
+    project.mkdir()
+    p["project"] = str(project)
+    root = tmp_path/"https-receipts"
+    root.mkdir()
+    monkeypatch.setattr(receiver.credentials, "AUTH_ROOT", tmp_path)
     monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
-    # Synthetic FD test only. Production activation is always disabled.
-    monkeypatch.setattr(receiver, "LIVE_NETWORK_ACTIVATION", True)
-    monkeypatch.setattr(receiver, "_profile", lambda proj: {k:x for k,x in p.items()
-        if k not in ("credential_id", "policy_sha256")})
-    monkeypatch.setattr(receiver, "_approval", lambda proj, prof:
-        (p["authorization_id"], {"credential_id":p["credential_id"],
-                                 "policy_sha256":p["policy_sha256"]}))
-    monkeypatch.setattr(receiver, "_authority_key", lambda prof:ca.public_key())
-    monkeypatch.setattr(receiver, "_authorization", lambda *args,**kw:a)
-    monkeypatch.setattr(receiver, "_current", lambda *args:events.append("verified"))
-    monkeypatch.setattr(receiver, "_claim", lambda *args:events.append("claimed") or request)
-    monkeypatch.setattr(receiver, "_save_delivered",
-                        lambda *args:events.append("delivery-durable"))
-    monkeypatch.setattr(receiver, "_installed",
-                        lambda *args:events.append("installed-durable"))
-    from zog.box_control.project import Project
-    def fake_post(profile, prepared, *, expected_status, transport):
-        if expected_status == 200:
-            assert prepared.url == v["origin"] + v["request_path"]
-            seen, _, _ = cd.verify_request_http(
-                prepared.url, "POST", dict(prepared.headers), prepared.body,
-                host.public_key(), a, now=now)
-            assert seen == request
-            events.append("request")
-            d = dict(v["delivery"], request_id=request["request_id"],
-                     issued_at=now, expires_at=now+60)
-            return cd.canonical(cd.sign_delivery(d, ca))
-        assert expected_status == 204
-        assert prepared.url == v["origin"] + v["receipt_path"]
-        assert b"secret" not in prepared.body
-        receipt = json.loads(prepared.body)
-        assert receipt["schema"] == cd.RECEIPT_SCHEMA
-        events.append("receipt")
-        return b""
-    monkeypatch.setattr(receiver, "_post", fake_post)
-    def installer(project, fd, *, expected_authorization_id):
-        assert expected_authorization_id == p["authorization_id"]
-        assert os.read(fd,4096) == base64.b64decode(v["delivery"]["secret"])
-        events.append("installed-fd")
-        return {"status":"installed","replayed":False,
-                "credential_revision":p["credential_revision"]}
-    monkeypatch.setattr(receiver.credentials, "install_from_fd", installer)
-    monkeypatch.setattr(receiver, "_assert_installed_bytes",
-                        lambda proj, binding: events.append("bytes-verified"))
-    result = receiver.receive_and_install(p["project"], private_identity=host,
-        admission={"status":"protected-source-preflight-only",
-                   "native_https_accepted":True,"owner":{"status":"retained"}})
-    assert result["schema"] == cd.RECEIPT_SCHEMA
-    assert events == ["verified", "claimed", "request", "delivery-durable",
-                      "verified","installed-fd","bytes-verified","verified",
-                      "installed-durable", "receipt"]
-
-
-def test_explicit_cancel_after_delivery_is_host_signed_and_rotation_held(monkeypatch):
-    from contextlib import contextmanager
-    v, host, ca = fixture()
-    now = int(time.time())
-    a = dict(v["authorization"], approved_at=now-5, expires_at=now+3600)
-    p = profile(v)
-    request = receiver._new_request(a, cd.new_ledger(a), now=now)
-    delivery = dict(v["delivery"], request_id=request["request_id"],
-                    issued_at=now, expires_at=now+60)
-    state = cd.record_delivery(cd.admit_request(cd.new_ledger(a), request),
-                               delivery)
-    state["rotation_required"] = True
-    installed = []
-    monkeypatch.setattr(receiver.credentials, "_require_root", lambda: None)
+    monkeypatch.setattr(receiver.credentials, "_check_root_directory", lambda *_: None)
+    monkeypatch.setattr(receiver.credentials, "_check_lock_info", lambda *_: None)
+    monkeypatch.setattr(receiver.credentials, "_locked", lambda *_: nullcontext())
+    monkeypatch.setattr(receiver, "_root_regular", lambda path, **kw: Path(path).read_bytes())
     monkeypatch.setattr(receiver, "LIVE_NETWORK_ACTIVATION", True)
     monkeypatch.setattr(receiver, "_profile", lambda proj: {
         k:x for k,x in p.items() if k not in ("credential_id","policy_sha256")})
     monkeypatch.setattr(receiver, "_approval", lambda proj, prof: (
         p["authorization_id"], {"credential_id":p["credential_id"],
                                 "policy_sha256":p["policy_sha256"]}))
-    monkeypatch.setattr(receiver, "_authority_key", lambda prof: ca.public_key())
-    monkeypatch.setattr(receiver, "_authorization", lambda *args, **kw: a1)
-    a1 = a
-    monkeypatch.setattr(receiver, "_current", lambda *args: None)
-    @contextmanager
-    def guarded(project):
-        yield ()
-    monkeypatch.setattr(receiver.credentials, "_locked", guarded)
-    monkeypatch.setattr(receiver, "_load_state", lambda project, auth: state)
-    monkeypatch.setattr(receiver, "_operation", lambda project: {
-        "request":request, "delivery_metadata": {
-            k:x for k,x in delivery.items() if k!="secret"}, "phase":"delivered"})
-    monkeypatch.setattr(receiver, "_persist_state",
-                        lambda project, value: installed.append(value))
-    monkeypatch.setattr(receiver, "_save_operation", lambda *args: None)
-    def post(profile, prepared, *, expected_status, transport):
-        assert expected_status == 204 and prepared.url == v["origin"] + v["cancel_path"]
-        cancel, nonce, expiry = cd.verify_cancel_http(
-            prepared.url, "POST", dict(prepared.headers), prepared.body,
-            host.public_key(), request, now=now)
-        assert cancel["schema"] == cd.CANCEL_SCHEMA and nonce
-        assert b"secret" not in prepared.body
-        return b""
-    monkeypatch.setattr(receiver, "_post", post)
-    result = receiver.cancel_pending(
-        p["project"], private_identity=host,
-        admission={"status":"protected-source-preflight-only",
-                   "native_https_accepted":True,"owner":{"status":"retained"}})
-    assert result["status"] == "cancelled"
-    assert installed[0]["rotation_required"] is True
-    assert installed[0]["requests"][-1]["status"] == "cancelled-after-delivery"
+    monkeypatch.setattr(receiver, "_authority_key", lambda prof:ca.public_key())
+    monkeypatch.setattr(receiver, "_authorization", lambda *args, **kw:a)
+    # Keep real _current() and signature/ledger validators. Only the protected
+    # installation/owner readbacks and transport are synthetic here.
+    installed = []
+    def installer(proj, fd, *, expected_authorization_id):
+        assert expected_authorization_id == p["authorization_id"]
+        assert os.read(fd,4096) == base64.b64decode(v["delivery"]["secret"])
+        installed.append(True)
+        return {"status":"installed","replayed":False,
+                "credential_revision":p["credential_revision"]}
+    monkeypatch.setattr(receiver.credentials, "install_from_fd", installer)
+    def assert_bytes(proj, binding):
+        assert installed == [True]
+    monkeypatch.setattr(receiver, "_assert_installed_bytes", assert_bytes)
+
+    class Station:
+        # Pinned v1 verifies actual HTTP signatures and consumes fresh nonces.
+        # This in-memory station models the commit boundary, not Django/HTTPS.
+        def __init__(self):
+            self.state = cd.new_ledger(a)
+            self.request = None
+            self.metadata = None
+            self.nonces = set()
+            self.posts = []
+            self.loss = None
+            self.lost_delivery = False
+        def __call__(self, prepared, profile, *, expected_status):
+            headers, body = dict(prepared.headers), prepared.body
+            if expected_status == 200:
+                assert prepared.url == v["origin"] + receiver.PATH
+                self.request, nonce, _ = cd.verify_request_http(
+                    prepared.url, "POST", headers, body, host.public_key(), a)
+                assert nonce not in self.nonces
+                self.nonces.add(nonce)
+                self.state = cd.admit_request(self.state, self.request)
+                moment = int(time.time())
+                delivery = dict(v["delivery"], request_id=self.request["request_id"],
+                                issued_at=moment, expires_at=moment+60)
+                self.state = cd.record_delivery(self.state, delivery)
+                self.metadata = {k:x for k,x in delivery.items() if k!="secret"}
+                if self.lost_delivery:
+                    raise OSError("synthetic lost delivery")
+                return cd.canonical(cd.sign_delivery(delivery, ca))
+            assert expected_status == 204
+            if prepared.url.endswith(receiver.RECEIPT_PATH):
+                value, nonce, _ = cd.verify_receipt_http(
+                    prepared.url, "POST", headers, body, host.public_key(),
+                    self.request, self.metadata)
+                next_state = cd.record_installation(self.state, value)
+            else:
+                assert prepared.url.endswith(receiver.CANCEL_PATH)
+                value, nonce, _ = cd.verify_cancel_http(
+                    prepared.url, "POST", headers, body, host.public_key(), self.request)
+                next_state = cd.record_cancel(self.state, value)
+            assert nonce not in self.nonces
+            self.nonces.add(nonce)
+            assert b"secret" not in body and b"token" not in body
+            self.posts.append((body, nonce))
+            if self.loss == "before":
+                raise OSError("synthetic loss before station commit")
+            self.state = next_state
+            if self.loss == "after":
+                raise OSError("synthetic loss after station commit")
+            return b""
+
+    station = Station()
+    admission = {"status":"protected-source-preflight-only",
+                 "native_https_accepted":True,"owner":{"status":"retained"}}
+    kwargs = dict(private_identity=host, admission=admission, transport=station)
+    proj = receiver.Project(project)
+    return proj, p, a, station, installed, kwargs
+
+
+@pytest.mark.parametrize("loss", ["before", "after"])
+def test_lost_installation_reply_reuses_exact_receipt_with_fresh_nonce(recovery, loss):
+    project, p, a, station, installed, kwargs = recovery
+    station.loss = loss
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install(project.path, **kwargs)
+    op = receiver._operation(project)
+    assert op["phase"] == "installed" and not op["acknowledged"]
+    assert installed == [True]
+    request_id = op["request"]["request_id"]
+    assert station.state["requests"][-1]["status"] == (
+        "delivered" if loss == "before" else "installed")
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install(project.path, **kwargs)
+    station.loss = None
+    result = receiver.recover_acknowledgement(project.path, request_id=request_id, **kwargs)
+    assert result["receipt_id"] == op["ack_payload"]["receipt_id"]
+    assert installed == [True]
+    assert station.posts[0][0] == station.posts[1][0] == cd.canonical(op["ack_payload"])
+    assert station.posts[0][1] != station.posts[1][1]
+    assert station.state["requests"][-1]["status"] == "installed"
+    assert receiver._operation(project)["acknowledged"]
+    receiver.recover_acknowledgement(project.path, request_id=request_id, **kwargs)
+    assert len(station.posts) == 2
+
+
+@pytest.mark.parametrize("loss", ["before", "after"])
+def test_lost_cancellation_reply_reuses_same_id_with_fresh_nonce(recovery, loss):
+    project, p, a, station, installed, kwargs = recovery
+    station.lost_delivery = True
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install(project.path, **kwargs)
+    station.loss = loss
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.cancel_pending(project.path, **kwargs)
+    op = receiver._operation(project)
+    assert op["phase"] == "cancelled" and not op["acknowledged"]
+    assert op["ledger"]["rotation_required"] is True
+    assert station.state["requests"][-1]["status"] == (
+        "delivered" if loss == "before" else "cancelled-after-delivery")
+    station.loss = None
+    result = receiver.recover_acknowledgement(
+        project.path, request_id=op["request"]["request_id"], **kwargs)
+    assert result["cancel_id"] == op["ack_payload"]["cancel_id"]
+    assert station.posts[0][0] == station.posts[1][0]
+    assert station.posts[0][1] != station.posts[1][1]
+    assert station.state["requests"][-1]["status"] == "cancelled-after-delivery"
+    assert receiver._operation(project)["acknowledged"] and installed == []
+
+
+def test_expired_cancel_refreshes_only_window_retaining_original(recovery, monkeypatch):
+    project, p, a, station, installed, kwargs = recovery
+    station.lost_delivery = True
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install(project.path, **kwargs)
+    station.loss = "after"
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.cancel_pending(project.path, **kwargs)
+    op = receiver._operation(project)
+    # Exercise the exact v1 verifier with current synthetic wall-clock time
+    # after cancellation expiry; the original protected authorization stays valid.
+    moment = op["ack_payload"]["expires_at"] + 120
+    monkeypatch.setattr(time, "time", lambda: moment)
+    station.loss = None
+    receiver.recover_acknowledgement(
+        project.path, request_id=op["request"]["request_id"], **kwargs)
+    final = receiver._operation(project)
+    assert final["ack_payload"] == op["ack_payload"]
+    assert final["send_payload"] == dict(op["ack_payload"], created_at=moment, expires_at=moment+60)
+    assert station.posts[-1][0] == cd.canonical(final["send_payload"])
+    assert station.posts[0][1] != station.posts[-1][1]
+    assert station.state["requests"][-1]["cancel_id"] == op["ack_payload"]["cancel_id"]
+    assert final["acknowledged"] and installed == []
+
+
+@pytest.mark.parametrize("phase", ["pending", "delivered", "installed", "cancelled"])
+def test_interruption_between_operation_and_ledger_writes(recovery, monkeypatch, phase):
+    project, p, a, station, installed, kwargs = recovery
+    persist = receiver._persist_state
+    def crash(proj, state):
+        if receiver._operation(proj)["phase"] == phase:
+            raise OSError("simulated interruption after operation fsync")
+        return persist(proj, state)
+    if phase == "cancelled":
+        station.lost_delivery = True
+        with pytest.raises(CredentialReceiptDenied):
+            receiver.receive_and_install(project.path, **kwargs)
+    monkeypatch.setattr(receiver, "_persist_state", crash)
+    with pytest.raises(CredentialReceiptDenied):
+        (receiver.cancel_pending if phase == "cancelled" else receiver.receive_and_install)(
+            project.path, **kwargs)
+    op = receiver._operation(project)
+    assert op["phase"] == phase and not op["acknowledged"]
+    assert receiver._raw_state(project) != op["ledger"]
+    monkeypatch.setattr(receiver, "_persist_state", persist)
+    # Restart uses only durable files. Pending/delivered never resends the
+    # delivery or installs; explicit cancellation is safe if station knows
+    # the request. A pending before-first-send marker remains a hold.
+    if phase in ("pending", "delivered"):
+        with pytest.raises(CredentialReceiptDenied):
+            receiver.receive_and_install(project.path, **kwargs)
+        assert receiver._raw_state(project) == op["ledger"]
+        assert installed == [] and station.posts == []
+    else:
+        receiver.recover_acknowledgement(
+            project.path, request_id=op["request"]["request_id"], **kwargs)
+        assert receiver._raw_state(project) == op["ledger"]
+        assert receiver._operation(project)["acknowledged"]
+        assert len(station.posts) == 1
+        assert installed == ([True] if phase == "installed" else [])
+
+
+@pytest.mark.parametrize("change", ["revision", "authority", "wrong-id", "ledger"])
+def test_recovery_refuses_changed_authority_or_ambiguous_state(recovery, change):
+    project, p, a, station, installed, kwargs = recovery
+    station.loss = "before"
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.receive_and_install(project.path, **kwargs)
+    op = receiver._operation(project)
+    request_id = op["request"]["request_id"]
+    if change == "revision":
+        a["revision"] += 1
+    elif change == "authority":
+        p["credential_authority_pin_sha256"] = "9"*64
+    elif change == "wrong-id":
+        request_id = "00000000-0000-4000-8000-000000000099"
+    else:
+        state = receiver._raw_state(project)
+        state["rotation_required"] = True
+        receiver._persist_state(project, state)
+    station.loss = None
+    with pytest.raises(CredentialReceiptDenied):
+        receiver.recover_acknowledgement(project.path, request_id=request_id, **kwargs)
+    assert len(station.posts) == 1 and installed == [True]
+    assert receiver._operation(project) == op
 
 
 def test_source_default_blocks_even_pretend_native_acceptance(monkeypatch):
