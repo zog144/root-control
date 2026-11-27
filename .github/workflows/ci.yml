@@ -84,7 +84,8 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/companions/box-control/box-control/src:${{ github.workspace }}/.ci-deps
         run: |
           sudo --preserve-env=PYTHONPATH "$(which python)" -m pytest -q -rs \
-            tests/test_build_peer_authenticated.py::test_root_compiler_registration_with_real_root_process
+            tests/test_build_peer_authenticated.py::test_root_compiler_registration_with_real_root_process \
+            tests/test_build_rpc_envelope.py::test_real_socket_client_registration_with_kernel_peer
 
   artifacts:
     name: Wheel and source-distribution audit

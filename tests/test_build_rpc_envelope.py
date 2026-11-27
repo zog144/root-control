@@ -11,8 +11,9 @@ from zog.box_control.build_protocol import INHERITED_EXECUTION_CONTRACT
 from zog.box_control.runtime.root_control import RootControlSystemdTransport
 from zog.root_control.daemon import BUILD_RPC_CONTRACT, RootControlDaemon
 from zog.root_control.protocol import decode
-from zog.root_control.systemd import SystemdBackendError
-from .test_build_backend import registered
+from zog.box_control.errors import RuntimeOperationError
+from zog.root_control.build import BuildBackend
+from .test_build_backend import Systemd
 
 
 RID = "b" * 32
@@ -106,28 +107,62 @@ def test_status_shape_unchanged(tmp_path,monkeypatch):
                            resource_id=RID,build_contract=BUILD_RPC_CONTRACT))
 
 
-def test_real_socket_client_registration_with_kernel_peer(tmp_path,registered):
-    # Use actual client serialization, accepted Unix socket SO_PEERCRED and
-    # daemon response. Systemd remains the existing test double.
-    backend,args,_=registered
+def test_real_socket_client_registration_with_kernel_peer(tmp_path,monkeypatch):
+    # Run under the existing unprivileged source runner AND its existing
+    # 0:0 root CI lane. Actual socket, actual client bytes, real registration;
+    # the finite-build systemd backend remains a test double.
     peer=(os.geteuid(),os.getegid())
-    if peer!=backend.test_peer:
-        pytest.skip("root has a separate root-owned fixture acceptance lane")
+    if peer != (0,0):
+        monkeypatch.setattr(os,"chown",lambda *a,**kw:None)
+    project=tmp_path/"project"
+    attempt=project/"state/image-build/attempts/one"
+    prepared=attempt/"root"
+    (prepared/"bin").mkdir(parents=True)
+    (prepared/"bin/cc").write_text("test compiler")
+    (prepared/"bin/cc").chmod(0o755)
+    source=attempt/"source"
+    output=attempt/"output"
+    source.mkdir(); output.mkdir()
+    (source/"input").write_text("input")
+    backend=BuildBackend(Systemd(),tmp_path/"privileged")
+    backend.systemd.version=lambda:252
     path=tmp_path/"rpc.sock"
     daemon=RootControlDaemon(path)
     daemon.build=backend
+    kwargs=dict(resource_id=RID,prepared_root=str(prepared),
+                source_directory=str(source),output_directory=str(output),
+                input_manifest_id="manifest")
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as server:
         server.bind(str(path)); server.listen(1); server.settimeout(10)
-        def serve_once():
-            conn,_=server.accept()
-            peer=daemon._kernel_peer(conn)
-            request=decode(conn)
-            slot=BoundedSemaphore(1); slot.acquire()
-            daemon._serve_request(conn,request,slot,peer=peer)
-        thread=Thread(target=serve_once,daemon=True); thread.start()
-        kwargs={k:str(v) if isinstance(v,Path) else v for k,v in args.items()}
-        result=RootControlSystemdTransport(path,timeout_seconds=10).build_call("register",**kwargs)
+        def serve():
+            for _ in range(7):
+                conn,_=server.accept()
+                kernel_peer=daemon._kernel_peer(conn)
+                request=decode(conn)
+                slot=BoundedSemaphore(1); slot.acquire()
+                daemon._serve_request(conn,request,slot,peer=kernel_peer)
+        thread=Thread(target=serve,daemon=True); thread.start()
+        transport=RootControlSystemdTransport(path,timeout_seconds=10)
+        assert transport.build_registration_status(project_root=project,resource_id=RID)=={
+            "resource_id":RID,"state":"absent"}
+        with pytest.raises(RuntimeOperationError,match="unsupported inherited build RPC contract"):
+            transport._request("build_register",project_root=str(project),**kwargs)
+        assert transport.build_registration_status(project_root=project,resource_id=RID)=={
+            "resource_id":RID,"state":"absent"}
+        result=transport.build_call("register",project_root=project,**kwargs)
+        assert result["execution_identity"]==dict(uid=peer[0],gid=peer[1])
+        assert "build_contract" not in result and "build_contract" not in result["intent"]
+        assert transport.build_registration_status(project_root=project,resource_id=RID)==result
+        job=copy.deepcopy(JOB)
+        with pytest.raises(RuntimeOperationError,match="unsupported fields"):
+            transport._request("build_prepare",project_root=str(project),
+                build_contract=BUILD_RPC_CONTRACT,job_id=JID,request=dict(job,execution_user_id=0))
+        assert transport.build_call("start",project_root=project,job_id=JID,request=job)["request"]==job
         thread.join(timeout=10)
         assert not thread.is_alive()
-    assert result["execution_identity"]==dict(uid=peer[0],gid=peer[1])
-    assert "build_contract" not in result and "build_contract" not in result["intent"]
+    props=backend.systemd.properties
+    assert props["User"].value==str(peer[0]) and props["Group"].value==str(peer[1])
+    assert props["PrivateNetwork"].value is True
+    assert props["NoNewPrivileges"].value is True
+    assert props["CapabilityBoundingSet"].value==0
+    assert props["ExecStart"].value==[["/bin/cc",["/bin/cc","$$PATH"],False]]
