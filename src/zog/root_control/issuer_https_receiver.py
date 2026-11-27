@@ -473,10 +473,11 @@ def _validate_operation(record):
         # extension from a protected response.
         if (type(metadata) is not dict or "secret" in metadata
                 or set(metadata) != set(_DELIVERY_PUBLIC_FIELDS)
-                or cd.binding(metadata) != cd.binding(request)
+                or metadata["schema"] != cd.DELIVERY_SCHEMA
+                or metadata["secret_format"] != "base64"
                 or any(metadata[k] != request[k] for k in (
                     "request_id", "authorization_id", "authorization_revision",
-                    "credential_revision"))
+                    "credential_id", "consumer", "purpose", "credential_revision"))
                 or metadata["delivery_id"] != row["delivery_id"]):
             _deny()
     elif row["delivery_id"] is not None:
@@ -555,6 +556,9 @@ def _commit(project, profile, authorization, raw, state, request, metadata,
         "before_sha256": _digest(raw), "ledger": state,
         "ack_payload": payload, "send_payload": payload, "acknowledged": False,
     }
+    # Bound the snapshot before any write; neither file may become unreadable.
+    if len(canonical(state)) + 1 > 65536 or len(canonical(record)) + 1 > 131072:
+        _deny()
     _write_record(project, record)
     _persist_state(project, state)
     return record
@@ -809,6 +813,7 @@ def cancel_pending(project_root, *, private_identity, admission,
         request = operation["request"]
         try:
             if (request["authorization_id"] != auth["authorization_id"]
+                    or request["authorization_revision"] != auth["revision"]
                     or cd.binding(request) != cd.binding(auth)
                     or request["credential_revision"] != auth["credential_revision"]):
                 _deny()
