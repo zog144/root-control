@@ -24,7 +24,7 @@ def test_combined_controller_issuer_and_build_exports():
     assert 'execution_user_id' not in inspect.signature(BuildBackend.register).parameters
     assert 'execution_group_id' not in inspect.signature(BuildBackend.register).parameters
     source = inspect.getsource(BuildBackend.start)
-    assert "'User':" not in source and "'Group':" not in source
+    assert "'User': ('s', str(uid))" in source and "'Group': ('s', str(gid))" in source
 
 
 def test_controller_issuer_requests_are_exactly_selected(tmp_path, monkeypatch):

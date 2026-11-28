@@ -26,6 +26,22 @@ def registered(tmp_path, monkeypatch):
     (source/'input').write_text('source')
     backend=BuildBackend(Systemd(),tmp_path/'privileged')
     backend.test_ownership=ownership
+    # Simulate kernel-authenticated nonroot box-control peer in unit tests.
+    peer=(os.geteuid() or 1001, os.getegid() or 1001)
+    def bound(original):
+        def invoke(**kwargs):
+            kwargs.setdefault('_peer', peer)
+            return original(**kwargs)
+        return invoke
+    backend.register=bound(backend.register)
+    backend.prepare=bound(backend.prepare)
+    backend.start=bound(backend.start)
+    backend.observe=bound(backend.observe)
+    backend.cleanup=bound(backend.cleanup)
+    backend.cancel=bound(backend.cancel)
+    backend.release=bound(backend.release)
+    backend.forget=bound(backend.forget)
+    backend.test_peer=peer
     rid='b'*32
     args=dict(project_root=project,resource_id=rid,prepared_root=root,source_directory=source,output_directory=output,
               input_manifest_id='verified-manifest')
@@ -42,7 +58,7 @@ def test_import_is_private_read_only_and_workspaces_stay_at_caller_paths(registe
     imported=backend.resource_path(args['project_root'],args['resource_id'])/'root'
     assert (imported/'bin/cc').read_text()=='fake compiler'
     assert not (imported/'bin/cc').stat().st_mode & 0o222
-    assert (args['source_directory']/'input',os.geteuid(),os.getegid()) in backend.test_ownership
+    assert not any(path.is_relative_to(args['source_directory']) for path,_,_ in backend.test_ownership)
     (args['prepared_root']/'bin/cc').write_text('changed original')
     backend.register(**args)
     assert (imported/'bin/cc').read_text()=='fake compiler'
@@ -55,7 +71,8 @@ def test_properties_use_existing_identity_and_preserve_finite_network_disabled_e
     assert props['PrivateNetwork'].value is True
     assert props['NoNewPrivileges'].value is True
     assert props['CapabilityBoundingSet'].value==0
-    assert 'User' not in props and 'Group' not in props
+    assert props['User'].value == str(backend.test_peer[0])
+    assert props['Group'].value == str(backend.test_peer[1])
     assert props['RuntimeMaxUSec'].value==8000000
     assert props['TimeoutStartUSec'].value==5000000
     assert props['TimeoutStopUSec'].value==2000000
@@ -223,14 +240,14 @@ def test_registration_rejects_alternate_account_arguments(registered):
         backend.register(**dict(args, execution_user_id=24202))
 
 
-def test_workspace_ownership_uses_running_process_credentials(registered):
+def test_workspaces_are_not_rechowned_or_chmodded_by_privileged_import(registered):
     backend, args, _ = registered
-    assert (args['source_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
-    assert (args['output_directory'], os.geteuid(), os.getegid()) in backend.test_ownership
+    assert not any(path.is_relative_to(args['source_directory'])
+                   or path.is_relative_to(args['output_directory'])
+                   for path,_,_ in backend.test_ownership)
 
 
-@pytest.mark.parametrize(('uid', 'gid'), [(0, 0), (1001, 1002)])
-def test_registration_uses_runtime_credentials_without_nonroot_admission(registered, monkeypatch, uid, gid):
+def test_registered_workspace_uses_authenticated_peer_not_daemon_uid(registered, monkeypatch):
     import shutil
     backend, args, _request = registered
     second = args['project_root'] / 'state/image-build/attempts/two'
@@ -241,13 +258,30 @@ def test_registration_uses_runtime_credentials_without_nonroot_admission(registe
     output = second / 'output'
     source.mkdir()
     output.mkdir()
-    monkeypatch.setattr(os, 'geteuid', lambda: uid)
-    monkeypatch.setattr(os, 'getegid', lambda: gid)
+    monkeypatch.setattr(os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(os, 'getegid', lambda: 0)
     backend.register(project_root=args['project_root'], resource_id='d'*32,
                      prepared_root=prepared, source_directory=source,
                      output_directory=output, input_manifest_id='second-manifest')
-    assert (source, uid, gid) in backend.test_ownership
-    assert (output, uid, gid) in backend.test_ownership
+    assert not any(path == source or path == output
+                   for path,_,_ in backend.test_ownership)
+    assert backend.registration_status(project_root=args['project_root'],
+                 resource_id='d'*32)['execution_identity'] == {
+                     'uid': backend.test_peer[0], 'gid': backend.test_peer[1]}
+
+
+@pytest.mark.parametrize('peer', [(0, 1001), (1001, 0), None, (-1, 0),
+                                  ('1001', 1001), (1001, True), (0, False)])
+def test_build_peer_malformed_and_partial_root_rejected(peer):
+    from zog.root_control.build import authenticated_build_peer
+    with pytest.raises(SystemdBackendError, match='authenticated socket peer'):
+        authenticated_build_peer(peer)
+
+
+def test_build_peer_accepts_existing_root_and_nonroot_pairs():
+    from zog.root_control.build import authenticated_build_peer
+    assert authenticated_build_peer((0, 0)) == (0, 0)
+    assert authenticated_build_peer((1001, 1002)) == (1001, 1002)
 
 
 def test_build_registration_rejects_user_and_group_override_fields(registered):
@@ -285,7 +319,8 @@ def test_systemd_252_preserves_literal_dollars_without_mutating_saved_request(re
     assert 'ExecStartEx' not in props
     assert props['ExecStart'].value == [[
         '/bin/cc', ['/bin/cc', '-v', *(arg.replace('$', '$$') for arg in literals)], False]]
-    assert 'User' not in props and 'Group' not in props
+    assert props['User'].value == str(backend.test_peer[0])
+    assert props['Group'].value == str(backend.test_peer[1])
     assert request == immutable_original
     path = backend.resource_path(args['project_root'], args['resource_id'])
     saved = json.loads((path/'jobs'/('c'*32+'.json')).read_text())

@@ -1,5 +1,6 @@
 import os
 import socket
+import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
@@ -13,6 +14,21 @@ from .events import emit
 from zog.box_control.errors import PersistenceError
 
 DEFAULT_SOCKET = Path("/run/zog/root-control.sock")
+
+# Independently validate the public box-control wire contract at the privilege
+# boundary. This is envelope metadata, never a backend request/identity field.
+BUILD_RPC_CONTRACT = "zog-build-inherited-peer-v2"
+_BUILD_RPC_FIELDS = {
+    "build_register": {"resource_id", "prepared_root", "source_directory",
+                       "output_directory", "input_manifest_id"},
+    "build_prepare": {"job_id", "request"},
+    "build_start": {"job_id", "request"},
+    "build_observe": {"job_id", "build_root_id"},
+    "build_cleanup": {"job_id", "build_root_id"},
+    "build_cancel": {"job_id", "build_root_id", "expected_invocation_id"},
+    "build_release": {"build_root_id"},
+    "build_forget": {"build_root_id"},
+}
 
 
 class RootControlDaemon:
@@ -52,8 +68,11 @@ class RootControlDaemon:
                 while True:
                     conn, _ = server.accept()
                     try:
+                        # Capture kernel credentials on the accepted Unix socket.
+                        # A request field is never used as an execution identity.
+                        kernel_peer = self._kernel_peer(conn)
                         request = decode(conn, deadline=time.monotonic() + 10.0)
-                        self._dispatch(conn, request, workers, slots)
+                        self._dispatch(conn, request, workers, slots, peer=kernel_peer)
                     except Exception as exc:
                         with conn:
                             self._respond(conn, {"ok": False, "error": str(exc)})
@@ -66,20 +85,31 @@ class RootControlDaemon:
         except OSError:
             emit("root-control-response-undelivered", operation=operation, resource_id=resource_id)
 
-    def _dispatch(self, conn, request, workers, slots):
+    @staticmethod
+    def _kernel_peer(conn):
+        raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                              struct.calcsize('3i'))
+        if len(raw) != struct.calcsize('3i'):
+            raise PermissionError('Unix socket peer credentials unavailable')
+        pid, uid, gid = struct.unpack('3i', raw)
+        if pid <= 0 or uid < 0 or gid < 0:
+            raise PermissionError('invalid Unix socket peer credentials')
+        return (uid, gid)
+
+    def _dispatch(self, conn, request, workers, slots, *, peer=None):
         lane = 1 if request.get('operation') in {'application_logs', 'build_job_logs', 'application_processes', 'application_runtime_mounts', 'application_runtime_credentials', 'build_job_processes', 'workspace_verify', 'build_registration_status', 'issuer_observe', 'issuer_inspect_result'} else 0
         if not slots[lane].acquire(blocking=False):
             with conn:
                 self._respond(conn, {"ok": False, "error": "root-control lane busy; retry later"})
             return
         try:
-            workers[lane].submit(self._serve_request, conn, request, slots[lane], time.monotonic())
+            workers[lane].submit(self._serve_request, conn, request, slots[lane], time.monotonic(), peer)
         except BaseException:
             slots[lane].release()
             conn.close()
             raise
 
-    def _serve_request(self, conn, request, slot, queued_at=None):
+    def _serve_request(self, conn, request, slot, queued_at=None, peer=None):
         started = time.monotonic()
         registration = request.get('operation') == 'build_register'
         starting_service = request.get('operation') == 'systemd_start_service'
@@ -95,7 +125,7 @@ class RootControlDaemon:
         try:
             with conn:
                 try:
-                    response = self.handle(request)
+                    response = self.handle(request, peer=peer)
                 except Exception as exc:
                     response = {"ok": False, "error": str(exc), "storage_failure": isinstance(exc, PersistenceError), "code": getattr(exc, "code", None)}
                 if registration:
@@ -112,10 +142,30 @@ class RootControlDaemon:
         finally:
             slot.release()
 
-    def handle(self, request):
+    def handle(self, request, *, peer=None):
         operation = request.get("operation")
-        if operation in {"build_register", "build_prepare", "build_start", "build_observe", "build_cleanup", "build_cancel", "build_release", "build_forget"}:
-            arguments = {k:v for k,v in request.items() if k != "operation"}
+        if operation in _BUILD_RPC_FIELDS:
+            # Only SO_PEERCRED, captured on the connection before queuing,
+            # grants access to build operations. It cannot be set in JSON.
+            from .build import authenticated_build_peer
+            selected = authenticated_build_peer(peer)
+            if set(request) & {'_peer', 'peer', 'peer_identity', 'execution_user_id',
+                               'execution_group_id', 'User', 'Group'}:
+                raise ValueError('caller-selected build identity is forbidden')
+            if (type(request.get("build_contract")) is not str
+                    or request["build_contract"] != BUILD_RPC_CONTRACT):
+                raise ValueError("unsupported inherited build RPC contract")
+            expected = _BUILD_RPC_FIELDS[operation] | {
+                "operation", "project_root", "build_contract"}
+            if set(request) != expected:
+                raise ValueError("unsupported inherited build RPC fields")
+            project = request["project_root"]
+            if (type(project) is not str or "\0" in project
+                    or not Path(project).is_absolute()):
+                raise ValueError("invalid inherited build RPC Project root")
+            arguments = {k: v for k, v in request.items()
+                         if k not in ("operation", "build_contract")}
+            arguments["_peer"] = selected
             return {"ok": True, "result": getattr(self.build, operation[6:])(**arguments)}
         if operation in {"application_processes", "build_job_processes"}:
             from .processes import inspect
@@ -158,6 +208,9 @@ class RootControlDaemon:
                 raise ValueError("unsupported runtime mount inspection arguments")
             return {"ok": True, "result": inspect_runtime_mounts(**arguments)}
         if operation == 'build_registration_status':
+            # Read-only historical/absent status is deliberately unversioned.
+            if set(request) != {"operation", "project_root", "resource_id"}:
+                raise ValueError("unsupported build registration status fields")
             return {'ok': True, 'result': self.build.registration_status(
                 project_root=request['project_root'], resource_id=request['resource_id'])}
         if operation == "build_job_logs":

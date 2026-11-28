@@ -16,7 +16,9 @@ def test_one_runtime_exports_both_capabilities_without_user_selectors():
     assert 'user' not in inspect.signature(BuildBackend.start).parameters
     assert 'group' not in inspect.signature(BuildBackend.start).parameters
     implementation = inspect.getsource(BuildBackend.start)
-    assert "'User':" not in implementation and "'Group':" not in implementation
+    assert "'User': ('s', str(uid))" in implementation
+    assert "'Group': ('s', str(gid))" in implementation
+    assert 'os.geteuid()' not in implementation
 
 
 def test_task_c_submission_intent_preserves_trusted_host_without_special_worker():
