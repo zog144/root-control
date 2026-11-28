@@ -242,8 +242,57 @@ class BuildBackend:
     def resource_path(self, project_root, resource_id):
         return self.area(project_root) / identity(resource_id)
 
+    @staticmethod
+    def _forget_path(path):
+        # Sibling, never inside the recursively deleted resource.
+        return path.with_name(path.name + '.forget.json')
+
+    def _forget_record(self, path):
+        marker = self._forget_path(path)
+        # The configured privileged store and its Project area must not be
+        # writable by callers. In production the daemon's effective UID is 0.
+        for directory in (self.directory, path.parent):
+            try:
+                st = directory.lstat()
+            except FileNotFoundError:
+                return None
+            if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+                    or st.st_mode & 0o022):
+                raise SystemdBackendError('untrusted build forget directory')
+        try:
+            st = marker.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
+                or st.st_mode & 0o077 or st.st_nlink != 1):
+            raise SystemdBackendError('untrusted build forget record')
+        raw = json.loads(marker.read_text())
+        if (type(raw) is not dict or set(raw) != {
+                'schema', 'project_area', 'resource_id', 'execution_identity',
+                'registration_sha256', 'barrier_tokens', 'state'}
+                or type(raw['schema']) is not int or raw['schema'] != 1
+                or raw['project_area'] != path.parent.name
+                or raw['resource_id'] != path.name
+                or raw['state'] not in ('deleting', 'forgotten')
+                or type(raw['registration_sha256']) is not str
+                or not re.fullmatch('[0-9a-f]{64}', raw['registration_sha256'])
+                or type(raw['execution_identity']) is not dict
+                or set(raw['execution_identity']) != {'uid', 'gid'}
+                or type(raw['barrier_tokens']) is not list
+                or any(type(t) is not str or not re.fullmatch('[0-9a-f]{64}', t)
+                       for t in raw['barrier_tokens'])):
+            raise SystemdBackendError('invalid build forget record')
+        selected = raw['execution_identity']
+        authenticated_build_peer((selected['uid'], selected['gid']))
+        return raw
+
+    def _guard_forget(self, path):
+        if self._forget_record(path) is not None:
+            raise SystemdBackendError('build resource deletion pending or already forgotten')
+
     def load(self, project_root, resource_id):
         path = self.resource_path(project_root, resource_id)
+        self._guard_forget(path)
         raw = json.loads((path / 'registration.json').read_text())
         if raw['state'] != 'ready': raise SystemdBackendError('build registration is not ready')
         return path, raw
@@ -271,7 +320,12 @@ class BuildBackend:
 
     def registration_status(self, *, project_root, resource_id):
         """Atomic durable snapshot; safe on the independent inspection lane."""
-        path = self.resource_path(project_root, resource_id) / 'registration.json'
+        resource = self.resource_path(project_root, resource_id)
+        deletion = self._forget_record(resource)
+        if deletion is not None:
+            return {'resource_id': resource_id,
+                    'state': 'forgetting' if deletion['state'] == 'deleting' else 'absent'}
+        path = resource / 'registration.json'
         try:
             record = json.loads(path.read_text())
         except FileNotFoundError:
@@ -283,6 +337,8 @@ class BuildBackend:
         uid, gid = authenticated_build_peer(_peer)
         identity(resource_id)
         root = Path(project_root).resolve()
+        path = self.resource_path(root, resource_id)
+        self._guard_forget(path)
         check_peer_access(root, _peer, 5, label='build Project')
         paths = [Path(p).resolve(strict=True) for p in (prepared_root, source_directory, output_directory)]
         allowed = root / 'state' / 'image-build' / 'attempts'
@@ -299,7 +355,6 @@ class BuildBackend:
             raise SystemdBackendError('verified input manifest identity is required')
         intent = dict(prepared_root=str(paths[0]), source_directory=str(paths[1]), output_directory=str(paths[2]),
                       input_manifest_id=input_manifest_id)
-        path = self.resource_path(root, resource_id)
         manifest = path / 'registration.json'
         ensure_directory(self.directory)
         os.chmod(self.directory, 0o755)
@@ -692,6 +747,7 @@ class BuildBackend:
     def release(self, *, project_root, build_root_id, _peer):
         authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
+        self._guard_forget(path)
         manifest = path/'registration.json'
         if not manifest.exists():
             if (path/'root').exists(): raise SystemdBackendError('unrecorded imported root requires investigation')
@@ -714,17 +770,66 @@ class BuildBackend:
         return record
 
     def forget(self, *, project_root, build_root_id, _peer):
-        authenticated_build_peer(_peer)
+        uid, gid = authenticated_build_peer(_peer)
         path = self.resource_path(project_root, build_root_id)
-        if not path.exists():
-            synchronize_directory(path.parent)
-            return
-        raw = json.loads((path/'registration.json').read_text())
-        assert_bound_registration(raw, _peer)
-        if raw['state'] != 'released': raise SystemdBackendError('cannot forget retained build root')
-        from .journal_barrier import JournalBarrier
-        for job in (path/'jobs').glob('*.json'):
-            token=json.loads(job.read_text()).get('journal_barrier_token')
-            if token: (self.journal_barrier or JournalBarrier()).forget(token)
-        shutil.rmtree(path)
+        marker = self._forget_path(path)
+        record = self._forget_record(path)
+        if record is None:
+            if not path.exists() and not path.is_symlink():
+                # Compatibility for resources forgotten before this protocol.
+                # Absence authorizes no deletion and creates no peer binding.
+                synchronize_directory(path.parent)
+                return
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise SystemdBackendError('invalid build resource directory')
+            registration_bytes = (path/'registration.json').read_bytes()
+            raw = json.loads(registration_bytes)
+            assert_bound_registration(raw, _peer)
+            if raw['resource_id'] != build_root_id or raw['state'] != 'released':
+                raise SystemdBackendError('cannot forget retained build root')
+            tokens = []
+            for job in sorted((path/'jobs').glob('*.json')):
+                info = json.loads(job.read_text())
+                assert_bound_job(info, _peer)
+                if (info.get('process_cleanup_complete') is not True
+                        or info.get('job_id') != job.stem
+                        or info['request']['build_root_id'] != build_root_id):
+                    raise SystemdBackendError('cannot forget unclean or differently bound build job')
+                token = info.get('journal_barrier_token')
+                if token is not None:
+                    if type(token) is not str or not re.fullmatch('[0-9a-f]{64}', token):
+                        raise SystemdBackendError('invalid build journal barrier token')
+                    tokens.append(token)
+            record = dict(schema=1, project_area=path.parent.name,
+                          resource_id=build_root_id,
+                          execution_identity={'uid': uid, 'gid': gid},
+                          registration_sha256=hashlib.sha256(registration_bytes).hexdigest(),
+                          barrier_tokens=sorted(set(tokens)), state='deleting')
+            # No destructive action before a durable authorization record.
+            replace_json(marker, record)
+        elif record['execution_identity'] != {'uid': uid, 'gid': gid}:
+            raise SystemdBackendError('build forget belongs to a different authenticated peer')
+
+        # An earlier atomic replacement could have succeeded before its
+        # directory barrier failed. Re-establish durability before resuming.
         synchronize_directory(path.parent)
+        if record['state'] == 'forgotten':
+            if path.exists() or path.is_symlink():
+                raise SystemdBackendError('forgotten build resource unexpectedly exists')
+            return
+        if path.is_symlink():
+            raise SystemdBackendError('invalid build resource directory')
+        manifest = path/'registration.json'
+        if manifest.exists():
+            if hashlib.sha256(manifest.read_bytes()).hexdigest() != record['registration_sha256']:
+                raise SystemdBackendError('build registration changed during forget')
+        from .journal_barrier import JournalBarrier
+        for token in record['barrier_tokens']:
+            (self.journal_barrier or JournalBarrier()).forget(token)
+        if path.exists():
+            shutil.rmtree(path)
+        synchronize_directory(path.parent)
+        # Keep a compact peer-bound tombstone: a lost reply can be retried
+        # after restart, but the same resource ID can never be registered again.
+        record['state'] = 'forgotten'
+        replace_json(marker, record)
