@@ -6,6 +6,7 @@ PID1 is mocked; client, daemon, local journals and socket are real.
 import json
 import os
 import socket
+import shutil
 import stat
 from pathlib import Path
 from threading import Thread, Event, BoundedSemaphore
@@ -13,6 +14,7 @@ from threading import Thread, Event, BoundedSemaphore
 import pytest
 
 from zog.box_control.api import BoxControl
+from zog.box_control.errors import RecoveryRequired
 from zog.box_control.project import Project
 from zog.box_control.build_jobs import BuildJobs
 from zog.box_control.locking import ProjectLock
@@ -132,9 +134,50 @@ def test_exact_pair_selected_foreign_owned_project(tmp_path, monkeypatch):
             control.release_build_job(job["job_id"])
             control.release_build_root(RID)
             monkeypatch.setattr("time.time", lambda: job["completed_at"] + 49*3600)
+            resource = backend.resource_path(project, RID)
+            journal = control.project.state_dir / "build-pruning.json"
+            original_remove = shutil.rmtree
+            original_respond = daemon._respond
+            faults = []
+            def interrupt_remove(target, *args, **kwargs):
+                if target == resource and not faults:
+                    (resource / "registration.json").unlink()
+                    faults.append("registration-removed")
+                    raise OSError("injected partial privileged deletion")
+                return original_remove(target, *args, **kwargs)
+            def lose_reply(conn, response, **kwargs):
+                if (operations[-1] == "build_forget" and response.get("ok")
+                        and faults == ["registration-removed"]):
+                    faults.append("reply-lost")
+                    return  # The actual server closes the socket without replying.
+                return original_respond(conn, response, **kwargs)
+            monkeypatch.setattr(shutil, "rmtree", interrupt_remove)
+            monkeypatch.setattr(daemon, "_respond", lose_reply)
+            for boundary in ("registration-removed", "reply-lost"):
+                with ProjectLock(control.project.lock_file):
+                    with pytest.raises(RecoveryRequired):
+                        BuildJobs(control).prune()
+                assert faults[-1] == boundary
+                entry = json.loads(journal.read_text())["deletions"][0]
+                assert entry["resource_id"] == RID and entry["forgotten"] is False
+                assert BuildJobs(control).path("resource:" + RID).exists()
+                assert BuildJobs(control).path("job:" + job["job_id"]).exists()
+                if boundary == "registration-removed":
+                    assert resource.exists() and not (resource / "registration.json").exists()
+                    assert list((resource / "jobs").glob("*.json"))
+                    assert json.loads(backend._forget_path(resource).read_text())["state"] == "deleting"
+                else:
+                    assert not resource.exists()
+                    assert json.loads(backend._forget_path(resource).read_text())["state"] == "forgotten"
+                # Reconstruct the privileged backend: recovery must depend on disk.
+                backend = BuildBackend(sys, backend.directory)
+                daemon.build = backend
             with ProjectLock(control.project.lock_file):
                 BuildJobs(control).prune()
-            assert not backend.resource_path(project, RID).exists()
+            assert not resource.exists() and not journal.exists()
+            assert not BuildJobs(control).path("resource:" + RID).exists()
+            assert not BuildJobs(control).path("job:" + job["job_id"]).exists()
+            assert operations.count("build_forget") == 3
             assert set(operations) == {"build_" + op for op in (
                 "register", "registration_status", "prepare", "start", "observe",
                 "cleanup", "cancel", "release", "forget")}
